@@ -151,12 +151,10 @@ export interface Clock {
 /**
  * 配置适配层看到的编排层窄端口。
  *
- * 组件适配只用这三件事：关闭边沿的命名操作、配置变化后的协调、以及被同步替换时的一次调度。
+ * 组件适配只用这两件事：配置变化后的协调，以及被同步替换时的一次调度。
  * `Manager` 在结构上满足它，因此不需要转发类，依赖方向也不必为它破例。
  */
 export interface ConfigurationHost {
-  /** 关闭边沿的命名操作：只结算并取消进行中的刷新要求。 */
-  cancelRefresh(handle: Handle): void
   /** 按最新配置快照协调一个句柄。 */
   reconcile(handle: Handle): void
   /** 安排一次合并调度。 */

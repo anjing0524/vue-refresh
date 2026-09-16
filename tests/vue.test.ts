@@ -133,21 +133,23 @@ for (const initiallyEnabled of [true, false]) test('F10/B05: enabled ' + initial
   const f = fixture((_, errors) => ({ enabled, every: 100_000, onError: e => { errors.push(e) } }))
   try {
     f.task.submit({ symbol: 'A' }); await tick()
-    const refreshing = f.task.refresh()                    // 未结算的刷新要求
+    // 先结算订阅首查（暂停页没有订阅时这里没有请求），把断言隔离到「刷新前没有在途任务」；
+    // 重复 resolve 是 no-op，因此不必判断是否已结束。
+    for (const call of f.calls) call.resolve({ price: 0 })
     await tick()
-    assert.equal(f.calls.length, 1)
-    unreadable = true; trigger()                           // 未知不覆盖边沿历史
-    unreadable = false; readValue = false; trigger()
-    if (initiallyEnabled) {
-      // true→未知→false：关闭边沿结算未完成的刷新要求。
-      assert.deepEqual(await refreshing, { status: 'cancelled', reason: 'unavailable' })
-      assert.ok(f.calls[0]!.signal.aborted)
-    } else {
-      // false→未知→false：暂停期间的单次刷新继续执行。
-      f.calls[0]!.resolve({ price: 1 }); await tick()
-      assert.deepEqual(await refreshing, { status: 'success' })
-      assert.equal(f.task.display.value!.data.price, 1)
-    }
+    const before = f.calls.length
+    const refreshing = f.task.refresh()
+    await tick()
+    assert.equal(f.calls.length, before + 1)               // 刷新登记了一次请求
+    unreadable = true; trigger()                           // 未知不猜 false：按无效快照报一次
+    unreadable = false; readValue = false; trigger()        // false 边沿只按资格退订
+    assert.equal(f.errors.length, 1); assert.equal(f.errors[0]!.origin, 'configuration')
+    const last = f.calls.at(-1)!
+    assert.equal(last.signal.aborted, false)               // enabled 边沿不取消已发起的刷新
+    assert.equal(f.core.inspect().resources.length, 1)      // 等待者保活实例
+    last.resolve({ price: 1 }); await tick()
+    assert.deepEqual(await refreshing, { status: 'success' })
+    assert.equal(f.task.display.value!.data.price, 1)
   } finally { f.app.unmount() }
 })
 

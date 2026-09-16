@@ -212,7 +212,8 @@ export class Manager {
   private synchronize(handle: Handle): void {
     if (this.disposed || handle.disposed) return
     const input = handle.readInput()
-    if (!this.present(handle)) this.cancelRefresh(handle)
+    // 失去存在（失活、隐藏）才结算本页未完成的刷新要求；`enabled` 边沿不参与。
+    if (!this.present(handle)) this.settleRefreshes(handle, CancelReason.Unavailable)
 
     const subscription = handle.subscription
     if (!this.eligible(handle, input)) {
@@ -268,15 +269,6 @@ export class Manager {
   /** 登记句柄的作用域释放回调；至多一个，句柄释放时执行。 */
   setHandleCleanup(handle: Handle, cleanup: () => void): void {
     handle.cleanup = cleanup
-  }
-
-  /**
-   * 关闭边沿的命名操作：结算并取消本页进行中的刷新要求，其余需求不受影响。
-   *
-   * 适配层因此不必自己取等待者、判断归属；`settleWaiter` 也不必对外可见。
-   */
-  cancelRefresh(handle: Handle): void {
-    this.settleRefreshes(handle, CancelReason.Unavailable)
   }
 
   /** 结算并移除本页全部未结算的刷新要求；只由命名操作与释放路径调用。 */

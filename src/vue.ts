@@ -82,12 +82,12 @@ function readConfiguration(
  * - Display 由这里唯一的 shallowRef 持有，核心只通过 publish 整体替换。
  */
 /**
- * 组件配置的适配层状态机：快照、关闭边沿、连续非法配置的通知去重，以及唯一的配置 watcher。
+ * 组件配置的适配层状态机：快照、连续非法配置的通知去重，以及唯一的配置 watcher。
  *
- * 这三项状态天生只属于适配层：核心只拿到一个电平快照，拿不到「上一次的 enabled」，也不该
- * 关心通知去重。`snapshot` 由调用方持有，因为 `Handle.readInput` 必须先于本函数建立。
+ * 这两项状态天生只属于适配层：核心只拿到一个电平快照，也不该关心通知去重。
+ * `snapshot` 由调用方持有，因为 `Handle.readInput` 必须先于本函数建立。
  *
- * 回调顺序固定，不能改：先写快照 → 处理边沿与错误阶段 → 按操作号是否被替代决定后续动作。
+ * 回调顺序固定，不能改：先写快照 → 处理错误阶段 → 按代次是否被替代决定后续动作。
  * `onError` 可能同步引发新的配置变化，旧回调不得再覆盖它，但仍要安排一次调度。
  */
 function createConfigurationBinding(
@@ -96,17 +96,11 @@ function createConfigurationBinding(
   options: Pick<RefreshOptions, 'enabled' | 'every' | 'visible'>,
   snapshot: { current: Input },
 ): () => void {
-  // 边沿信息天生只在适配层：核心只拿到电平（当前配置），拿不到「上一次的 enabled」。
-  let lastEnabled: boolean | undefined
   let reported = false
 
   return watch(() => readConfiguration(options), input => {
     const operationId = handle.operationId
     snapshot.current = input
-
-    const closed = lastEnabled === true && input.enabled === false
-    if (input.enabled !== null) lastEnabled = input.enabled
-    if (closed) manager.cancelRefresh(handle)
 
     if (input.valid) {
       reported = false

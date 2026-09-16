@@ -37,9 +37,8 @@ function fixture(maxConcurrent = 2, onStart?: () => void) {
       cleanup: null, operationId: 0, submission: null, subscription: null, refreshes: new Set(),
       lifecycleActive: true, disposed: false }
     function set(next: Input) {
-      const old = current; current = next
-      // 与适配层同一条规则：关闭边沿只调用核心的命名操作，不自己判断归属与取消原因。
-      if (old.enabled === true && next.enabled === false) manager.cancelRefresh(handle)
+      current = next
+      // 与适配层同一条规则：只提交最新的电平快照，不做边沿判断。
       manager.reconcile(handle)
     }
     manager.addHandle(handle)
@@ -308,11 +307,12 @@ test('A07/B06/P08/A01: 刷新入口闸——未声明身份、配置非法、失
   } finally { f.manager.dispose() }
 })
 
-test('Q07/D01/D02/D04/F09/L10: 刷新要求随隐藏、暂停边沿与卸载作废；恢复不重放刷新', async () => {
+test('Q07/D01/D02/D04/F09/L10: 刷新要求随隐藏与卸载作废、不受暂停影响；恢复不重放刷新', async () => {
   const f = fixture(), a = f.page()
   try {
     a.submit({ x: 1 }); await tick()
     f.calls[0]!.resolve({ v: 'base' }); await tick()
+    // 隐藏：结算未完成的刷新要求、退订并销毁实例。
     const hidden = a.refresh(); await tick()
     assert.equal(f.calls.length, 2)
     f.manager.setBrowserVisible(false)
@@ -325,23 +325,29 @@ test('Q07/D01/D02/D04/F09/L10: 刷新要求随隐藏、暂停边沿与卸载作�
     assert.equal(f.calls.length, 3)
     f.calls[2]!.resolve({ v: 'recovered' }); await tick()
     assert.deepEqual(a.display!.data, { v: 'recovered' })
-    // 暂停边沿（true→false）结算未完成的刷新要求。
+    // 暂停边沿只按资格退订：已发起的刷新要求与在途请求都继续。
     const paused = a.refresh(); await tick()
     assert.equal(f.calls.length, 4)
     a.set({ ...active, enabled: false })
-    assert.deepEqual(await paused, { status: 'cancelled', reason: 'unavailable' })
-    assert.ok(f.calls[3]!.signal.aborted)
-    f.calls[3]!.resolve(null); await tick()
-    // 暂停之后再刷新仍允许（false→false 不构成关闭边沿）。
+    assert.equal(a.handle.subscription, null)
+    assert.equal(a.handle.refreshes.size, 1)
+    assert.equal(f.calls[3]!.signal.aborted, false)
+    f.calls[3]!.resolve({ v: 'paused-once' }); await tick()
+    assert.deepEqual(await paused, { status: 'success' })
+    assert.deepEqual(a.display!.data, { v: 'paused-once' })
+    assert.equal(a.input.enabled, false)                   // 刷新不恢复自动刷新
+    // 暂停之后再刷新仍允许。
     const once = a.refresh(); await tick()
     assert.equal(f.calls.length, 5)
     f.calls[4]!.resolve({ v: 'once' }); await tick()
     assert.deepEqual(await once, { status: 'success' })
-    assert.deepEqual(a.display!.data, { v: 'once' })
     assert.deepEqual(f.manager.inspect().resources, [])    // 结算后无人订阅与要求 → 清理
-    // 卸载：句柄释放后不再接纳刷新。
+    // 卸载：未结算的要求结算为 disposed，在途请求被取消。
+    const dangling = a.refresh(); await tick()
+    assert.equal(f.calls.length, 6)
     f.manager.removeHandle(a.handle)
-    assert.deepEqual(await a.refresh(), { status: 'cancelled', reason: 'disposed' })
+    assert.deepEqual(await dangling, { status: 'cancelled', reason: 'disposed' })
+    assert.ok(f.calls[5]!.signal.aborted)
   } finally { f.manager.dispose() }
 })
 

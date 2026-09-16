@@ -39,7 +39,7 @@ index.ts                  包入口（只导出三个正式函数与公共类型
 | `source.ts` | 固定定义、冻结快照与稳定键、只读定位 |
 | `delivery.ts` | 结果复制、通知异常隔离（诊断出口与返回值观察在 `diagnostics.ts`） |
 | `diagnostics.ts` | `FrameworkIdentity`、`reportObserverError`、`observeRejection`；零依赖 |
-| `vue.ts` | 配置快照读取以 `createConfigurationBinding` 为唯一入口（快照、关闭边沿、通知去重、watcher 四件事在同处），加句柄建立、生命周期与 Display 绑定；配置绑定只经 `ConfigurationHost` 窄端口（3 项事实）访问编排层 |
+| `vue.ts` | 配置快照读取以 `createConfigurationBinding` 为唯一入口（快照、通知去重、watcher 三件事在同处），加句柄建立、生命周期与 Display 绑定；配置绑定只经 `ConfigurationHost` 窄端口（2 项事实）访问编排层 |
 | `store.ts` | 分区替换、删除与私有 Store 释放 |
 | `app.ts` | 安装绑定、可见性监听、只读快照、销毁 |
 | `scheduler.ts` | 唯一 Timer、FIFO 队列、真实并发槽位、活跃 Resource 遍历；只经 `ScheduleHost`（5 项事实）回调编排层 |
@@ -53,8 +53,7 @@ index.ts                  包入口（只导出三个正式函数与公共类型
 
 ```text
 useRefresh（组件 setup）
-  ├─ 配置变化 → readConfiguration → Input 快照 → applyConfigurationEvents（关闭边沿）
-  │                                               → manager.cancelRefresh → manager.reconcile
+  ├─ 配置变化 → readConfiguration → Input 快照 → manager.reconcile（按资格撤销或保留订阅）
   ├─ submit   → manager.submit → 新 declaration（operationId）→ prepareParameters
   │                            → Submission → requestFlush
   ├─ refresh  → manager.refresh → 入口闸（销毁／配置非法／失活或隐藏／无身份）
@@ -77,13 +76,12 @@ settleWaiter → 从两侧集合移除后结算 success／error／cancelled；�
 enqueueTask→ 分配新版本 → 登记 Task（全部调用点都确认没有当前任务，因此不替换、不 abort 在途）
 startTask  → source.load → copyResult → publishResult（记录时间、写 Store、按收货方 deliver）
                                      └ publishError（逐有效订阅 notify，并按失败结算刷新要求）
-cancelRefresh   → 关闭边沿的命名操作：结算并移除本页未完成的刷新要求
 releaseSubscription → 退订；最后一个订阅与刷新要求都退出时删除实例、分区与排队任务
 readSnapshot    → 算 key → 读分区 → 独立副本（不建实例、不保活）
 ```
 
 需求侧对应：`U01/U03` → `submit`、`commitDeclaration` 与 `sameIdentity`；`U04` → `refresh` 入口闸与附条 A 的刷新要求；
-`U05/U06/U10` → `refreshFloor`／`refillWaiters`／`settleWaiter`；`U07/U18/U25` → 配置快照、`cancelRefresh` 关闭边沿与 `eligible`；
+`U05/U06/U10` → `refreshFloor`／`refillWaiters`／`settleWaiter`；`U07/U18/U25` → 配置快照与 `eligible`；
 `U08/U21` → `releaseActivity`、`removeHandle`、`dispose`；`U11–U14` → `enqueueTask` 与 `Scheduler` 的 `flush`、`dueAt`、`enqueueDue`；
 `U15/U19` → `publishError`、`notify` 与 observer；`U16/U17` → `deliver` 与 `readSnapshot`。
 
@@ -138,7 +136,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | Manager | `handles` / `resources` 空集合；`issuedResourceId=0`（同样存最后一个已分配的序号）；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `cancelRefresh` / `reconcile` / `requestFlush` / `submit` / `refresh` / `readSnapshot` / `dispose`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
 | Scheduler | `queue` / `running` 空集合；`cancelTimer=null`；`flushPending=false`；构造时注入 Resource 注册表 | **全部 `private`**：对外只有 `add` / `cancel` / `release` / `requestFlush` / `inspect` / `dispose`；回到编排层只经 `ScheduleHost` 的 5 个回调（销毁、协调句柄、登记任务、任务身份、执行任务）。销毁事实由该端口的 `isDisposed()` 现读，不另存镜像字段 |
 | Clock | `now`（单调，调度）、`timestamp`（墙钟，交付时间）、`setTimer` 返回取消函数 | Vue 闭包拥有平台 Timer ID，Scheduler 只持有取消能力；两个时间域不互相替代 |
-| 配置边沿与快照状态 | `snapshot.current`（配置快照，初值无效）、`lastEnabled`（`undefined`）、`reported`（`false`） | 字段名见 `vue.ts`；只在 Vue 适配闭包内，随组件作用域释放。`snapshot.current` 同时是 `Handle.readInput` 返回的唯一事实，核心不重新调用 getter |
+| 配置快照与通知状态 | `snapshot.current`（配置快照，初值无效）、`reported`（`false`） | 字段名见 `vue.ts`；只在 Vue 适配闭包内，随组件作用域释放。`snapshot.current` 同时是 `Handle.readInput` 返回的唯一事实，核心不重新调用 getter。适配层不保存 `enabled` 的历史：边沿不参与任何决策 |
 
 ### 3.4 事件与主流程
 
@@ -146,7 +144,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 |---|---|---|
 | `submit` 接纳 | 只推进 `operationId`；校验通过后才建立新声明、释放被替换的订阅与刷新要求 | 校验失败不改动任何状态；旧 abort / Store 通知可能重入，替换后复核代次 |
 | 准备参数成功 | 保存 Parameters 作为已声明身份 | 参数准备只执行一次；`validate` 结束后复核代次 |
-| 配置变化 | Vue 先更新快照并处理关闭边沿，核心撤销不合格订阅或替换任务 | `onError` / abort 可能重入；判断函数本身无外部效果 |
+| 配置变化 | Vue 先更新快照，核心按资格撤销或保留订阅（改频率只更新间隔） | `onError` / abort 可能重入；判断函数本身无外部效果 |
 | `refresh` 接纳 | 建立刷新要求（版本下限）并在没有当前任务时登记一次共享任务 | 与自动刷新同一条路径；不复制第二份 DTO |
 | `refresh` 退出 | 结算 `unavailable`，移除要求，保留已声明身份 | D01 恢复按订阅规则，不重放刷新、不重新准备参数 |
 | 后台成功 | 准备副本、记录结束时间与产生时间、写 Store、交付给有效订阅与满足门槛的刷新要求 | 每次外部写入后复核当前 Task、订阅与要求 |
@@ -341,8 +339,9 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 ### 6.1 配置快照与边沿
 
 - watch 源只读 `enabled` / `every` / `visible`，各 getter 独立捕错；
+- 核心只拿到电平快照，适配层不保留 `enabled` 的历史：`true→false` 与 `false→false` 无差别；
   它们必须同步、纯，并正确暴露响应式依赖。
-- watch 同步回调先替换局部 configuration 快照，再处理已知关闭边沿、通知错误、同步 Manager。
+- watch 同步回调先替换局部 configuration 快照，再处理错误阶段、同步 Manager。
 - 核心 `readInput` 只返回该快照，不重新调用 getter。
 - 快照是适配结果，不是可独立修改的第二份 `enabled` 意愿。
 - 未知 `enabled` 不覆盖上次成功读值：`true→未知→false` 取消当时查询；
@@ -355,7 +354,7 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 - `mounted` / `activated` 恢复资格，`deactivated` / scope dispose 撤销；
   两者可能交叠（KeepAlive），因此进入与退出都必须幂等。
 - 浏览器隐藏同步退订，恢复仅在 `enabled` 仍为开时加入。
-- 暂停后仍允许显式 `refresh`；`true→false` 的关闭边沿结算当时未完成的刷新要求。
+- 暂停后仍允许显式 `refresh`；`enabled` 边沿只按资格退订，不取消已发起的刷新要求。
 - 生命周期取消不报查询失败、不修改开启意愿。
 - 重新显示时：Resource 仍在则交付已有数据并按间隔调度；已删除则重建并首查。
   用户手动关闭时不恢复。
