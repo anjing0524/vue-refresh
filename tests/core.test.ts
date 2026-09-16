@@ -579,6 +579,19 @@ test('sequence exhaustion: all three counters dispose the manager once and cance
   } finally { restore() }
 })
 
+test('disposed manager: a flush request from any port is inert and schedules nothing', async () => {
+  const f = fixture(), a = f.page()
+  a.submit({ x: 1 }); await tick()
+  assert.equal(f.calls.length, 1)
+  f.manager.dispose()
+  f.manager.requestFlush()
+  assert.equal(f.manager.inspect().pendingFlush, false)
+  await tick()
+  assert.equal(f.manager.inspect().scheduled, false)
+  assert.equal(f.manager.inspect().queued.length, 0)
+  assert.equal(f.timers.size, 0)
+})
+
 test('T01/T02/T04/T06/T07/C09: min interval, full wait after settlement, segmented timer', async () => {
   const f = fixture(), a = f.page(), b = f.page({ ...active, every: 500 })
   a.submit({ x: 1 }); b.submit({ x: 1 }); await tick()

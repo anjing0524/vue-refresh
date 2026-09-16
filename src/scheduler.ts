@@ -32,7 +32,6 @@ export class Scheduler {
   /** 唯一 Timer 的取消函数；字段保存的就是取消句柄，调用即取消。 */
   private cancelTimer: (() => void) | null = null
   private flushPending = false
-  private disposed = false
 
   constructor(
     clock: Clock,
@@ -73,7 +72,7 @@ export class Scheduler {
 
   /** 安排一次 flush；同一轮内的多次请求合并成一次微任务。 */
   requestFlush(): void {
-    if (this.disposed || this.flushPending) return
+    if (this.host.isDisposed() || this.flushPending) return
     this.flushPending = true
     queueMicrotask(() => this.flush())
   }
@@ -95,7 +94,6 @@ export class Scheduler {
 
   /** 停止调度：幂等。排队任务全部作废；已启动的任务由各自的 finally 释放槽位。 */
   dispose(): void {
-    this.disposed = true
     this.clearTimer()
     this.queue.clear()
   }

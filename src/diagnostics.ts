@@ -31,9 +31,9 @@ export function reportObserverError(
   identity: FrameworkIdentity = {},
 ): void {
   const event: Record<string, unknown> = { origin: 'observer', error: reason }
-  for (const field of ['operationId', 'resourceId', 'taskVersion'] as const) {
-    if (identity[field] !== undefined) event[field] = identity[field]
-  }
+  if (identity.operationId !== undefined) event.operationId = identity.operationId
+  if (identity.resourceId !== undefined) event.resourceId = identity.resourceId
+  if (identity.taskVersion !== undefined) event.taskVersion = identity.taskVersion
   try {
     console.error('[vue-refresh]', event)
   } catch {

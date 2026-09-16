@@ -584,7 +584,6 @@ export class Manager {
     this.handles.delete(handle)
 
     const previous = handle.activity
-    handle.activity = null
     handle.submission = null
     // 先取走再执行：回调可能重入并读到这个句柄。
     const cleanup = handle.cleanup
@@ -609,7 +608,6 @@ export class Manager {
     if (cleanup) observe(cleanup)
 
     for (const handle of [...this.handles]) this.removeHandle(handle)
-    this.resources.clear()
     observe(() => this.store.dispose())
   }
 

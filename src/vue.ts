@@ -45,33 +45,33 @@ function readConfiguration(
   let enabled: boolean | null = null
   let visible: boolean | null = null
   let every: number | undefined
-  const errors: unknown[] = []
+  let failure: unknown
 
   // 三项各自独立捕错：一个 getter 抛错不能掩盖其余项的依赖收集。
   try {
     enabled = readBoolean(options.enabled, 'enabled')
   } catch (error) {
-    errors.push(error)
+    failure ??= error
   }
 
   try {
     // 缺省视为可见：`undefined` 直接短路，不产生对这一项的依赖。
     visible = readBoolean(options.visible === undefined ? true : options.visible, 'visible')
   } catch (error) {
-    errors.push(error)
+    failure ??= error
   }
 
   try {
     every = readEvery(options.every)
   } catch (error) {
-    errors.push(error)
+    failure ??= error
   }
 
   if (enabled !== null && visible !== null && every !== undefined) {
     return { valid: true, enabled, visible, every }
   }
   // 读不到的开关或可见性保留为 null，绝不推断成 false。
-  return { valid: false, enabled, visible, error: errors[0] }
+  return { valid: false, enabled, visible, error: failure }
 }
 
 /**
