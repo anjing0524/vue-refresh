@@ -1,7 +1,7 @@
 // Documentation/code consistency gate. Read-only: it never rewrites a file.
 // Checks what actually drifted before: the module manifest, the dependency direction,
-// the public-contract mirror in the unified document, the README metrics row, and the
-// unified document's own section numbering.
+// the public-contract mirror in the unified document, the README metrics row, the
+// unified document's own section numbering, and the §0 vocabulary table's forms.
 // The unified document lives in this repository root, so the check is self-contained.
 // Usage: pnpm check:docs
 import { execFileSync } from 'node:child_process'
@@ -265,6 +265,49 @@ for (const line of design.split('\n')) {
   })
 }
 
+// 13) §0 is the document's lookup table, so it must behave like one. (a) Every row must offer at
+//     least one form the rest of the document actually uses: 11 rows once registered `订阅声明/声明`,
+//     `数据身份`, `P / T`, `Parameters`, `Task / load`, `StoreEntry`, … while the rules said 声明,
+//     身份, 参数快照, 任务, 分区 instead — a table you cannot look anything up in. (b) No form may be
+//     registered twice: `刷新要求` sat in both §0.1 and §0.2 with the same opening sentence, and the
+//     §0.2 copy leaked the internal version floor. (c) §0 states outward meaning only, so no
+//     internal-only field name may appear in it. Forms come from the first column of the tables whose
+//     header is `名称`; §0.1's disambiguation table has its own header and is not a row source, but it
+//     is §0 text and still counts for (c). The §2.2 code block is skipped in (a): every public type
+//     name appears there by definition, so counting it would make the check vacuous.
+const vocabulary = design.slice(design.indexOf('## 0. 名词解释'), design.indexOf('## 1. 目标与范围'))
+const vocabularyRows = []
+let tableHeader = null
+for (const line of vocabulary.split('\n')) {
+  if (!line.startsWith('|')) { tableHeader = null; continue }
+  if (tableHeader === null) { tableHeader = line; continue }
+  if (/^\|[-: |]+\|$/.test(line)) continue
+  if (/^\| 名称 \|/.test(tableHeader)) vocabularyRows.push(line.split('|')[1].trim())
+}
+const formsOf = cell => cell.replace(/`/g, '').split(' / ')
+  .map(part => part.replace(/（[^）]*）?\s*$/, '').trim()).filter(Boolean)
+const documentBody = design.slice(design.indexOf('## 1. 目标与范围'))
+  .replace(/### 2\.2[\s\S]*?```[\s\S]*?```/, '')
+for (const cell of vocabularyRows) {
+  const forms = formsOf(cell)
+  check(forms.some(form => documentBody.includes(form)), '统一刷新管理.md §0',
+    `vocabulary row "${cell}" is dead: no form of it appears outside §0; register the form the rules use`)
+}
+const allForms = vocabularyRows.flatMap(formsOf)
+for (const form of new Set(allForms)) {
+  const count = allForms.filter(value => value === form).length
+  check(count === 1, '统一刷新管理.md §0', `vocabulary form "${form}" is registered ${count} times`)
+}
+// Field names owned by DESIGN §3.3. Add one here when that table gains a persistent field; leaving it
+// out would only weaken (c), never fail it.
+const INTERNAL_FIELDS = ['operationId', 'minVersion', 'issuedVersion', 'issuedResourceId',
+  'lastSettledAt', 'lifecycleActive', 'waiters', 'subscribers', 'refreshes', 'flushPending',
+  'cancelTimer', 'browserVisible', 'controller', 'settle', 'cleanup', 'reported']
+for (const field of INTERNAL_FIELDS) {
+  check(!vocabulary.includes(field), '统一刷新管理.md §0',
+    `§0 states outward meaning only, but names the internal field ${field} (DESIGN §3.3)`)
+}
+
 if (problems.length) {
   for (const problem of problems) console.error('[docs]', problem)
   process.exit(1)
@@ -275,5 +318,5 @@ console.log(execFileSync(process.execPath, [`${root}/scripts/trace-leaves.mjs`],
 console.log(`[docs] consistent: ${modules.length} modules, contract mirror, README metrics, `
   + `${declared.size} trigger anchors, capability blocks, `
   + `dependency direction, published entry, manager sections, ${TOPIC_CITATIONS.length} topic citations, `
-  + `${leaves.size} layered leaves, `
+  + `${vocabularyRows.length} vocabulary rows, ${leaves.size} layered leaves, `
   + `${peerTypeEdges} peer type edges, ${backTypeEdges} type-only back edges`)

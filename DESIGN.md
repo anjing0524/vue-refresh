@@ -105,7 +105,7 @@ flowchart LR
   Handle --> Display[Vue publish 端口 → Display]
 ```
 
-Source 的生命周期是应用定义；Resource 的生命周期从首个有效订阅到最后退出。
+Source 的生命周期是应用定义；Resource 的生命周期从首个有效订阅或刷新要求到最后退出。
 两者不能因名字相似而合成一个可变对象。
 `Subscription` 是周期需求，`RefreshWaiter` 是一次性刷新要求：两者互不排斥，可同时挂在同一 Resource 上，交付时按句柄去重。
 
@@ -179,7 +179,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | 同一个实例上多个未满足要求 | 各自保留，携带相同或不同的 `minVersion` | 任务成功时结算所有 `minVersion ≤ 本次版本` 的要求，更高的留待后继任务 |
 | 任务成功 | 满足门槛的要求结算 `success` 并移除 | 先交付（含仅由刷新要求产生的接收者），再结算；同一句柄只交付一次 |
 | 任务失败 | 该实例全部未结算要求结算 `error` / `background` 并移除 | 旧画面保留，订阅与开启意愿保留，下个周期继续 |
-| 页面退出 / 暂停边沿 / 卸载 / 销毁 | 相应要求结算 `cancelled`（`unavailable` / `disposed`）并移除 | 取消立即结算，不等底层结束 |
+| 失去存在（失活、隐藏）/ 卸载 / 销毁 | 相应要求结算 `cancelled`（`unavailable` / `disposed`）并移除；`enabled` 边沿不结算 | 取消立即结算，不等底层结束 |
 | 实例再无订阅与要求 | 随最后一个要求移除而销毁实例（分区、排队任务、abort） | 与「最后需求退出即清理」一致，不引入 TTL 或历史缓存 |
 
 刷新要求不携带 DTO：结果仍只经 `display` 交付；`refresh` 的 Promise 只报结算。
@@ -414,6 +414,6 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 
 `pnpm typecheck` → `pnpm test` → `pnpm build` → `pnpm build:demo` → `pnpm test:browser`；
 `pnpm complexity` 输出每文件与函数的行数、结构分支、圈复杂度和嵌套深度；
-`pnpm check:docs` 的 12 项一致性门禁，清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准。
+`pnpm check:docs` 的 13 项一致性门禁，清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准。
 实际执行环境与已通过项见 [README](./README.md)「实际验证与边界」。
 测试预期属于契约，修正测试前先确认契约。
