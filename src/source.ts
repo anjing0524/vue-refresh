@@ -1,6 +1,6 @@
 import stringify from 'fast-json-stable-stringify'
 import { observeRejection } from './diagnostics.ts'
-import type { DeepReadonly, RefreshLoadContext, RefreshSource } from './public-types.ts'
+import type { ReadonlySnapshot, RefreshLoadContext, RefreshSource } from './public-types.ts'
 
 /**
  * 固定资源定义与参数边界。
@@ -35,8 +35,8 @@ export interface SourceRuntime {
  * definition 必须是应用级常量；在渲染或提交中重建会得到新的共享身份。
  */
 export function defineRefresh<P extends object, T>(definition: {
-  readonly load: (args: DeepReadonly<P>, context: RefreshLoadContext) => Promise<T>
-  readonly validate?: (args: DeepReadonly<P>) => boolean
+  readonly load: (args: ReadonlySnapshot<P>, context: RefreshLoadContext) => Promise<T>
+  readonly validate?: (args: ReadonlySnapshot<P>) => boolean
 }): RefreshSource<P, T> {
   // 不冻结调用方对象，只冻结框架自己持有的这一份。
   const source = Object.freeze({ load: definition.load, validate: definition.validate })

@@ -3,11 +3,19 @@ import { reportObserverError } from './diagnostics.ts'
 import { Scheduler } from './scheduler.ts'
 import type { Parameters, SourceRuntime } from './source.ts'
 import type {
-  Clock, Handle, Input, ManagerInspection, RefreshWaiter, Resource, ResultStore, ScheduleHost,
-  StoreEntry, Subscription, Task, ValidInput,
+  Clock, EnabledInput, Handle, Input, ManagerInspection, RefreshWaiter, Resource, ResultStore, ScheduleHost,
+  StoreEntry, Subscription, Task,
 } from './model.ts'
 import { CancelReason, ErrorOrigin, RequestOrigin } from './public-types.ts'
 import type { RefreshResult, SubmitResult } from './public-types.ts'
+
+/**
+ * 框架侧单次 `load` 的上限（毫秒）：**从任务真正开始执行起算**，排队等待不计入。
+ *
+ * 数值由确认人给出（2026-09-16 裁决）。到期按共享请求失败结算并立即出册，因此一个永不结束的
+ * 请求不会永久占住并发槽位；计时走可控时钟，测试可以确定性推进。见 DESIGN §5.2、统一文档 U13。
+ */
+const LOAD_TIMEOUT_MS = 10_000
 
 /** 一次成功结果的全部收货方；订阅与刷新要求在同一处收齐，同一句柄只交付一次。 */
 interface Publisher {
@@ -35,7 +43,7 @@ interface Publisher {
  * 而不是靠约定。
  *
  * 全文反复出现的一条顺序约束：**先建立新身份（新 operationId / 新 Task / 新订阅），
- * 再触发会同步重入的外部效果（abort、Store 通知、publish、onError）。**
+ * 再触发会同步重入的外部效果（abort、Store 通知、publish、onError、上限到期的结算）。**
  * 每一步之后都要重新复核当前身份，旧执行只允许清理自己。
  */
 export class Manager {
@@ -125,7 +133,7 @@ export class Manager {
       // 无效声明不改动任何状态：旧声明、订阅与未结算的刷新要求原样保留。
       if (!this.currentOperation(handle, id)) return this.supersededResult(handle)
       handle.operationId = previousId
-      notify(handle, { origin: ErrorOrigin.Validation, error }, { operationId: id })
+      notify(handle, { origin: ErrorOrigin.Validation, error, operationId: id }, { operationId: id })
       return { status: 'rejected', error }
     }
     // prepare 或 validate 可能同步提交了新声明；被替代时由新声明拥有结果。
@@ -377,9 +385,16 @@ export class Manager {
    *
    * 只有 `load` 的正常结束才推进调度时间与并发槽位；取消只是逻辑失效，
    * 物理槽位只在 finally 释放，旧任务的 finally 也只能释放自己。
+   *
+   * 另有一层框架侧上限：从开始执行起算，到期由 {@link expireTask} 结算并立即出册，
+   * 因此一个永不结束的 `load` 不能永久占住槽位。计时走 {@link Clock}，排队等待不计入。
    */
   private async startTask(task: Task): Promise<void> {
     const resource = task.resource
+    const cancelTimeout = this.clock.setTimer(() => this.expireTask(task), LOAD_TIMEOUT_MS)
+    // 任务一旦被 abort（释放实例、替换、上限自己），上限计时就没有意义：取消它。
+    // 挂在 signal 上而不是新增字段，是因为「这次执行的取消通道」本来就是 controller。
+    task.controller.signal.addEventListener('abort', cancelTimeout, { once: true })
     try {
       const raw = await resource.source.load(resource.parameters.args, { signal: task.controller.signal })
       if (!this.currentTask(task)) return
@@ -389,11 +404,39 @@ export class Manager {
     } catch (error) {
       this.publishError(task, error)
     } finally {
+      cancelTimeout()
       if (this.currentTask(task)) resource.task = null
       this.scheduler.release(task)
       this.refillWaiters(resource)
       this.requestFlush()
     }
+  }
+
+  /**
+   * 框架上限到期：按共享请求失败结算，并把槽位立即交还调度。
+   *
+   * 先撤销任务的在册身份（`resource.task = null`）再触发会重入的外部效果，因此这次执行迟到的
+   * 结束——abort 引发的拒绝，或永不结束之后的任何回调——都会在 `currentTask` 处被判为无效：
+   * 不写 Store、不发布、不二次通知。出册即刻生效，紧接着的一轮 flush 就能启动排队中的任务。
+   */
+  private expireTask(task: Task): void {
+    const resource = task.resource
+    if (!this.currentTask(task)) return
+    resource.task = null
+    resource.lastSettledAt = this.clock.now()
+    this.scheduler.release(task)
+    task.controller.abort()
+    const error = new Error(`load did not settle within ${LOAD_TIMEOUT_MS} ms`)
+    for (const subscription of [...resource.subscribers]) {
+      if (this.currentSubscription(subscription)) {
+        notify(subscription.owner, { origin: ErrorOrigin.Request, error, ...declarationIdentity(subscription.owner) },
+          { resourceId: resource.id, taskVersion: task.version })
+      }
+    }
+    for (const waiter of [...resource.waiters]) {
+      this.settleWaiter(waiter, { status: 'error', origin: ErrorOrigin.Request, error })
+    }
+    this.requestFlush()
   }
 
   /**
@@ -462,12 +505,12 @@ export class Manager {
     for (const subscription of [...resource.subscribers]) {
       if (!this.currentTask(task)) return
       if (this.currentSubscription(subscription)) {
-        notify(subscription.owner, { origin: ErrorOrigin.Background, error },
+        notify(subscription.owner, { origin: ErrorOrigin.Request, error, ...declarationIdentity(subscription.owner) },
           { resourceId: resource.id, taskVersion: task.version })
       }
     }
     for (const waiter of [...resource.waiters]) {
-      this.settleWaiter(waiter, { status: 'error', origin: ErrorOrigin.Background, error })
+      this.settleWaiter(waiter, { status: 'error', origin: ErrorOrigin.Request, error })
     }
   }
 
@@ -544,7 +587,7 @@ export class Manager {
    * 刷新要求不在这里判断：它由 {@link refresh} 的入口闸与 `waiters` 集合自身的归属表达，
    * 因此暂停页的刷新不会被资格否定。
    */
-  private eligible(handle: Handle, input: Input): input is ValidInput {
+  private eligible(handle: Handle, input: Input): input is EnabledInput {
     return !this.disposed && !handle.disposed && handle.submission !== null
       && input.valid && input.enabled && this.allowed(handle, input)
   }

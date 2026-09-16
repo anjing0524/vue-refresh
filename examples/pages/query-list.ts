@@ -40,7 +40,7 @@ export const QueryListPage = defineComponent({
       every: 1_500,
       onError: error => {
         // 框架只通知、从不写 enabled；「失败关闭」是页面在 onError 里自己做的决定。
-        if (error.origin === 'background') {
+        if (error.origin === 'request') {
           enabled.value = false
           note.value = '后台请求失败：页面关闭自动刷新（框架不改写 enabled）'
         } else {

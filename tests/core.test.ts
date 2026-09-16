@@ -264,11 +264,12 @@ test('Q03/A02/D03/B02/F02: 刷新失败结算本次等待、保留旧画面，�
     const result = await refreshing
     assert.equal(result.status, 'error')
     if (result.status === 'error') {
-      assert.equal(result.origin, 'background')
+      assert.equal(result.origin, 'request')
       assert.equal((result.error as Error).message, 'boom')
     }
     assert.deepEqual(a.display!.data, { v: 'old' })        // 旧画面保留
-    assert.equal(a.errors.length, 1); assert.equal(a.errors[0]!.origin, 'background')
+    assert.equal(a.errors.length, 1); assert.equal(a.errors[0]!.origin, 'request')
+    assert.equal(a.errors[0]!.operationId, a.handle.operationId)  // 公开错误带声明代次，可用于认领
     await f.advance(100); assert.equal(f.calls.length, 3)  // 订阅仍在：下周期继续
   } finally { f.manager.dispose() }
 })
@@ -401,7 +402,7 @@ test('F11/T10/T11/T12/M04: FIFO 顺序、真实结束释放槽位、退订作废
     assert.deepEqual(f.manager.inspect().queued.map(task => task.resource.parameters.args), [{ x: 'B' }, { x: 'C' }])
     const view = f.manager.inspect()
     assert.equal(view.scheduled, false); assert.equal(view.pendingFlush, false)
-    await f.advance(10_000); assert.equal(f.calls.length, 1)   // 满槽不自旋、不用 Timer 查队列
+    await f.advance(9_000); assert.equal(f.calls.length, 1)   // 满槽不自旋、不用 Timer 查队列（上限内，上限见 LOAD_TIMEOUT_MS）
     // 退订者作废自己的排队任务，队列不留下已失效项。
     b.set({ ...active, enabled: false }); await tick()
     assert.deepEqual(f.manager.inspect().queued.map(task => task.resource.parameters.args), [{ x: 'C' }])
@@ -424,6 +425,47 @@ test('T12/M09: abort 不释放物理槽位，真实结束后才释放', async ()
     assert.equal(f.calls.length, 1)                        // 排队任务不能启动
     f.calls[0]!.resolve(null); await tick()
     assert.deepEqual(f.calls[1]!.args, { x: 'B' })
+  } finally { f.manager.dispose() }
+})
+
+test('T12/M04/A02: 框架上限到期按共享请求失败结算、立即出册并启动排队任务；迟到结束不写任何事实', async () => {
+  const f = fixture(1), a = f.page(), b = f.page()
+  try {
+    a.submit({ x: 'A' }); b.submit({ x: 'B' }); await tick()
+    assert.equal(f.calls.length, 1); assert.equal(f.manager.inspect().queued.length, 1)
+    const refreshing = a.refresh()                         // 在途任务不能满足刷新：登记等待者
+    await tick()
+    assert.equal(f.calls.length, 1)
+    await f.advance(9_999)                                 // 上限内：槽位仍被占，排队任务不启动
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.calls[0]!.signal.aborted, false)
+    assert.equal(f.manager.inspect().running.length, 1)
+    await f.advance(1)                                     // 到期：先撤销在册身份，再 abort 并按失败结算
+    assert.equal(f.calls[0]!.signal.aborted, true)
+    const resourceA = f.manager.inspect().resources.find(resource => (resource.parameters.args as { x: string }).x === 'A')!
+    assert.equal(resourceA.task, null)                     // 已出册：迟到结束不再算这个任务
+    assert.deepEqual(f.manager.inspect().running.map(task => task.resource.parameters.args), [{ x: 'B' }])
+    assert.equal(f.calls.length, 2)                        // 槽位交还调度，排队任务随即启动
+    assert.deepEqual(f.calls[1]!.args, { x: 'B' })
+    // 结算与通知：订阅者收到一次 request 失败（带声明代次），等待者按同一失败结算。
+    assert.equal(a.errors.length, 1); assert.equal(b.errors.length, 0)
+    assert.equal(a.errors[0]!.origin, 'request')
+    assert.equal(a.errors[0]!.operationId, a.handle.operationId)
+    assert.equal((a.errors[0]!.error as Error).message, 'load did not settle within 10000 ms')
+    const settled = await refreshing
+    assert.equal(settled.status, 'error')
+    if (settled.status === 'error') assert.equal(settled.origin, 'request')
+    assert.equal(a.display, null); assert.equal(Object.keys(f.entries).length, 0)
+    // 迟到的真实结束：身份已失效，因此不写分区、不交付、不二次通知。
+    f.calls[0]!.resolve({ v: 'late' }); await tick()
+    assert.equal(a.display, null); assert.equal(Object.keys(f.entries).length, 0)
+    assert.equal(a.errors.length, 1)
+    // 上限是兜底而不是终局：当前任务正常结束后，下一个周期照常取数。
+    f.calls[1]!.resolve({ v: 'B' }); await tick()
+    assert.deepEqual(b.display!.data, { v: 'B' })
+    await f.advance(100); assert.equal(f.calls.length, 3)
+    f.calls[2]!.resolve({ v: 'recovered' }); await tick()
+    assert.deepEqual(a.display!.data, { v: 'recovered' })
   } finally { f.manager.dispose() }
 })
 
@@ -489,7 +531,7 @@ test('F14/R01/R02: 后台失败对每个有效订阅各通知一次；onError �
     a.submit({ x: 1 }); b.submit({ x: 1 }); await tick()
     f.calls[0]!.reject('first'); await tick()
     assert.equal(a.errors.length, 1); assert.equal(b.errors.length, 1)
-    assert.equal(b.errors[0]!.origin, 'background')
+    assert.equal(b.errors[0]!.origin, 'request')
     assert.equal(b.display, null)
     await f.advance(101); assert.equal(f.calls.length, 2)
     f.calls[1]!.resolve({ x: 2 }); await tick()
@@ -629,7 +671,7 @@ test('B10.08: an already rejected onError promise is observed once and a complet
     a.submit({ x: 1 }); b.submit({ x: 1 }); await tick()
     f.calls[0]!.reject(failure); await tick()
     assert.equal(a.errors.length, 1); assert.equal(b.errors.length, 1)
-    assert.equal(b.errors[0]!.error, failure); assert.equal(b.errors[0]!.origin, 'background')
+    assert.equal(b.errors[0]!.error, failure); assert.equal(b.errors[0]!.origin, 'request')
     assert.equal(logs.length, 1)
     assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
     await tick(); assert.equal(logs.length, 1)
@@ -804,7 +846,7 @@ for (const [name, make] of badData) test('C11/A02/B12a: ' + name + ' 结果不�
     assert.equal(a.input.enabled, true)
     assert.equal(a.display, null)
     assert.equal(Object.keys(f.entries).length, 0)
-    assert.equal(a.errors.at(-1)!.origin, 'background')
+    assert.equal(a.errors.at(-1)!.origin, 'request')
     await f.advance(100); assert.equal(f.calls.length, 2)
   } finally { f.manager.dispose() }
 })

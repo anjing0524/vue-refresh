@@ -30,8 +30,12 @@ function readBoolean(input: RefreshInput<boolean>, label: string): boolean {
   return value
 }
 
-/** 读刷新间隔：只接受正安全整数毫秒，不自动转换、不取整。 */
-function readEvery(input: RefreshInput<number>): number {
+/**
+ * 读刷新间隔：只接受正安全整数毫秒，不自动转换、不取整。
+ * 省略（`undefined`）读作「没有周期」，与「给了但非法」分开——后者抛错。
+ */
+function readEvery(input: RefreshInput<number> | undefined): number | null {
+  if (input === undefined) return null
   const value: unknown = toValue(input)
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
     throw new TypeError('every must be a positive safe integer')
@@ -44,7 +48,8 @@ function readConfiguration(
 ): Input {
   let enabled: boolean | null = null
   let visible: boolean | null = null
-  let every: number | undefined
+  let every: number | null = null
+  let everyInvalid = false
   let failure: unknown
 
   // 三项各自独立捕错：一个 getter 抛错不能掩盖其余项的依赖收集。
@@ -62,16 +67,25 @@ function readConfiguration(
   }
 
   try {
+    // 周期只在开启意愿为真时必需：省略读作 `null`（未开启合法，开启则按下面的分支拒绝）。
     every = readEvery(options.every)
   } catch (error) {
+    everyInvalid = true
     failure ??= error
   }
 
-  if (enabled !== null && visible !== null && every !== undefined) {
-    return { valid: true, enabled, visible, every }
+  if (enabled === null || visible === null || everyInvalid) {
+    // 读不到的开关或可见性保留为 null，绝不推断成 false。
+    return { valid: false, enabled, visible, error: failure }
   }
-  // 读不到的开关或可见性保留为 null，绝不推断成 false。
-  return { valid: false, enabled, visible, error: failure }
+  if (!enabled) return { valid: true, enabled: false, every, visible }
+  if (every === null) {
+    return {
+      valid: false, enabled: true, visible,
+      error: failure ?? new TypeError('every is required when enabled is true'),
+    }
+  }
+  return { valid: true, enabled: true, every, visible }
 }
 
 /**
@@ -107,7 +121,9 @@ function createConfigurationBinding(
     } else if (!reported) {
       // 先标记再通知：同步重入不能重复报告同一错误阶段。
       reported = true
-      notify(handle, { origin: ErrorOrigin.Configuration, error: input.error }, declarationIdentity(handle))
+      // 同一份身份既进公开错误（用于认领）也进诊断；尚无有效操作代次时两处都缺席。
+      const identity = declarationIdentity(handle)
+      notify(handle, { origin: ErrorOrigin.Configuration, error: input.error, ...identity }, identity)
     }
 
     if (handle.operationId === operationId) manager.reconcile(handle)

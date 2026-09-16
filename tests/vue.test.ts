@@ -109,7 +109,7 @@ test('A07/C1e: a configuration notification before any page operation carries no
       set() { notify() } }
   })
   const { logs, restore } = captureConsoleError()
-  // onError 失败时框架才需要写诊断；框架身份只在诊断里出现，公开通知不再携带。
+  // onError 失败时框架才需要写诊断；诊断另带实例与任务身份，公开通知只带声明代次。
   const f = fixture((_, errors) => ({ enabled, every: 100_000, onError: e => { errors.push(e); throw new Error('onError failed') } }))
   try {
     assert.equal(f.core.inspect().handles[0]!.operationId, 0)
@@ -121,6 +121,55 @@ test('A07/C1e: a configuration notification before any page operation carries no
     const event = logs[0]![1] as Record<string, unknown>
     assert.equal(event.origin, 'observer'); assert.equal('operationId' in event, false)
   } finally { restore(); f.app.unmount() }
+})
+
+test('A07: 公开错误带产生它的声明代次，据此认领是谁的失败', async () => {
+  let unreadable = false, trigger!: () => void
+  const enabled = customRef<boolean>((track, notify) => {
+    trigger = notify
+    return { get() { track(); if (unreadable) throw new Error('unreadable'); return true },
+      set() { notify() } }
+  })
+  const f = fixture((_, errors) => ({ enabled, every: 100_000, onError: e => { errors.push(e) } }))
+  try {
+    f.task.submit({ symbol: 'A' }); await tick()
+    assert.equal(f.core.inspect().handles[0]!.operationId, 1)
+    unreadable = true; trigger(); await tick()
+    assert.equal(f.errors.length, 1); assert.equal(f.errors[0]!.origin, 'configuration')
+    assert.equal(f.errors[0]!.operationId, 1)              // 认领：这是第 1 次声明的失败
+    // 新声明推进代次：下一条错误带的是新代次，而不是旧的回声。
+    unreadable = false; trigger(); await tick()
+    f.task.submit({ symbol: 'B' }); await tick()
+    assert.equal(f.core.inspect().handles[0]!.operationId, 2)
+    unreadable = true; trigger(); await tick()
+    assert.equal(f.errors.length, 2)
+    assert.equal(f.errors[1]!.operationId, 2)
+  } finally { f.app.unmount() }
+})
+
+test('A07/A05: every 省略——未开启合法且不通知，开启按配置非法拒绝并去重', async () => {
+  const enabled = ref(false), visible = ref(true)
+  // 「只手动刷新」的页面：对象上不写周期，而不是用一个假数字表达「没有周期」。
+  const f = fixture((_, errors) => ({ enabled, visible, onError: e => { errors.push(e) } }))
+  try {
+    assert.equal(f.errors.length, 0)
+    assert.deepEqual(f.task.submit({ symbol: 'A' }), { status: 'accepted' })
+    await tick()
+    assert.equal(f.calls.length, 0)                        // 暂停页不自动取数
+    const refreshing = f.task.refresh()
+    await tick(); assert.equal(f.calls.length, 1)           // 手动刷新照常走共享路径
+    f.calls[0]!.resolve({ price: 1 }); await tick()
+    assert.deepEqual(await refreshing, { status: 'success' })
+    assert.equal(f.task.display.value!.data.price, 1)
+    // 开启意愿翻转而周期仍缺失：按配置非法拒绝，只通知一次。
+    enabled.value = true; await tick()
+    assert.equal(f.errors.length, 1); assert.equal(f.errors[0]!.origin, 'configuration')
+    assert.equal((f.errors[0]!.error as Error).message, 'every is required when enabled is true')
+    assert.equal(f.core.inspect().handles[0]!.subscription, null)
+    visible.value = false; await tick(); visible.value = true; await tick()
+    assert.equal(f.errors.length, 1)                        // 连续非法期间不重复通知
+    assert.equal(f.calls.length, 1)                         // 非法配置不产生请求
+  } finally { f.app.unmount() }
 })
 
 for (const initiallyEnabled of [true, false]) test('F10/B05: enabled ' + initiallyEnabled + ' → unreadable → false', async () => {

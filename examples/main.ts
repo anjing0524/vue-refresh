@@ -2,7 +2,7 @@ import { createApp, defineComponent, h, inject, KeepAlive, onMounted, ref } from
 import type { Component } from 'vue'
 import { createPinia } from 'pinia'
 import { defineRefresh } from '../src/source'
-import type { DeepReadonly, RefreshHandle, RefreshLoadContext, RefreshResult } from '../src/public-types'
+import type { ReadonlySnapshot, RefreshHandle, RefreshLoadContext, RefreshResult } from '../src/public-types'
 import type { Manager } from '../src/manager'
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
@@ -64,7 +64,7 @@ function mountHarness(): void {
   const timeout = Number(params.get('timeout') ?? 10_000)
   const calls: Array<{ id: number; signal: AbortSignal; finished: boolean; resolve: (value: Quote) => void }> = []
   const events: string[] = []
-  const readQuote = async (args: DeepReadonly<QuoteParams>, { signal }: RefreshLoadContext): Promise<Quote> => {
+  const readQuote = async (args: ReadonlySnapshot<QuoteParams>, { signal }: RefreshLoadContext): Promise<Quote> => {
     const id = calls.length + 1
     let resolve!: (value: Quote) => void
     const deferred = controlled ? new Promise<Quote>(yes => { resolve = yes }) : null

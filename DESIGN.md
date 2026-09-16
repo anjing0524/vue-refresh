@@ -150,21 +150,28 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | `refresh` 接纳 | 建立刷新要求（版本下限）并在没有当前任务时登记一次共享任务 | 与自动刷新同一条路径；不复制第二份 DTO |
 | `refresh` 退出 | 结算 `unavailable`，移除要求，保留已声明身份 | D01 恢复按订阅规则，不重放刷新、不重新准备参数 |
 | 后台成功 | 准备副本、记录结束时间与产生时间、写 Store、交付给有效订阅与满足门槛的刷新要求 | 每次外部写入后复核当前 Task、订阅与要求 |
+| 上限到期 | 先撤销在册身份（`resource.task = null`）再结算：按共享请求失败通知订阅、结算该实例未完成的要求，并立即把槽位交还调度 | abort 与通知都可能同步重入；迟到的结束因身份已失效被完全忽略（不写 Store、不交付、不二次通知） |
 | 最后退出 | 删除注册、清 task、删排队项与分区 | 最后一个订阅与刷新要求都退出才销毁；abort 旧 `load`，running 等 finally |
 | `dispose` | 先置 `disposed`，再释放句柄、注册、队列、Store 与 Timer | 幂等；迟到执行只能清自己的 running |
 
-### 3.5 十条必须成立的不变量
+**交付已有结果的时点**：`submit` 只记录身份并安排一次 flush，把分区里已有结果交付给本页发生在
+**下一个微任务**（`attach`）。因此 `submit` 返回时 `display` 还没有值，即使共享分区里已经有这条数据；
+同一个同步栈里读 `display` 得到的是上一次的发布值。要判断「此刻有没有数据」只能等一个微任务，
+或改用 `readSnapshot`（见 §4.2）。
+
+### 3.5 十一条必须成立的不变量
 
 1. `subscription` 只能是 `Subscription` 或 `null`，`refreshes` 只包含仍挂在本实例上的刷新要求；旧执行闭包不等于当前订阅或当前要求。
 2. 对外通知及入口返回时，`h.subscription === s` 当且仅当 `s.resource.subscribers.has(s)` 且 `s.owner === h`；对刷新要求同理（`h.refreshes` 与 `resource.waiters` 两侧一致）。退订再加入必换 Subscription 对象，内部更新期间不暴露半完成关系。
 3. 注册表只指向当前生存期的 Resource；首次 `attach` 在暴露任何回调前绑定非空订阅；销毁先从注册表移除。
 4. 每次调度或设置 Timer 都用当前 `subscribers.every` 的最小值；Resource 不缓存 interval，关系变化不逐条扫描聚合。
-5. Resource 至多一个有效 `task`；Task 至多在 `Scheduler` 的 `queue` / `running` 之一；已失效的 running 可继续占槽但不可写。
+5. Resource 至多一个有效 `task`；Task 至多在 `Scheduler` 的 `queue` / `running` 之一；已失效的 running 在上限内继续占槽但不可写。
 6. 新后台提交要求注册身份、当前 Task、未取消成立；历史快照交付不依赖 Task 存活，但要求当前 entry、Subscription 与门槛成立。
 7. StoreEntry 只来自该 Resource 的有效成功；删除后旧请求不得重建该 id 分区。
 8. 只有共享路径写 Store 与交付 `display`；Display 的 `args` / `data` / `origin` / `updatedAt` 同次发布，DTO 与 Store 无可变别名；核心不另存 Display。
-9. 当前 Task 的正常成功/失败在必要数据准备之后、外部通知之前更新 `lastSettledAt`；取消及旧 Task 不更新；`running.size` 只随真实执行开始/结束变化。
+9. 当前 Task 的正常成功/失败在必要数据准备之后、外部通知之前更新 `lastSettledAt`；取消及旧 Task 不更新；`running.size` 只随真实执行开始/结束与**上限到期出册**变化。
 10. `dispose` 后 handles / registry / queue / 分区 / Timer / 监听已清，私有 Store 已释放；未结束的 running 先隔离，到真实 finally 才移除。
+11. 每次执行都有一个从**开始执行**时刻起算的框架上限（排队不计入，数值见 §5.2）；上限到期先撤销在册身份、按共享请求失败结算，随后任何迟到的结束都不再写事实。计时由执行开始时的一次性 Timer 表达，`Task` 不保存开始时刻。
 
 ### 3.6 刷新要求的唯一更新表
 
@@ -190,6 +197,12 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 订阅与开启意愿都保留，下个周期由 `lastSettledAt` 驱动继续。`success` 则相反，只结算
 `minVersion ≤ 本次版本` 的要求，更高的留在集合里等后继任务。
 
+这条规则有一个**用户可见的推论**（不是缺陷，是取舍）：若点击刷新时已有一个更早启动的任务在执行，
+本次要求的门槛是「该任务版本＋1」，而那个更早的任务一旦失败，本次点击也会被这次失败结算掉——
+调用方看到的是「我这次点击失败了」，尽管失败的那次请求早于点击。反过来若那个任务成功，本次要求
+会留给它之后补位的任务。要让本次点击只被它自己之后的任务结算，就得在失败时按门槛过滤，
+而那会让「仍有未满足要求」立刻触发再登记，等于失败即自动重试——与本条的理由直接冲突，故不采用。
+
 **唯一的不变量。** 上表的全部规则可以由一条不变量表达：**存在未满足刷新要求的实例，必有一个版本
 不低于这些要求下限的任务**（没有当前任务就登记一个；排队中的任务若版本已达下限即已满足），任务结束时结算。
 它替代了旧的「尚欠／已登记／无要求」三态与转换表：要求的存在本身就是要求，不存在就是没有要求，不做状态机。
@@ -207,6 +220,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 ### 3.7 派生值：不重复保存
 
 - `Task` 的执行阶段由 `Scheduler` 的 `queue` / `running` 归属决定。
+- 框架上限由「开始执行时登记的一次性 Timer」表达；任务不保存开始时刻，abort 即取消该计时。
 - 有效最短 `every` 由 `subscribers` 计算，不缓存。
 - 刷新要求的版本下限由当前任务是否已启动现算（`refreshFloor`），不保存「上一次刷新」之类的镜像。
 - 资格由存活、已声明身份、生命周期与浏览器可见性、配置快照四组事实决定，不镜像 `enabled`；
@@ -223,10 +237,10 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 
 状态字面量的唯一来源是 3 个公开常量对象枚举：`RequestOrigin`、`ErrorOrigin`、`CancelReason`
 （`public-types.ts`），以及只在核心内部使用的 `ActivityKind`（`model.ts`）。
-`RefreshErrorOrigin` 不单独维护常量对象，它是 `ErrorOrigin` 去掉 `validation` 后的类型收窄：
+`RefreshErrorOrigin` 不单独维护常量对象，它把 `ErrorOrigin` 里的可达成员逐个写全：
 刷新入口的配置失败与共享请求失败都不会是参数校验失败。
-`SubmitCancelReason` 同理，是 `CancelReason` 去掉 `unavailable` 后的收窄：两处都由常量对象推导，
-不手写字面量，因此成员重命名或删除时类型会一起报错。
+`SubmitCancelReason` 同理，写全 `CancelReason` 的可达成员：两处都由常量对象推导，
+不用 `Exclude` 求差集，也不手写字面量，因此成员重命名或删除时类型会一起报错。
 结果判别式（`status`）不单独枚举 —— 判别联合本身就是这份枚举。不使用 TS enum：`erasableSyntaxOnly` 与 Node 的类型擦除都不接受该语法；
 枚举成员在构建时被常量折叠，调用点使用成员不产生运行时开销。
 
@@ -237,13 +251,13 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 |---|---|---|
 | 请求来源 | `refresh` / `background` | `RefreshDisplay.origin`，每次发布的事实（按接收者判定：本次刷新满足其要求则为 `refresh`） |
 | 结果产生时间 | 墙钟 epoch 毫秒（不保证单调，校时可能回拨） | `StoreEntry.updatedAt` → 交付时进入 `RefreshDisplay.updatedAt`；与调度的单调时间 `Resource.lastSettledAt` 是两个域；相对时间由页面自行把差值钳制到 0 |
-| 错误来源 | `background` / `validation` / `configuration` | `RefreshError.origin`，通知时的事实 |
-| 刷新失败来源 | `background` / `configuration` | `RefreshResult` 的 error 分支 |
+| 错误来源 | `request` / `validation` / `configuration` | `RefreshError.origin`，通知时的事实；与请求来源是两个语义域，故不复用 `'background'` 字面量 |
+| 刷新失败来源 | `request` / `configuration` | `RefreshResult` 的 error 分支 |
 | 取消原因 | `superseded` / `unavailable` / `disposed` | `RefreshResult` 的 cancelled 分支 |
-| submit 取消原因 | `CancelReason` 的可达子集：`superseded` / `disposed` | `SubmitResult` 的 cancelled 分支；子集由 `SubmitCancelReason` 从常量对象推导（`Exclude` 掉 `unavailable`），不手写字面量 |
+| submit 取消原因 | `CancelReason` 的可达子集：`superseded` / `disposed` | `SubmitResult` 的 cancelled 分支；子集由 `SubmitCancelReason` 从常量对象推导（写全可达成员，不求差集），不手写字面量 |
 | 刷新要求 | 无 / 待满足（版本下限 `minVersion`） | `Handle.refreshes` 与 `Resource.waiters`（两侧一致） |
 | 当前订阅 | Subscription / null | `Handle.subscription` |
-| 配置快照 | 有效 / 无效；无效时 `enabled`、`visible` 可为 `null`（读不到） | Vue 闭包 → `Handle.readInput` |
+| 配置快照 | 有效 / 无效；无效时 `enabled`、`visible` 可为 `null`（读不到） | Vue 闭包 → `Handle.readInput`；`every` 省略读作 `null`（未给出，只在未开启时合法） |
 | 组件激活 | true / false | `Handle.lifecycleActive` |
 | 句柄已释放 | true / false | `Handle.disposed` |
 | 浏览器可见 | true / false | `Manager` 私有 `browserVisible`，由 `setBrowserVisible` 写入；读 `inspect().visible` |
@@ -255,9 +269,11 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | 有效最短间隔 | 正安全整数 | **推导**：现算各 `Subscription.every` 的最小值 |
 | 订阅资格 | 是 / 否 | **推导**：`eligible()` 的四组事实（存活／已提交／环境允许／配置开启），不镜像 `enabled`；独立查询由调用点分流；这条推导是统一文档 U25 的唯一实现落点 |
 
-框架身份（`operationId` / `resourceId` / `taskVersion`）不属于这份状态表，也不进公开契约：
-`RefreshError` 只交付 `origin` 与 `error`；身份只在 `reportObserverError` 的诊断事件里用于日志关联。
-只有可归属于某次页面操作的诊断事件才带 `operationId`，尚无操作时该键缺席——`0` 不表示「操作 0」。
+框架身份分两处出现，各有边界：**声明代次**（`operationId`）既进诊断事件，也随公开错误通知给出，
+因为调用方要靠它认领「这是谁的失败」；`resourceId` / `taskVersion` 只在 `reportObserverError` 的
+诊断事件里用于日志关联，不进公开契约。
+只有可归属于某次页面操作的诊断事件才带 `operationId`，尚无操作时该键缺席——`0` 不表示「操作 0」；
+公开错误通知遵守同一条规则。
 
 ## 4. 参数与结果边界
 
@@ -286,6 +302,8 @@ structuredClone → 在副本上检查 JSON 值域与循环并冻结 → fast-js
 
 `parameterKey` 只遍历值域与深度并编码，不复制、不冻结、不执行 `validate`。
 `readSnapshot` 在适配边界计算键后交核心查找；`disposed` 直接返回 `undefined`。
+它只能读到**仍有活跃共享实例**（存在订阅或未结算的刷新要求）的分区：实例随最后一个需求退出而销毁，
+因此「查不到」不等于「没有这份数据」，只表示此刻没有人在用。参数非法时抛 `TypeError` / `RangeError` 给读取者。
 它只交付值、不承诺新鲜度：需要结果产生时间就走 `display`（订阅会建立 Resource）；这是它与交付面的分工，不是缺少能力。
 对象键排序、数组原顺序；完整键不使用短哈希，也不从参数推导 `Resource.id`。
 
@@ -293,7 +311,7 @@ structuredClone → 在副本上检查 JSON 值域与循环并冻结 → fast-js
 
 - DTO 业务校验由 `load` 所在的 HTTP 适配器负责。
 - 框架 `copyResult` 拒绝 `undefined` 并执行 `structuredClone`；不做原型白名单、自有描述符、循环或复制后形状复核。
-- 原生支持的 `Date` / `Map` / 循环等可被复制，**不表示**框架验证了业务合法性；不支持的值由原生复制抛错，沿用共享请求失败（`background`）处理。
+- 原生支持的 `Date` / `Map` / 循环等可被复制，**不表示**框架验证了业务合法性；不支持的值由原生复制抛错，沿用共享请求失败（`request`）处理。
 - Store → 每页 / `readSnapshot` 分别复制；不冻结业务原对象，不用 JSON 来回 `parse`。
 - 退订冻结依靠独立数据快照，不能直接绑定共享 Store 对象，也不能只复制最外层对象。
   共享请求内部不得先写业务 Store 再让框架检查有效性。
@@ -329,15 +347,25 @@ structuredClone → 在副本上检查 JSON 值域与循环并冻结 → fast-js
 新追加的任务留到下一次 flush；满槽的队列等待真实执行结束唤醒，不自旋；
 间隔超过平台 Timer 范围时分段等待。同一轮内的多次配置变化合并为一次 flush。
 
+**执行侧另有框架上限。** 任务真正开始执行时登记一次性 Timer（走 `Clock`，排队等待不计入），
+到期由 `Manager.expireTask` 以共享请求失败结算并立即出册；abort 会取消该计时。
+因此「满槽等待」的上界不是「底层永不结束」，而是这个上限（见 §5.2）。
+
 ### 5.2 并发与任务替换
 
 `Scheduler` 的 `queue` / `running` 是后台执行位置的唯一事实。替换任务时：
 先建立新身份与交付门槛，移除旧排队项，新项排到队尾，然后才 abort 旧执行。
 
-- abort 不释放物理槽位；finally 只删除自身在 `Scheduler.running` 里的成员，不清新 Task。
+- abort 本身不释放槽位；finally 只删除自身在 `Scheduler.running` 里的成员，不清新 Task。
 - 显式刷新与自动刷新共用 `queue` / `running` 与 `maxConcurrent`；满槽时排队，不绕过上限。
-- 并发上限只约束尚未结束的框架 `load`；只有请求适配器的 Promise 真实反映底层完成，
-  才能进一步保证浏览器侧请求数。不承诺服务器因 abort 立即停止。
+- **框架上限（`LOAD_TIMEOUT_MS` = 10000 毫秒，数值由确认人给出）**：从任务真正开始执行起算，
+  到期按共享请求失败结算并立即出册。出册后这次执行迟到的结束在 `currentTask` 处被判无效：
+  不写 Store、不交付、不二次通知；资源按下一个周期重新取数。挂死的传输、忘了拒绝的适配器、
+  把长连接当一次 `load` 的封装这三类输入因此都不能让槽位永久被占。
+- 所以 `maxConcurrent` 约束的是**在册任务数**：被上限结算的任务不再计入，其底层请求可能仍未结束
+  （物理在途可暂时超过上限）。上限不代替适配器自己的业务超时——3 秒的行情与 60 秒的报表各有各的
+  合理上限，那是调用方的事实，框架不猜。
+- 不承诺服务器因 abort 立即停止。
 
 ### 5.3 结果有效性
 
@@ -364,6 +392,11 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
   `false→未知→false` 不误杀暂停期间的单次查询。
 - `onError` 引发同步配置变化时以最新快照为准，旧 watch 回调不可再覆盖它。
 - `every` 只接受正安全整数毫秒，不转换、不取整；非法值明确拒绝配置，不制造忙循环，也不伪装成网络失败。
+- `every` 只在 `enabled` 为真时必需：省略读作「没有周期」（未开启合法，只手动刷新的页面因此不必写假数字）；
+  省略而开启意愿为真、或给了非法值，都按配置非法拒绝。
+- **暂态非法是合法场景，不是编程错误**：`enabled: computed(() => store.ready && store.on)` 在 `store.ready`
+  为假时读到的值暂时不是 boolean，稍后会自行变回。正因如此才保留电平快照、不把读不到的开关推断成
+  `false`、连续非法只通知一次，并在修正后按当前资格恢复——删掉这套机制会让上面这种写法静默失效。
 
 ### 6.2 生命周期
 
@@ -396,7 +429,9 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 - 后台失败保留需求与开启意愿，旧画面不变，下个周期继续重试。
 - 共享请求失败只结算并通知，不改写调用方 `enabled`；是否停止自动刷新由调用方在 `onError` 里决定。
   只要 `enabled` 仍为真，下个周期继续；暂停页仍可显式刷新一次。
-- 同一规则适用于 refresh 与 background 的 `onError` 通知，以及 validation、configuration 的入口通知。
+- 同一规则适用于显式刷新与自动刷新两条来源的 `onError` 通知，以及 validation、configuration 的入口通知。
+- 框架上限到期按共享请求失败走同一通道：通知一次、结算该实例未完成的要求、立即出册。它是业务可见的失败
+  （不是框架自身故障），因此不进 observer 诊断；错误值由框架给出（`Error`，说明里含上限毫秒数）。
 - 框架不合并业务提示；多个组件只需要一条提示时，由调用方统一呈现。
 
 ---
@@ -408,7 +443,8 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 3. **外部效果之后复核身份。** `await`、复制结果、发布 Display、写 Store、`onError`（调用方可能在其中同步改 `enabled`）。
 4. **旧清理只清自己。** 旧任务的 finally 只释放自己的 running 成员。
 5. **资格判断无副作用。** `eligible` / `registered` / `currentTask` / `currentSubscription` / `deliverable` 只读事实。
-6. **物理槽位只随真实结束变化。** abort 不释放槽位；`running.size` 等于尚未结束的 `load` 数。
+6. **槽位只在两种情况下变化。** 真实结束释放自己的槽位；框架上限到期先撤销在册身份再出册（见 §5.2）。
+   abort 本身不释放槽位；`running.size` 等于**在册**任务数。
 7. **配置只读快照。** Vue 同步 watch 是唯一写入者。
 
 ## 8. 验证

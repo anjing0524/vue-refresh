@@ -26,7 +26,7 @@ const QuoteCard = defineComponent({
       // 频率是响应式输入：改动它就走配置变化路径，由框架替换当前任务。
       every: () => props.every,
       onError: error => {
-        if (error.origin !== 'background') return
+        if (error.origin !== 'request') return
         failures.value += 1
         emit('failure')
       },

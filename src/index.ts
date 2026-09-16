@@ -8,7 +8,7 @@ export { defineRefresh } from './source.ts'
 export { createRefreshManager } from './app.ts'
 export { useRefresh } from './vue.ts'
 export type {
-  CancelReason, DeepReadonly, ErrorOrigin, RefreshDisplay, RefreshError, RefreshErrorOrigin, RefreshHandle,
+  CancelReason, ErrorOrigin, ReadonlySnapshot, RefreshDisplay, RefreshError, RefreshErrorOrigin, RefreshHandle,
   RefreshInput, RefreshLoadContext, RefreshManager, RefreshManagerOptions, RefreshOptions, RefreshResult,
   RefreshSource, RequestOrigin, SubmitCancelReason, SubmitResult,
 } from './public-types.ts'

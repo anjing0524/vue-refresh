@@ -6,10 +6,14 @@ import type { Pinia } from 'pinia'
  * 这些签名与统一文档「公共 API 契约」一节共同构成对外约定。
  */
 
-/** 递归只读视图；函数类型保持原样，避免把回调参数也变成只读。 */
-export type DeepReadonly<T> =
+/**
+ * 递归只读视图。它是**编译期**约束：框架交付的是独立副本（见 `cloneSnapshot`），
+ * 运行期并不冻结，因此拿到只读视图不等于共享对象不可写——别名安全由「每次交付各复制一份」保证。
+ * 函数类型保持原样，避免把回调参数也变成只读。
+ */
+export type ReadonlySnapshot<T> =
   T extends (...args: never[]) => unknown ? T :
-  T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T
+  T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
 
 /** 可以是值、只读 Ref 或 getter；Vue 适配层统一解包。 */
 export type RefreshInput<T> = T | Readonly<Ref<T>> | (() => T)
@@ -29,15 +33,17 @@ export const RequestOrigin = {
 export type RequestOrigin = (typeof RequestOrigin)[keyof typeof RequestOrigin]
 
 /**
- * 错误的来源：**哪一步失败了**。
- * - `background`：共享请求失败。主动刷新与自动刷新走同一条获取路径，因此共用这个取值；
+ * 错误的来源：**哪一步失败了**。它与「一次请求由谁触发」（`RequestOrigin`）是两个语义域，
+ * 因此各自持有取值、不复用同一个字面量：`display.origin === 'background'` 说的是
+ * 「这条结果是自动轮询来的」，`error.origin === 'request'` 说的是「共享请求失败了」。
+ * - `request`：共享请求失败（含框架上限到期）。主动刷新与自动刷新走同一条获取路径，因此共用这个取值；
  * - `validation`：订阅声明的参数准备失败；
  * - `configuration`：刷新入口读到的配置快照非法。
  * 框架自身的 observer 诊断只写日志、不经 `onError` 投递，因此不在这个取值域内。
  */
 export const ErrorOrigin = {
-  /** 共享请求失败（条目暂不可得）；与 `RequestOrigin.Background` 同一字面量。 */
-  Background: RequestOrigin.Background,
+  /** 共享请求失败（条目暂不可得），或框架上限到期。 */
+  Request: 'request',
   /** 参数准备失败。 */
   Validation: 'validation',
   /** 入口配置非法。 */
@@ -46,11 +52,10 @@ export const ErrorOrigin = {
 export type ErrorOrigin = (typeof ErrorOrigin)[keyof typeof ErrorOrigin]
 
 /**
- * 刷新动作能产生的失败来源：`ErrorOrigin` 里可由 `refresh` 结算产生的取值。
- * 与 `SubmitCancelReason` 同一做法——由常量对象推导而不是手写字面量，成员被重命名或删除时
- * 这里会一起报错，不会留下类型上仍合法、语义上已不存在的取值。
+ * 刷新动作能产生的失败来源。与 `SubmitCancelReason` 同一做法：把可达子集逐个写全，
+ * 不用 `Exclude` 让读者心算差集；成员仍由常量对象推导，重命名或删除时会一起报错。
  */
-export type RefreshErrorOrigin = Exclude<ErrorOrigin, 'validation'>
+export type RefreshErrorOrigin = typeof ErrorOrigin.Request | typeof ErrorOrigin.Configuration
 
 /** 取消原因。 */
 export const CancelReason = {
@@ -70,7 +75,7 @@ export type CancelReason = (typeof CancelReason)[keyof typeof CancelReason]
  * `submit` 能产生的取消原因：`CancelReason` 的可达子集。
  * 声明不检查可见性与开启意愿（暂停页仍可声明），因此不会被 `unavailable` 取消。
  */
-export type SubmitCancelReason = Exclude<CancelReason, typeof CancelReason.Unavailable>
+export type SubmitCancelReason = typeof CancelReason.Superseded | typeof CancelReason.Disposed
 
 declare const sourceBrand: unique symbol
 
@@ -88,12 +93,15 @@ export interface RefreshLoadContext { readonly signal: AbortSignal }
 /**
  * 错误通知值。
  * `error` 是原始异常，供页面自行判断；框架自身的诊断日志不会输出它的内容。
- * 通知不携带 `operationId` / `resourceId` / `taskVersion` 这类框架身份：它们无法被调用方用于
- * 比较或续传，只在 observer 诊断事件里做日志关联（见 DESIGN.md §3.8），不进公开契约。
+ * `operationId` 是产生这条错误的声明代次（框架生成、只用于认领）：一个页面里有两处
+ * `useRefresh` 且共用同一个 `onError` 时，据此分辨这是谁的失败；尚无有效操作代次时字段缺席。
+ * 不携带 `resourceId` / `taskVersion`：它们无法被调用方用于比较或续传，只在 observer 诊断事件里
+ * 做日志关联（见 DESIGN.md §3.8）。
  */
 export interface RefreshError {
   readonly origin: ErrorOrigin
   readonly error: unknown
+  readonly operationId?: number
 }
 
 /**
@@ -122,8 +130,8 @@ export type RefreshResult =
  * 拿到的仍是原结果时间，因此可以据此显示数据多旧。
  */
 export interface RefreshDisplay<P extends object, T> {
-  readonly args: DeepReadonly<P>
-  readonly data: DeepReadonly<T>
+  readonly args: ReadonlySnapshot<P>
+  readonly data: ReadonlySnapshot<T>
   readonly origin: RequestOrigin
   readonly updatedAt: number
 }
@@ -141,8 +149,12 @@ export interface RefreshOptions {
    * 是否停止订阅由调用方在 `onError` 里自行决定。
    */
   readonly enabled: RefreshInput<boolean>
-  /** 刷新间隔（毫秒）；只接受正安全整数，不自动转换或取整。 */
-  readonly every: RefreshInput<number>
+  /**
+   * 刷新间隔（毫秒）；只接受正安全整数，不自动转换或取整。
+   * 只在开启意愿为真时必需：`enabled` 为假时可以省略（没有周期需求），
+   * 省略而开启意愿为真按配置非法拒绝。
+   */
+  readonly every?: RefreshInput<number>
   /** 额外可见条件（如自定义页签）；缺省视为可见。 */
   readonly visible?: RefreshInput<boolean>
   /**
@@ -172,7 +184,11 @@ export interface RefreshManagerOptions {
 /** 应用级协调者：安装、只读快照与销毁。 */
 export interface RefreshManager {
   install(app: App): void
-  /** 按参数值定位共享结果并返回独立副本；不创建资源、不延长生存期，无分区返回 undefined。 */
-  readSnapshot<P extends object, T>(source: RefreshSource<P, T>, args: P): DeepReadonly<T> | undefined
+  /**
+   * 按参数值定位共享结果并返回独立副本；不创建资源、不延长生存期，无分区返回 `undefined`。
+   * 只有该 Source 仍有活跃共享实例（存在订阅或未结算的刷新要求）时才可能查到分区。
+   * @throws {TypeError | RangeError} 参数不是 JSON 记录：非 JSON 值、根容器不是记录，或循环／病态嵌套
+   */
+  readSnapshot<P extends object, T>(source: RefreshSource<P, T>, args: P): ReadonlySnapshot<T> | undefined
   dispose(): void
 }

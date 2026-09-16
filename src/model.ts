@@ -30,14 +30,22 @@ export interface ResultStore {
   dispose(): void
 }
 
-/** 三项配置都已成功读取。 */
-export interface ValidInput {
+/**
+ * 资格成立时的配置快照：开启意愿为真，因此周期必然存在（由 `readConfiguration` 保证）。
+ * 单独成一个接口，资格判定就能直接陈述「有周期」这个事实，调用方不需要再判别或断言。
+ */
+export interface EnabledInput {
   readonly valid: true
-  readonly enabled: boolean
+  readonly enabled: true
   /** 刷新间隔（毫秒）。 */
   readonly every: number
   readonly visible: boolean
 }
+
+/** 三项配置都已成功读取；未开启时允许不给周期（`every` 为 `null`，此时不会建立订阅）。 */
+export type ValidInput =
+  | EnabledInput
+  | { readonly valid: true; readonly enabled: false; readonly every: number | null; readonly visible: boolean }
 
 /** 至少一项读取失败；读不到的开关或可见性保留为 null，不推断为关闭。 */
 export interface InvalidInput {

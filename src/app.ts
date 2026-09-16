@@ -4,7 +4,7 @@ import { parameterKey, sourceRuntime } from './source.ts'
 import { createResultStore } from './store.ts'
 import type { Clock } from './model.ts'
 import type {
-  DeepReadonly, RefreshManager, RefreshManagerOptions, RefreshSource,
+  ReadonlySnapshot, RefreshManager, RefreshManagerOptions, RefreshSource,
 } from './public-types.ts'
 
 /**
@@ -90,10 +90,10 @@ export function createRefreshManager(options: RefreshManagerOptions): RefreshMan
       app.onUnmount(() => manager.dispose())
     },
 
-    readSnapshot<P extends object, T>(source: RefreshSource<P, T>, args: P): DeepReadonly<T> | undefined {
+    readSnapshot<P extends object, T>(source: RefreshSource<P, T>, args: P): ReadonlySnapshot<T> | undefined {
       if (manager.isDisposed()) return undefined
       // 只计算参数键并直读分区；不准备参数、不校验、不创建资源。
-      return manager.readSnapshot(sourceRuntime(source), parameterKey(args)) as DeepReadonly<T> | undefined
+      return manager.readSnapshot(sourceRuntime(source), parameterKey(args)) as ReadonlySnapshot<T> | undefined
     },
 
     dispose: () => manager.dispose(),

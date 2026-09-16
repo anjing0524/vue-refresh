@@ -61,7 +61,7 @@ await task.refresh()
 - 参数复制后深冻结；调用方原对象不冻结。框架的 load、刷新与 validate 使用受保护的参数副本。
 - 参数是应用构造的JSON记录；框架不再提供任意对象描述符、原型、跨realm与特殊对象逐类防御。只保留 JSON 值域与循环守卫（根容器记 1，命中即按非法参数拒绝）。
 - DTO业务结构由HTTP适配器校验，框架只拒绝undefined并使用structuredClone建立所有权；各页面与Store各自拥有副本。不再通用检查DTO原型/循环/字段描述符。
-- readSnapshot仅计算身份，不复制冻结参数或运行validate。提交时prepare一次，轮询和恢复复用其结果。
+- readSnapshot仅计算身份，不复制冻结参数或运行validate。提交时prepare一次，轮询和恢复复用其结果。只有该来源仍有活跃共享实例（订阅或未结算的刷新要求）时才查得到分区，参数非法时抛错给读取者。
 
 ## 安装与使用
 
@@ -78,9 +78,9 @@ if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
 
 参数键是完整参数值的稳定编码；守卫边界与拒绝规则见统一文档 §3（U24）。业务侧规模结论与依据见统一文档 §5 G01。
 
-每个组件在同步 setup 中调用 useRefresh；enabled/every/visible 都支持值、Ref或getter，框架只读它们、从不写入。只监听这些配置，不监听参数或表单。submit 同步声明身份（同参重复声明幂等）；refresh 返回 success/error/cancelled，取消立即结算，且不携带 DTO。暂停后仍能刷新一次；true→false 的关闭边沿结算当时未完成的刷新要求。显式刷新与自动刷新共用同一队列与并发槽，满槽时排队；后台只在真实 load 结束后释放并发槽。
+每个组件在同步 setup 中调用 useRefresh；enabled/every/visible 都支持值、Ref或getter，框架只读它们、从不写入。只监听这些配置，不监听参数或表单。every 只在 enabled 为真时必需：只手动刷新的页面可以整个省略它，开启而省略按配置非法拒绝。submit 同步声明身份（同参重复声明幂等）；refresh 返回 success/error/cancelled，取消立即结算，且不携带 DTO。暂停后仍能刷新一次；true→false 的关闭边沿结算当时未完成的刷新要求。显式刷新与自动刷新共用同一队列与并发槽，满槽时排队；后台只在真实 load 结束后释放并发槽，另有一层框架上限（10 秒，从开始执行起算）到期即按共享请求失败结算并立即出册，因此永不结束的请求不会让应用停摆。
 
-刷新失败会走两条通道：返回的 Promise 结算 `error`（`origin` 为 `background` 或 `configuration`），同时 `onError` 收到同一次失败；两条通道分别是给调用方控制流和统一错误出口的，页面若两处都提示需自行去重。校验失败、共享请求失败各自也只会各报一次。**框架不改写调用方的 enabled**：失败后是否停止自动刷新由页面在 `onError` 里自己决定（写 `enabled=false` 即走正常关闭路径）；只要 enabled 仍为真，下个周期继续，暂停页也仍可主动刷新。
+刷新失败会走两条通道：返回的 Promise 结算 `error`（`origin` 为 `request` 或 `configuration`），同时 `onError` 收到同一次失败；两条通道分别是给调用方控制流和统一错误出口的，页面若两处都提示需自行去重。错误通知还带产生它的声明代次（一个页面里两处 useRefresh 共用同一个 onError 时据此认领）。校验失败、共享请求失败各自也只会各报一次。**框架不改写调用方的 enabled**：失败后是否停止自动刷新由页面在 `onError` 里自己决定（写 `enabled=false` 即走正常关闭路径）；只要 enabled 仍为真，下个周期继续，暂停页也仍可主动刷新。
 
 框架只有一条取数通道：显式刷新与自动刷新都经 Source.load，结果写入共享分区并交付给**有效订阅与满足门槛的刷新要求**（同一句柄只交付一次）。暂停页刷新一次时只有它自己与其他有效订阅收到更新，刷新不恢复自动订阅。display 是唯一交付面：args/data/origin 与 updatedAt（结果产生的墙钟毫秒）同次整体发布，后加入的组件读到已有结果时拿到的仍是原结果时间，可据此显示数据多旧；框架不交付「正在刷新」这类实时状态，失败走 onError。需要按结果写业务 Store 的页面在自己的适配层完成，框架不再提供受保护的同步提交入口。只读共享结果使用 refresh.readSnapshot(source, params)，它只交付值、不承诺新鲜度，不会创建资源或延长生命周期；要判断数据新旧就用 display（订阅会建立 Resource）。dispose 幂等；卸载自动清理，SSR不发请求。
 
@@ -116,16 +116,16 @@ pnpm test:browser 在独立4174端口用 Playwright 执行与验证页相同的�
 |---|---|
 | 依赖安装 | 清理 1999 个 macOS AppleDouble（`._*`）、2 个 `.DS_Store` 与 198MB 的 mac-arm64 浏览器缓存后，`pnpm install` 从 registry 重装成功；锁文件未被改写，`node_modules` 内无 `XSym` 占位文件 |
 | pnpm typecheck | 通过。重装取得 linux-x64 原生编译器后 `tsc --noEmit` 可运行；`tests/types.ts` 的全部 `@ts-expect-error` 反例（缺字段/字段类型/旧元组调用/Source 不变性/DTO/readonly/refresh 不接受参数且结算不含 DTO）一并被校验 |
-| tests/core.test.ts、tests/vue.test.ts | 65 个现行契约自动测试通过；含真实 Vue/KeepAlive/Pinia 和两个 SSR 渲染。定制渲染器测试不冒充真实浏览器可见性测试 |
-| pnpm build | 通过。生成 `dist/index.js`（21.21 kB / gzip 6.53 kB）与类型声明（构建后处理改写说明符为 `.js`，并断言产物形态）；按包导入仅得到 defineRefresh、createRefreshManager、useRefresh 三个函数 |
+| tests/core.test.ts、tests/vue.test.ts | 68 个现行契约自动测试通过；含真实 Vue/KeepAlive/Pinia 和两个 SSR 渲染。定制渲染器测试不冒充真实浏览器可见性测试 |
+| pnpm build | 通过。生成 `dist/index.js`（22.26 kB / gzip 6.78 kB）与类型声明（构建后处理改写说明符为 `.js`，并断言产物形态）；按包导入仅得到 defineRefresh、createRefreshManager、useRefresh 三个函数 |
 | pnpm build:demo | 通过。生成 `dist-demo/` 演示页面（四个视图：查询列表、行情面板、双组件共享、B09 组合；`/?page=` 选择初始视图，`/?test`、`/?mode=controlled` 仍进入集成验证台） |
 | tests/refresh.spec.ts（Playwright） | 需求重写后重跑：真实 Chrome 八条全部通过——暂停后显式刷新（同一条共享路径、不恢复自动刷新）、刷新与自动刷新共用队列（满槽排队、不绕过上限）、真实 HTTP 共享/恢复、真实传输超时（客户端截止生效、槽位释放、页面收到失败）、真实浏览器下祖先 KeepAlive 失活与受控 `visibilitychange`（L07.02＋监听路径）、旧响应隔离、真实结束放槽、卸载清理 |
 | tests/pages.spec.ts（Playwright） | 需求重写后重跑：真实 Chrome 四条代表页面交互全部通过——查询列表（提交才发请求、分页排序复用已提交参数、独立启停、暂停仍可单查、失败关闭）、行情面板（无查询按钮、一次提交、响应式频率、显示数据多旧、后台首查失败继续、失活冻结）、双组件共享（1s/5s 同参共享、单页暂停、重新进入交付已有结果、切换品种、全部退订、Store 快照隔离）、B09（无启停按钮，前次失败后在 runner 内开启意愿且不先请求旧参数）。三条页面不手写 Timer，也不保存旧参数或操作版本 |
 | 连续事件 | seed=42，3句柄、3参数值、300步；检查归属、队列、并发槽及进展，是有限探索 |
-| pnpm complexity | 11 个源文件、1770 行、131 个结构分支、最大函数圈复杂度 8 |
-| node scripts/benchmark.mjs（阶段 14 基线） | 24 订阅 / 8 身份 / every=25ms / maxConcurrent=4，3 次 × 2s：load 624 次（**收敛比 0.97**；按订阅计的反事实 1920 次）、真实在途峰值 **4**（框架 `running` 投影峰值同为 4，未超上限）、结束瞬间 8 个 Resource / 24 个句柄、**释放后残留全 0**；事件循环延迟 mean 1.08ms / p99 1.56ms / max 6.61ms（1ms 分辨率）。两个独立进程复跑给出相同的 load 624 与收敛比 0.97。规模可用 `--subscriptions/--identities/--duration/--every/--runs` 改；**不设性能阈值**，只在真实在途超过 `maxConcurrent` 或释放后有残留时以非零码退出。测量走公开入口与真实 Vue/Pinia，但 `load` 只让出一个微任务，**不含浏览器渲染与真实网络** |
-| 阶段 15 交付产物 | `pnpm build` + `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：15 个条目 = `dist/` 13 个（`index.js` 21.21 kB / gzip 6.53 kB、sourcemap、11 个 `.d.ts`）+ `package.json` + README，无 `.ts` 说明符、无 `export type *`。连跑两次 `build`+`pack` 产物逐字节相同，包由已推送的源码构建（README 自身被打进包内，因此包的字节数随本文档变化，尺寸与哈希不写在这里）。**最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行与交付提交信息里，不写在这里**——README 由 npm 强制打进包内（`files` 只列 `dist` 也会带上它），把包自身哈希写进包内文件在数学上不存在解 |
-| 包级导入（干净消费方） | 在仓库外新建消费工程，`npm install <tarball> vue@3.5.42 pinia@4.0.3`（另需 Pinia 的非可选 peer `@vue/devtools-api@8.2.1`），只用包导出的三个函数：SSR 渲染成功且 0 次 `load`、`dispose` 后无残留私有 Store；最小浏览器环境（`document.hidden=false`）下挂载 + `submit` 交付 `origin=background`、`readSnapshot` 可读 |
+| pnpm complexity | 11 个源文件、1855 行、138 个结构分支、最大函数圈复杂度 8 |
+| node scripts/benchmark.mjs（阶段 14 基线） | 24 订阅 / 8 身份 / every=25ms / maxConcurrent=4，3 次 × 2s：load 624 次（**收敛比 0.97**；按订阅计的反事实 1920 次）、真实在途峰值 **4**（框架 `running` 投影峰值同为 4，未超上限；本基线的 `load` 只让出一个微任务，没有任务触达 10 秒上限，因此「在册」与「真实在途」在此一致）、结束瞬间 8 个 Resource / 24 个句柄、**释放后残留全 0**；事件循环延迟 mean 1.08ms / p99 1.56ms / max 6.61ms（1ms 分辨率）。两个独立进程复跑给出相同的 load 624 与收敛比 0.97。规模可用 `--subscriptions/--identities/--duration/--every/--runs` 改；**不设性能阈值**，只在真实在途超过 `maxConcurrent` 或释放后有残留时以非零码退出。测量走公开入口与真实 Vue/Pinia，但 `load` 只让出一个微任务，**不含浏览器渲染与真实网络** |
+| 阶段 15 交付产物 | `pnpm build` + `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：15 个条目 = `dist/` 13 个（`index.js` 22.26 kB / gzip 6.78 kB、sourcemap、11 个 `.d.ts`）+ `package.json` + README，无 `.ts` 说明符、无 `export type *`。连跑两次 `build`+`pack` 产物逐字节相同，包由已推送的源码构建（README 自身被打进包内，因此包的字节数随本文档变化，尺寸与哈希不写在这里）。**最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行与交付提交信息里，不写在这里**——README 由 npm 强制打进包内（`files` 只列 `dist` 也会带上它），把包自身哈希写进包内文件在数学上不存在解 |
+| 包级导入（干净消费方） | 在仓库外新建消费工程，`npm install <tarball> vue@3.5.42 pinia@4.0.3`（另需 Pinia 的非可选 peer `@vue/devtools-api@8.2.1`），只用包导出的三个函数：SSR 渲染成功且 0 次 `load`、`dispose` 后无残留私有 Store；最小浏览器环境（`document.hidden=false`）下挂载 + `submit` 交付 `origin=background`、`readSnapshot` 可读。**换包必删消费方的 `package-lock.json`**：`file:` 依赖的完整性写在锁文件里，不删会复用上一版解包内容而给出假通过 |
 | TS 4.9 类型消费（G03 阻断节点） | 实测：`typescript@4.9.5` + `module/moduleResolution: Node16` 下消费该包，**本包 11 个声明文件与 Pinia 4.0.3 均零错误**；不加 `skipLibCheck` 时有 6 处错误，全部来自 `vue@3.5.42` 自身的 `.d.ts`（需要 `NoInfer` / `ToggleEvent`，TS ≥5.4），本包与 Pinia 无一处。安装侧：`pinia@4.0.3` 声明 `peerOptional typescript>=5.6.0`，TS 4.9 消费方必须 `--legacy-peer-deps`。因此「TS 4.9 + 最新 Vue/Pinia」可复现，但**必须**加 `skipLibCheck: true` 并跳过该 peer 校验。**2026-09-16 确认人裁决**：声明只限定到本包自身的类型（自 TS 4.9 起可用，已实测），Vue / Pinia 的 TS 下限以它们自己的 peer 声明为准，本包不替它们承诺 |
 | pnpm check:docs | 通过。13 项一致性门禁，清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准；统一文档就在仓库根目录。`pnpm check:docs` 还会打印叶子→测试标题的可追溯性报告（见下） |
 
