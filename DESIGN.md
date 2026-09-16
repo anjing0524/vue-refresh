@@ -220,7 +220,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | 结果产生时间 | 墙钟 epoch 毫秒（不保证单调，校时可能回拨） | `StoreEntry.updatedAt` → 交付时进入 `RefreshDisplay.updatedAt`；与调度的单调时间 `Resource.lastSettledAt` 是两个域；相对时间由页面自行把差值钳制到 0 |
 | 错误来源 | `background` / `validation` / `configuration` | `RefreshError.origin`，通知时的事实 |
 | 刷新失败来源 | `background` / `configuration` | `RefreshResult` 的 error 分支 |
-| 取消原因 | `superseded` / `unavailable` / `disposed` | `QueryResult` 的 cancelled 分支 |
+| 取消原因 | `superseded` / `unavailable` / `disposed` | `RefreshResult` 的 cancelled 分支 |
 | submit 取消原因 | `CancelReason` 的可达子集：`superseded` / `disposed` | `SubmitResult` 的 cancelled 分支；子集由 `SubmitCancelReason` 从常量对象推导（`Exclude` 掉 `unavailable`），不手写字面量 |
 | 刷新要求 | 无 / 待满足（版本下限 `minVersion`） | `Handle.refreshes` 与 `Resource.waiters`（两侧一致） |
 | 当前订阅 | Subscription / null | `Handle.subscription` |

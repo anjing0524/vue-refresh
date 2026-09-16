@@ -179,7 +179,7 @@ for (const prefix of OWNERSHIP) {
 //    Layer numbers follow the README 「依赖方向单向」 line.
 const LAYERS = {
   'diagnostics.ts': 0, 'public-types.ts': 0, 'model.ts': 1, 'source.ts': 1, 'delivery.ts': 1,
-  'query.ts': 2, 'store.ts': 2, 'scheduler.ts': 2, 'manager.ts': 3, 'app.ts': 4, 'vue.ts': 4, 'index.ts': 5,
+  'store.ts': 2, 'scheduler.ts': 2, 'manager.ts': 3, 'app.ts': 4, 'vue.ts': 4, 'index.ts': 5,
 }
 const ACKNOWLEDGED_EDGES = ['vue.ts → app.ts']
 const edges = []
