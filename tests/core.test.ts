@@ -4,7 +4,7 @@ import { defineRefresh, parameterKey, prepareParameters, sourceRuntime } from '.
 import { copyResult } from '../src/delivery.ts'
 import { Manager } from '../src/manager.ts'
 import type { Clock, Display, Handle, Input, ResultStore, StoreEntry } from '../src/model.ts'
-import type { RefreshError, RefreshQueryContext } from '../src/public-types.ts'
+import type { QueryResult, RefreshError, RefreshQueryContext } from '../src/public-types.ts'
 import { captureConsoleError, deferred } from './fixture.ts'
 import { runInNewContext } from 'node:vm'
 
@@ -430,6 +430,122 @@ function exhaustSequence(manager: Manager, page: { handle: Handle }, which: 'ope
   if (which === 'operation') page.handle.operationId = Number.MAX_SAFE_INTEGER
   if (which === 'resource') (manager as unknown as { nextResourceId: number }).nextResourceId = Number.MAX_SAFE_INTEGER
 }
+
+/**
+ * 逐 ID 证据补齐（§7 13.1 的未验证清单）：这四条叶子此前没有任何断言。
+ */
+test('B04/F08: several every changes in one sync stack then close leave no queued load', async () => {
+  const f = fixture(), a = f.page()
+  try {
+    a.submit({ x: 1 }); await tick()
+    assert.equal(f.calls.length, 1)
+    // 同一个同步栈内改三次频率后立即关闭，中间不 await。
+    a.set({ ...active, every: 101 })
+    a.set({ ...active, every: 102 })
+    a.set({ ...active, every: 103 })
+    a.set({ ...active, enabled: false })
+    // 微任务执行前的同步事实：在途任务已失效，队列里没有中间任务。
+    assert.ok(f.calls[0]!.signal.aborted)
+    const view = f.manager.inspect()
+    assert.equal(view.queued.length, 0); assert.equal(view.running.length, 1)
+    await tick()
+    // 唯一的后续 flush 复核已关闭：不请求，也不留下唤醒 Timer。
+    assert.equal(f.calls.length, 1); assert.equal(f.manager.inspect().scheduled, false)
+    await f.advance(1000); assert.equal(f.calls.length, 1)
+    // 在途执行真实结束时只清理自己，不复活资源。
+    f.calls[0]!.resolve(null); await tick()
+    assert.equal(f.manager.inspect().running.length, 0)
+    assert.deepEqual(f.manager.inspect().resources, [])
+  } finally { f.manager.dispose() }
+})
+
+test('B16a: a commit callback that starts a new query keeps the newer operation', async () => {
+  const f = fixture(), a = f.page({ ...active, enabled: false })
+  const published: unknown[] = []
+  const publish = a.handle.publish
+  Object.assign(a.handle, { publish(value: Display) { published.push(value.data); publish(value) } })
+  try {
+    let second!: Promise<QueryResult>
+    const first = a.query({ x: 1 }, async (_, context) => {
+      assert.equal(context.commit(() => { second = a.query({ x: 2 }, async () => ({ x: 'second' })) }), true)
+      return { x: 'first' }
+    })
+    // 回调之后旧流程复核身份：旧操作被结算为 superseded，返回值不发布、也不建立订阅。
+    assert.deepEqual(await first, { status: 'cancelled', reason: 'superseded' })
+    assert.deepEqual(await second, { status: 'success' })
+    await tick()
+    assert.deepEqual(a.display!.data, { x: 'second' })
+    assert.deepEqual(published, [{ x: 'second' }])   // 旧 runner 的返回值从未发布
+    assert.equal(f.calls.length, 0)
+    assert.equal(f.manager.inspect().resources.length, 0)
+  } finally { f.manager.dispose() }
+})
+
+test('C05: a throwing page delivery keeps the committed Store and the other subscribers', async () => {
+  const f = fixture(), a = f.page(), b = f.page()
+  const { logs, restore } = captureConsoleError()
+  const publish = a.handle.publish
+  let fail = true
+  Object.assign(a.handle, { publish(value: Display) {
+    if (fail) { fail = false; throw new Error('publish failed') }
+    publish(value)
+  } })
+  try {
+    a.submit({ x: 1 }); b.submit({ x: 1 }); await tick()
+    f.calls[0]!.resolve({ x: 'ok' }); await tick()
+    // Store 已提交且不回滚；抛错只让本页拿不到这次交付，其他订阅照常收到。
+    assert.equal(f.entries['test:1']!.version, 1)
+    assert.deepEqual(f.entries['test:1']!.data, { x: 'ok' })
+    assert.equal(a.display, null); assert.deepEqual(b.display!.data, { x: 'ok' })
+    assert.deepEqual(logs, [['[vue-refresh]', { origin: 'observer', error: 'observer notification failed', resourceId: 'test:1', taskVersion: 1 }]])
+    // 诊断出口本身也抛错时，必要清理与后续有效交付仍不受影响。
+    await f.advance(100); assert.equal(f.calls.length, 2)
+    console.error = () => { throw new Error('report failed') }
+    fail = true
+    f.calls[1]!.resolve({ x: 'next' }); await tick()
+    assert.equal(a.display, null); assert.deepEqual(b.display!.data, { x: 'next' })
+    assert.equal(f.manager.inspect().running.length, 0); assert.equal(f.manager.isDisposed(), false)
+  } finally { restore(); f.manager.dispose() }
+})
+
+test('Q06: the same parameters queried again replace the in-flight run', async () => {
+  const f = fixture(), a = f.page({ ...active, enabled: false })
+  const pending = deferred()
+  try {
+    const first = a.query({ x: 1 }, () => pending.promise)
+    const second = a.query({ x: 1 }, async () => ({ x: 'again' }))
+    // 同参不复用在途结果：旧操作被取消，新操作独立执行。
+    assert.deepEqual(await first, { status: 'cancelled', reason: 'superseded' })
+    assert.deepEqual(await second, { status: 'success' })
+    assert.deepEqual(a.display!.data, { x: 'again' })
+    pending.resolve({ x: 'stale' }); await tick()
+    assert.deepEqual(a.display!.data, { x: 'again' })
+  } finally { f.manager.dispose() }
+})
+
+test('P05: the same URL in two different source objects is not merged', async () => {
+  const f = fixture(), a = f.page()
+  let otherLoads = 0
+  // 两个 Source 打到同一个业务 URL（列表接口），但它们是两个独立定义。
+  const other = sourceRuntime(defineRefresh<object, unknown>({
+    async load() { otherLoads++; return { from: 'other' } },
+  }))
+  const otherHandle: Handle = { source: other, readInput: () => active, publish() {}, onError() {},
+    cleanup: null, operationId: 0, submission: null, activity: null, lifecycleActive: true, disposed: false }
+  f.manager.addHandle(otherHandle)
+  try {
+    a.submit({ x: 1 })
+    assert.equal(f.manager.submit(otherHandle, () => prepareParameters({ x: 1 })).status, 'accepted')
+    await tick()
+    // 参数键相同也不共享：两个 Source 各自取数，各自一个 Resource。
+    assert.equal(f.calls.length, 1); assert.equal(otherLoads, 1)
+    const view = f.manager.inspect()
+    // 第二个 Source 的 load 立即结束，因此只有 fixture 那条在途；两个 Resource 都在。
+    assert.equal(view.resources.length, 2); assert.equal(view.running.length, 1)
+    assert.deepEqual(view.resources.map(resource => resource.parameters.key), ['{"x":1}', '{"x":1}'])
+    assert.notEqual(view.resources[0]!.source, view.resources[1]!.source)
+  } finally { f.manager.dispose() }
+})
 
 test('sequence exhaustion: all three counters dispose the manager once and cancel pending work', async () => {
   const { logs, restore } = captureConsoleError()

@@ -296,3 +296,117 @@ test('P01/F04: core processing never resamples Vue configuration getters', async
     assert.equal(reads, initialReads)
   } finally { f.app.unmount() }
 })
+
+/**
+ * 逐 ID 证据补齐（§7 13.1 的未验证清单）：这四条叶子此前没有任何断言。
+ */
+test('C06: useRefresh outside a synchronous setup is rejected without creating a handle', async () => {
+  const f = fixture()
+  try {
+    await tick()
+    assert.equal(f.core.inspect().handles.length, 1)
+    assert.throws(() => useRefresh(f.source, { enabled: true, every: 1000 }),
+      /useRefresh must run synchronously in component setup/)
+    // 被拒绝的调用没有留下没有生命周期清理的句柄。
+    assert.equal(f.core.inspect().handles.length, 1)
+  } finally { f.app.unmount() }
+})
+
+test('L06: deactivation during the first load reports no failure and restores with a first query', async () => {
+  const f = fixture()
+  try {
+    f.task.submit({ symbol: 'A' }); await tick()
+    assert.equal(f.calls.length, 1)
+    f.shown.value = false; await tick()               // 首查中失活 → 取消在途请求
+    assert.ok(f.calls[0]!.signal.aborted)
+    f.calls[0]!.reject(new Error('aborted in flight')); await tick()
+    assert.equal(f.errors.length, 0)                  // 不报首查失败
+    assert.equal(f.task.display.value, null)
+    f.shown.value = true; await tick()
+    assert.equal(f.calls.length, 2)                   // 恢复可重新首查
+    f.calls[1]!.resolve({ price: 5 }); await tick()
+    assert.equal(f.task.display.value!.data.price, 5)
+  } finally { f.app.unmount() }
+})
+
+test('L08: a hidden tab never queries first and unsubscribes at once when hidden', async () => {
+  // 变体 01：运行中自定义页签隐藏 → 立即退订、不再请求，画面保留；恢复规则与首次一致。
+  const f = fixture()
+  try {
+    f.task.submit({ symbol: 'A' }); await tick()
+    f.calls[0]!.resolve({ price: 1 }); await tick()
+    f.visible.value = false; await tick()
+    assert.equal(f.core.inspect().resources.length, 0)
+    assert.equal(f.task.display.value!.data.price, 1)
+    assert.equal(f.calls.length, 1)
+    f.visible.value = true; await tick()
+    assert.equal(f.calls.length, 2)
+    f.calls[1]!.resolve({ price: 2 }); await tick()
+    assert.equal(f.task.display.value!.data.price, 2)
+  } finally { f.app.unmount() }
+
+  // 变体 02：初始 visible=false 挂载 → 一个请求都不发，也不是先发后取消。
+  const hidden = ref(false)
+  const g = fixture(enabled => ({ enabled, visible: hidden, every: 100_000 }))
+  try {
+    g.task.submit({ symbol: 'A' }); await tick()
+    assert.equal(g.calls.length, 0)
+    hidden.value = true; await tick()
+    assert.equal(g.calls.length, 1)
+    g.calls[0]!.resolve({ price: 3 }); await tick()
+    assert.equal(g.task.display.value!.data.price, 3)
+  } finally { g.app.unmount() }
+
+  // 变体 03：浏览器隐藏时挂载（安装路径上报不可见的等价形态）→ 不请求，可见后才首查。
+  const loads: number[] = []
+  const source = defineRefresh<Params, DTO>({ async load() { loads.push(1); return { price: 4 } } })
+  const pinia = createPinia(), manager = createRefreshManager({ pinia, maxConcurrent: 1 })
+  let core!: Manager, task!: RefreshHandle<Params, DTO>
+  const app = renderer.createApp({ setup() {
+    core = inject(managerKey)!.manager
+    core.setBrowserVisible(false)
+    task = useRefresh(source, { enabled: ref(true), every: 100_000 })
+    task.submit({ symbol: 'A' })
+    return () => null
+  } })
+  app.use(pinia); app.use(manager); app.mount(node())
+  try {
+    await tick()
+    assert.equal(loads.length, 0)
+    assert.equal(task.display.value, null)
+    core.setBrowserVisible(true); await tick()
+    assert.equal(loads.length, 1)
+    assert.equal(task.display.value!.data.price, 4)
+  } finally { app.unmount() }
+})
+
+test('S06: a late response from the previous session writes no store and delivers nowhere', async () => {
+  const pinia = createPinia()
+  const pending = deferred<DTO>()
+  const source = defineRefresh<Params, DTO>({ load: () => pending.promise })
+  const managerA = createRefreshManager({ pinia, maxConcurrent: 1 })
+  let coreA!: Manager, taskA!: RefreshHandle<Params, DTO>
+  const appA = renderer.createApp({ setup() {
+    coreA = inject(managerKey)!.manager
+    coreA.setBrowserVisible(true)
+    taskA = useRefresh(source, { enabled: ref(true), every: 100_000 })
+    taskA.submit({ symbol: 'A' })
+    return () => null
+  } })
+  appA.use(pinia); appA.use(managerA); appA.mount(node())
+  const managerB = createRefreshManager({ pinia, maxConcurrent: 1 })
+  const appB = renderer.createApp({ render: () => null })
+  try {
+    await tick()
+    assert.equal(coreA.inspect().running.length, 1)
+    managerA.dispose()                                 // 会话切换：旧会话整体销毁
+    appB.use(pinia); appB.use(managerB); appB.mount(node())
+    pending.resolve({ price: 1 })                      // 旧会话的在途响应此刻才回来
+    await tick()
+    assert.equal(taskA.display.value, null)            // 不交付任何页面
+    assert.deepEqual(coreA.inspect().entries, {})
+    assert.equal(managerB.readSnapshot(source, { symbol: 'A' }), undefined)
+    const partitions = Object.keys(pinia.state.value).filter(key => key.startsWith('refresh-'))
+    assert.equal(partitions.length, 1)                 // 只剩新会话的私有分区
+  } finally { appB.unmount(); appA.unmount(); managerB.dispose(); managerA.dispose() }
+})
