@@ -1,0 +1,32 @@
+:root { font-family: system-ui, sans-serif; color: #21352d; background: #f2f5f1; }
+body { margin: 0; }
+main { max-width: 900px; margin: 8vh auto; padding: 28px; }
+h1 { font-size: clamp(28px, 4vw, 42px); margin: 12px 0; }
+.eyebrow { color: #52705d; letter-spacing: .12em; font-size: 13px; }
+.intro { line-height: 1.8; color: #5a6860; max-width: 670px; }
+.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; margin: 36px 0; }
+.card { background: white; padding: 28px; border: 1px solid #dae2d8; border-radius: 18px; }
+.card-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h2 { font-size: 20px; margin: 0; }
+span { font-size: 12px; color: #607963; }
+.price { font-size: 40px; min-height: 48px; margin: 30px 0 12px; font-variant-numeric: tabular-nums; }
+button { border: 0; border-radius: 8px; background: #234f39; color: white; padding: 12px 20px; font: inherit; cursor: pointer; }
+button:focus-visible { outline: 3px solid #93ba89; outline-offset: 3px; }
+.note { color: #6b766d; font-size: 13px; line-height: 1.8; }
+@media (max-width: 620px) { .cards { grid-template-columns: 1fr; } main { margin: 20px auto; padding: 20px; } }
+
+/* 代表页面外壳：视图切换、表单与列表 */
+.tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 8px; }
+.tab { background: #e4ebe1; color: #2c4a38; padding: 9px 16px; }
+.tab.active { background: #234f39; color: white; }
+.view { margin-top: 18px; }
+.page > h2 { font-size: 24px; margin: 6px 0 10px; }
+.form, .actions { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; margin: 18px 0; }
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #48604f; }
+.field input, .field select { padding: 8px 10px; border: 1px solid #cbd8c7; border-radius: 8px; font: inherit; background: white; }
+.rows { width: 100%; border-collapse: collapse; margin-top: 14px; background: white; }
+.rows th, .rows td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e4ebe1; font-variant-numeric: tabular-nums; }
+.rows th { font-size: 12px; color: #5d7566; font-weight: 600; }
+.tag { margin-left: 8px; padding: 2px 8px; border-radius: 999px; background: #eef3ec; }
+.card h3 { margin: 0 0 4px; font-size: 17px; }
+
