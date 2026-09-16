@@ -2,7 +2,7 @@ import { createApp, defineComponent, h, inject, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { createPinia } from 'pinia'
 import { defineRefresh } from '../src/source'
-import type { DeepReadonly, QueryResult, RefreshHandle, RefreshLoadContext } from '../src/public-types'
+import type { DeepReadonly, RefreshHandle, RefreshLoadContext, RefreshResult } from '../src/public-types'
 import type { Manager } from '../src/manager'
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
@@ -21,7 +21,7 @@ const params = new URLSearchParams(location.search)
 export interface HarnessSnapshot {
   calls: Array<{ id: number; aborted: boolean; finished: boolean }>
   events: string[]
-  queryResults: Record<string, QueryResult | null>
+  queryResults: Record<string, RefreshResult | null>
   pages: Record<string, { readonly args: QuoteParams; readonly data: Quote; readonly origin: string; readonly updatedAt: number } | null>
   entries: Record<string, { version: number; data: Quote }>
   running: number
@@ -95,7 +95,7 @@ function mountHarness(): void {
     validate: params => params.account.length > 0 && params.symbol.length > 0,
     load: readQuote,
   })
-  const queryResults: Record<string, QueryResult | null> = {}
+  const queryResults: Record<string, RefreshResult | null> = {}
 
   let manager: Manager
   const components = new Map<string, { task: RefreshHandle<QuoteParams, Quote>; enabled: ReturnType<typeof ref<boolean>> }>()
@@ -114,13 +114,13 @@ function mountHarness(): void {
         h('div', { class: 'card-heading' }, [h('h2', `组件${props.label}`), h('span', enabled.value ? '订阅中' : '已暂停')]),
         h('p', { class: 'price', 'data-testid': `price-${props.label}` }, task.display.value?.data.quote.price.toString() ?? '等待首查'),
         h('p', task.display.value ? `来自请求 ${task.display.value.data.quote.requestId}` : '两个组件共用同一来源和参数'),
-        h('p', task.display.value ? `展示参数：${task.display.value.args.symbol} · ${task.display.value.origin === 'query' ? '本页查询' : '共享刷新'}` : ''),
+        h('p', task.display.value ? `展示参数：${task.display.value.args.symbol} · ${task.display.value.origin === 'refresh' ? '本页刷新' : '共享刷新'}` : ''),
         // updatedAt 是墙钟读数：相对时间按 U16/§2.5 的建议把差值钳制到 0，避免校时回拨显示负数。
         h('p', { 'data-testid': `age-${props.label}` }, task.display.value
           ? `数据时间：${new Date(task.display.value.updatedAt).toLocaleTimeString()} · ${Math.max(0, Math.round((Date.now() - task.display.value.updatedAt) / 1000))} 秒前`
           : ''),
         h('label', ['品种 ', h('input', { value: draftSymbol.value, onInput: (event: Event) => { draftSymbol.value = (event.target as HTMLInputElement).value } })]),
-        h('button', { onClick: () => { void task.query({ account: 'demo', symbol: draftSymbol.value }, readQuote) } }, '查询本页'),
+        h('button', { onClick: () => { task.submit({ account: 'demo', symbol: draftSymbol.value }); void task.refresh() } }, '刷新本页'),
         h('button', { onClick: () => { enabled.value = !enabled.value } }, enabled.value ? '暂停刷新' : '恢复刷新'),
       ])
     },
@@ -158,8 +158,11 @@ function mountHarness(): void {
       }
     },
     query(name: string, symbol: string) {
+      const page = components.get(name)!
       queryResults[name] = null
-      void components.get(name)!.task.query({ account: 'demo', symbol }, readQuote).then(result => { queryResults[name] = result })
+      // 主动刷新：先声明身份，再用与自动刷新同一条路径取一次。
+      page.task.submit({ account: 'demo', symbol })
+      void page.task.refresh().then(result => { queryResults[name] = result })
     },
     enable(name: string, enabled: boolean) { components.get(name)!.enabled.value = enabled },
     resolve(id: number, price: number) { if (controlled) calls[id - 1]!.resolve({ quote: { price, requestId: id } }) },

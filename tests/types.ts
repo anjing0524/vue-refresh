@@ -16,15 +16,15 @@ function contract() {
   task.submit({ account: 'demo', symbol: 2 })
   // @ts-expect-error tuple API was explicitly removed
   task.submit([{ account: 'demo', symbol: 'A' }])
-  // @ts-expect-error runner DTO must match this source
-  task.query({ account: 'demo', symbol: 'A' }, async () => ({ price: 'bad' }))
-  task.query({ account: 'demo', symbol: 'A' }, async (args, context) => {
-    // @ts-expect-error immutable parameter snapshot
-    args.account = 'mutated'
-    // @ts-expect-error async commit is forbidden
-    context.commit(async () => {})
-    return { price: 1 }
-  })
+  // 刷新不带参数：参数身份只来自已声明的 submission。
+  // @ts-expect-error refresh takes no DTO argument
+  task.refresh({ account: 'demo', symbol: 'A' })
+  const settled = task.refresh()
+  // 结算结果只报成功/失败/取消，不携带 DTO：数据只经 display 交付。
+  // @ts-expect-error the settlement result carries no DTO
+  settled.then(result => result.data)
+  // @ts-expect-error status is a closed union
+  settled.then(result => result.status === 'done')
   // @ts-expect-error display is read only
   task.display.value = null
   // @ts-expect-error nested display data is read only

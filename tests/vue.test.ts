@@ -9,7 +9,7 @@ import { createRefreshManager, managerKey } from '../src/app.ts'
 import { useRefresh } from '../src/vue.ts'
 import { defineRefresh } from '../src/source.ts'
 import type { Manager } from '../src/manager.ts'
-import type { RefreshHandle, RefreshError, RefreshInput, RefreshOptions, QueryResult } from '../src/public-types.ts'
+import type { RefreshHandle, RefreshError, RefreshInput, RefreshOptions, RefreshResult } from '../src/public-types.ts'
 import { captureConsoleError, deferred } from './fixture.ts'
 
 interface Host { parent: Host | null; children: Host[]; text: string }
@@ -57,7 +57,7 @@ test('L05/L07/L10/M01: actual KeepAlive deactivation, duplicate mount/activation
   try {
     f.task.submit({ symbol: 'A' }); await tick()
     assert.equal(f.calls.length, 1)
-    assert.equal(f.core.inspect().handles[0]!.activity?.kind, 'subscription')
+    assert.equal(f.core.inspect().handles[0]!.subscription?.owner, f.core.inspect().handles[0])
     f.calls[0]!.resolve({ price: 1 }); await tick()
     f.shown.value = false; await tick()
     assert.equal(f.core.inspect().resources.length, 0); assert.equal(f.task.display.value!.data.price, 1)
@@ -72,23 +72,32 @@ test('L05/L07/L10/M01: actual KeepAlive deactivation, duplicate mount/activation
   assert.ok(f.core.isDisposed()); assert.deepEqual(Object.keys(f.pinia.state.value), [])
 })
 
-test('A07/B08/F09: invalid configuration rejects new query, preserves current query and recovers', async () => {
-  const f = fixture(), result = deferred<DTO>()
+test('A07/B08/F09: 配置非法拒绝新刷新并按资格退出订阅；修正后恢复', async () => {
+  const f = fixture()
   try {
-    const first = f.task.query({ symbol: 'B' }, () => result.promise)
-    const operation = f.core.inspect().handles[0]!.operationId
-    f.every.value = NaN
-    assert.equal(f.errors.length, 1)
-    let ran = false
-    const rejected = await f.task.query({ symbol: 'C' }, async () => { ran = true; return { price: 3 } })
-    assert.equal(rejected.status, 'error'); assert.equal(ran, false)
-    assert.equal(f.core.inspect().handles[0]!.operationId, operation)
-    assert.equal(f.errors.length, 1); assert.equal(f.enabled.value, true)
-    result.resolve({ price: 2 }); assert.deepEqual(await first, { status: 'success' })
-    await tick(); assert.equal(f.calls.length, 0)
-    f.every.value = 100_000; await tick()
+    f.task.submit({ symbol: 'A' }); await tick()
     assert.equal(f.calls.length, 1)
-    f.every.value = 0; await tick(); assert.equal(f.errors.length, 2)
+    f.every.value = NaN; await tick()
+    assert.equal(f.errors.length, 1)
+    assert.equal(f.errors[0]!.origin, 'configuration')
+    assert.ok(f.calls[0]!.signal.aborted)                  // 资格不再成立：退出订阅并取消在途
+    assert.deepEqual(f.core.inspect().resources, [])
+    f.calls[0]!.resolve({ price: 0 }); await tick()        // 真实结束才释放物理槽位
+    // 入口拒绝：非法配置下不产生任何新请求。
+    const rejected = await f.task.refresh()
+    assert.equal(rejected.status, 'error')
+    if (rejected.status === 'error') assert.equal(rejected.origin, 'configuration')
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.core.inspect().handles[0]!.operationId, 1)
+    // 修正后按当前资格恢复：重建实例并首查。
+    f.every.value = 100_000; await tick()
+    assert.equal(f.calls.length, 2)
+    f.calls[1]!.resolve({ price: 2 }); await tick()
+    assert.equal(f.task.display.value!.data.price, 2)
+    // 连续非法状态不忙循环，也不重复通知。
+    f.every.value = 0; await tick()
+    assert.equal(f.errors.length, 2)
+    await tick(); assert.equal(f.calls.length, 2)
   } finally { f.app.unmount() }
 })
 
@@ -123,12 +132,22 @@ for (const initiallyEnabled of [true, false]) test('F10/B05: enabled ' + initial
   })
   const f = fixture((_, errors) => ({ enabled, every: 100_000, onError: e => { errors.push(e) } }))
   try {
-    const result = deferred<DTO>(), query = f.task.query({ symbol: 'A' }, () => result.promise)
-    unreadable = true; trigger()
+    f.task.submit({ symbol: 'A' }); await tick()
+    const refreshing = f.task.refresh()                    // 未结算的刷新要求
+    await tick()
+    assert.equal(f.calls.length, 1)
+    unreadable = true; trigger()                           // 未知不覆盖边沿历史
     unreadable = false; readValue = false; trigger()
-    result.resolve({ price: 1 })
-    assert.deepEqual(await query, initiallyEnabled ? { status: 'cancelled', reason: 'unavailable' } : { status: 'success' })
-    await tick(); assert.equal(f.calls.length, 0)
+    if (initiallyEnabled) {
+      // true→未知→false：关闭边沿结算未完成的刷新要求。
+      assert.deepEqual(await refreshing, { status: 'cancelled', reason: 'unavailable' })
+      assert.ok(f.calls[0]!.signal.aborted)
+    } else {
+      // false→未知→false：暂停期间的单次刷新继续执行。
+      f.calls[0]!.resolve({ price: 1 }); await tick()
+      assert.deepEqual(await refreshing, { status: 'success' })
+      assert.equal(f.task.display.value!.data.price, 1)
+    }
   } finally { f.app.unmount() }
 })
 
@@ -138,29 +157,46 @@ test('F05/A05: onError reentry cannot be overwritten by old failure', async () =
     set(value) { enabled.value = value },
   }), every: 100_000, onError: e => { errors.push(e); enabled.value = false } }))
   try {
-    const a = deferred<DTO>(), b = deferred<DTO>()
-    let second!: Promise<QueryResult>
-    const stop = watch(f.enabled, value => { if (!value) second = f.task.query({ symbol: 'B' }, () => b.promise) }, { flush: 'sync' })
-    const first = f.task.query({ symbol: 'A' }, () => a.promise)
-    a.reject('failed')
-    assert.equal((await first).status, 'error'); await tick()
-    b.resolve({ price: 2 }); assert.deepEqual(await second, { status: 'success' })
-    assert.equal(f.task.display.value!.data.price, 2); assert.equal(f.errors.length, 1)
+    let redeclared = false
+    const stop = watch(f.enabled, value => {
+      if (!value && !redeclared) { redeclared = true; f.task.submit({ symbol: 'B' }) }
+    }, { flush: 'sync' })
+    f.task.submit({ symbol: 'A' }); await tick()
+    f.calls[0]!.reject('failed'); await tick()
+    assert.equal(f.errors.length, 1)                       // A 的失败已结算并通知一次
+    assert.equal(f.task.display.value, null)
+    f.enabled.value = true; await tick()
+    assert.equal(f.calls.length, 2)                        // 重入时的声明保留并首查
+    f.calls[1]!.resolve({ price: 2 }); await tick()
+    assert.equal(f.task.display.value!.data.price, 2)
+    assert.equal(f.errors.length, 1)
     stop()
   } finally { f.app.unmount() }
 })
 
-test('F04: real Pinia synchronous watcher replaces current task before page delivery', async () => {
+test('F04: real Pinia synchronous watcher during delivery', async () => {
+  // 变体 01：Store 通知里改频率——本次结果仍然有效并交付，不因此重取。
   const f = fixture()
   try {
     f.task.submit({ symbol: 'A' }); await tick()
     const entries = () => f.core.inspect().entries
     const stop = watch(entries, () => { if (Object.keys(entries()).length) f.every.value += 1 }, { flush: 'sync' })
     f.calls[0]!.resolve({ price: 1 }); await tick()
-    assert.equal(f.task.display.value, null); assert.equal(f.calls.length, 2)
-    stop(); f.calls[1]!.resolve({ price: 2 }); await tick()
-    assert.equal(f.task.display.value!.data.price, 2)
+    assert.equal(f.task.display.value!.data.price, 1)
+    assert.equal(f.calls.length, 1)
+    stop()
   } finally { f.app.unmount() }
+
+  // 变体 02：Store 通知里退订——本页不再接收本次交付，其他接收者不受影响。
+  const g = fixture()
+  try {
+    g.task.submit({ symbol: 'A' }); await tick()
+    const entries = () => g.core.inspect().entries
+    const stop = watch(entries, () => { if (Object.keys(entries()).length) g.enabled.value = false }, { flush: 'sync' })
+    g.calls[0]!.resolve({ price: 1 }); await tick()
+    assert.equal(g.task.display.value, null)
+    stop()
+  } finally { g.app.unmount() }
 })
 
 test('A05/S05/S07: install ownership, repeated dispose, shared Pinia business state retained', () => {
@@ -228,11 +264,15 @@ test('API-06: onError is resolved per notification, so replacing it at runtime t
   }
   const f = fixture(enabled => { options.enabled = enabled; return options })
   try {
-    const first = f.task.query({ symbol: 'B' }, async () => { throw new Error('boom') })
+    f.task.submit({ symbol: 'A' }); await tick()
+    f.calls[0]!.resolve({ price: 0 }); await tick()
+    const first = f.task.refresh(); await tick()
+    f.calls[1]!.reject(new Error('boom')); await tick()
     assert.equal((await first).status, 'error')
     assert.deepEqual(seen, ['first'])
     options.onError = () => { seen.push('second') }
-    const second = f.task.query({ symbol: 'C' }, async () => { throw new Error('boom') })
+    const second = f.task.refresh(); await tick()
+    f.calls[2]!.reject(new Error('boom')); await tick()
     assert.equal((await second).status, 'error')
     assert.deepEqual(seen, ['first', 'second'])
   } finally { f.app.unmount() }
@@ -277,8 +317,12 @@ test('P01/C03/C13: resource validation runs once per submission, never on restor
     assert.deepEqual(manager.readSnapshot(source, { symbol: 'A' }), { price: 7 })
     enabled.value = false; enabled.value = true; await tick()
     assert.equal(validations, 1)
-    assert.equal((await task.query({ symbol: 'B' }, async () => ({ price: 8 }))).status, 'success')
-    await tick(); assert.equal(validations, 2)
+    // 新身份只由声明引入；刷新复用已准备参数，不重跑 validate。
+    task.submit({ symbol: 'B' }); await tick()
+    assert.equal(validations, 2)
+    const refreshed = await task.refresh()
+    assert.equal(refreshed.status, 'success')
+    assert.equal(validations, 2)
     assert.equal(task.submit({ symbol: '' }).status, 'rejected')
     assert.equal(validations, 3)
   } finally { app.unmount() }

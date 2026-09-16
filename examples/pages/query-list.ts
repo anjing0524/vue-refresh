@@ -6,7 +6,7 @@
  */
 import { defineComponent, h, onMounted, ref, shallowRef } from 'vue'
 import { useRefresh } from '../../src/vue'
-import { ageLine, listSource, runList } from '../sources'
+import { ageLine, listSource } from '../sources'
 import type { ListParams, SortField } from '../sources'
 
 const SORTS: readonly SortField[] = ['price', 'change', 'volume']
@@ -62,7 +62,9 @@ export const QueryListPage = defineComponent({
       const args = submitted.value ?? draft()
       note.value = ''
       submitted.value = args
-      void task.query(args, runList)
+      // 暂停后单查：声明该身份并显式刷新一次；刷新不恢复自动轮询。
+      task.submit(args)
+      void task.refresh()
     }
     const field = (label: string, input: () => unknown) =>
       h('label', { class: 'field' }, [label, input() as never])
@@ -105,7 +107,7 @@ export const QueryListPage = defineComponent({
           ? `已提交参数：${submitted.value.account} / ${submitted.value.market} / 第 ${submitted.value.page} 页 / 按${SORT_LABEL[submitted.value.sortBy]}`
           : '尚未提交'),
         h('p', { 'data-testid': 'ql-origin' }, display
-          ? `本次来源：${display.origin === 'query' ? '本页单查' : '共享刷新'} · 请求号 ${display.data.requestId}`
+          ? `本次来源：${display.origin === 'refresh' ? '本页刷新' : '共享刷新'} · 请求号 ${display.data.requestId}`
           : ''),
         h('p', { 'data-testid': 'ql-age' }, display ? ageLine(display.updatedAt) : ''),
         h('p', { 'data-testid': 'ql-note' }, note.value),

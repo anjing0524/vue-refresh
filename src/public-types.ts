@@ -16,30 +16,27 @@ export type RefreshInput<T> = T | Readonly<Ref<T>> | (() => T)
 
 // ─── 状态取值 ──────────────────────────────────────────────────────────────
 // 每个封闭状态域枚举为一个常量对象（成员名 + 字面量），类型由对象推导：新增、删除或
-// 收敛一个状态只改这里。句柄活动判别只在核心内部使用，放在 `model.ts`。
+// 收敛一个状态只改这里。
 // 不使用 TS enum —— erasableSyntaxOnly 与 Node 的类型擦除都不接受它。
 
-/** 一次请求的来源。 */
+/** 一次共享请求由谁触发。 */
 export const RequestOrigin = {
-  /** 页面主动查询。 */
-  Query: 'query',
-  /** 框架后台刷新。 */
+  /** 页面显式刷新。 */
+  Refresh: 'refresh',
+  /** 框架按订阅到期自动刷新。 */
   Background: 'background',
 } as const
 export type RequestOrigin = (typeof RequestOrigin)[keyof typeof RequestOrigin]
 
 /**
  * 错误的来源：**哪一步失败了**。
- * - `execution`：页面查询的执行失败（runner 抛错或拒绝）。`QueryResult` 的 `origin` 与
- *   `onError` 的 `origin` 因此对同一次失败给出同一个取值；后台刷新失败另用 `background`；
- * - `background`：共享条目的后台刷新失败（条目暂不可得）；
- * - `validation` / `configuration`：参数准备失败 / 入口配置非法。
+ * - `background`：共享请求失败。主动刷新与自动刷新走同一条获取路径，因此共用这个取值；
+ * - `validation`：订阅声明的参数准备失败；
+ * - `configuration`：刷新入口读到的配置快照非法。
  * 框架自身的 observer 诊断只写日志、不经 `onError` 投递，因此不在这个取值域内。
  */
 export const ErrorOrigin = {
-  /** 请求执行失败。 */
-  Execution: 'execution',
-  /** 后台刷新失败；与 `RequestOrigin.Background` 同一字面量。 */
+  /** 共享请求失败（条目暂不可得）；与 `RequestOrigin.Background` 同一字面量。 */
   Background: RequestOrigin.Background,
   /** 参数准备失败。 */
   Validation: 'validation',
@@ -49,14 +46,15 @@ export const ErrorOrigin = {
 export type ErrorOrigin = (typeof ErrorOrigin)[keyof typeof ErrorOrigin]
 
 /**
- * 独立查询的失败来源：`ErrorOrigin` 里可由 `query` 结算产生的取值。
- * 不单独维护常量对象——取值以成员引用表达，这里只收窄类型。
+ * 刷新动作能产生的失败来源：`ErrorOrigin` 里可由 `refresh` 结算产生的取值。
+ * 与 `SubmitCancelReason` 同一做法——由常量对象推导而不是手写字面量，成员被重命名或删除时
+ * 这里会一起报错，不会留下类型上仍合法、语义上已不存在的取值。
  */
-export type QueryErrorOrigin = Exclude<ErrorOrigin, 'background'>
+export type RefreshErrorOrigin = Exclude<ErrorOrigin, 'validation'>
 
 /** 取消原因。 */
 export const CancelReason = {
-  /** 被同一句柄的新操作替代。 */
+  /** 被同一句柄的新声明或新刷新替代。 */
   Superseded: 'superseded',
   /**
    * 因「不再允许」而取消：`enabled` 关闭，或失去激活、隐藏。
@@ -70,8 +68,7 @@ export type CancelReason = (typeof CancelReason)[keyof typeof CancelReason]
 
 /**
  * `submit` 能产生的取消原因：`CancelReason` 的可达子集。
- * 与 `QueryErrorOrigin` 同一做法——由常量对象推导而不是手写字面量，成员被重命名或删除时
- * 这里会一起报错，不会留下类型上仍合法、语义上已不存在的取值。
+ * 声明不检查可见性与开启意愿（暂停页仍可声明），因此不会被 `unavailable` 取消。
  */
 export type SubmitCancelReason = Exclude<CancelReason, typeof CancelReason.Unavailable>
 
@@ -85,17 +82,8 @@ export interface RefreshSource<P extends object, T> {
   readonly [sourceBrand]: { readonly args: (value: P) => P; readonly data: (value: T) => T }
 }
 
-/** 框架请求（load / runner）收到的上下文。 */
+/** 框架请求（`load`）收到的上下文。 */
 export interface RefreshLoadContext { readonly signal: AbortSignal }
-
-/**
- * 独立查询的上下文：额外提供受有效性保护的同步副作用入口。
- *
- * `commit` 只在当前查询仍然有效时执行 `effect` 并返回 `true`，失效返回 `false` 且不执行。
- * `effect` 必须同步返回 `undefined`：其它返回值按违约处理——同步抛错给 runner，该次查询随之以
- * `execution` 结算为失败并通知，异步返回的 Promise 拒绝只走 observer 诊断（统一文档 §2.5）。
- */
-export interface RefreshQueryContext extends RefreshLoadContext { commit(effect: () => undefined): boolean }
 
 /**
  * 错误通知值。
@@ -110,9 +98,8 @@ export interface RefreshError {
 
 /**
  * `submit` 的同步结果。
- * `accepted` 只表示参数已被记录，不代表请求成功；参数被拒时来源必然是校验，
- * 因此不需要额外的 origin 字段。取消原因收窄为可达的两种（`SubmitCancelReason`）：
- * `submit` 没有入口配置与可见性检查，不会被 `unavailable` 取消。
+ * `accepted` 只表示订阅身份已被记录，不代表请求成功；参数被拒时来源必然是校验，
+ * 因此不需要额外的 origin 字段。取消原因收窄为可达的两种（`SubmitCancelReason`）。
  */
 export type SubmitResult =
   | { readonly status: 'accepted' }
@@ -120,13 +107,13 @@ export type SubmitResult =
   | { readonly status: 'cancelled'; readonly reason: SubmitCancelReason }
 
 /**
- * `query` 的结算结果。取消立即结算，不等底层请求真正结束。
- * `origin` 是失败发生的那一步，取值域与 `RefreshError['origin']` 一致但不含 `background`：
- * 查询路径不会产生「后台条目暂不可得」。
+ * `refresh` 的结算结果。取消立即结算，不等底层请求真正结束。
+ * 它只报「这次刷新有没有拿到新结果」，不携带 DTO：数据仍只经 `display` 交付，
+ * 因此页面不会因为多一条通道而持有第二份结果副本。
  */
-export type QueryResult =
+export type RefreshResult =
   | { readonly status: 'success' }
-  | { readonly status: 'error'; readonly origin: QueryErrorOrigin; readonly error: unknown }
+  | { readonly status: 'error'; readonly origin: RefreshErrorOrigin; readonly error: unknown }
   | { readonly status: 'cancelled'; readonly reason: CancelReason }
 
 /**
@@ -150,8 +137,8 @@ export interface RefreshDisplay<P extends object, T> {
  */
 export interface RefreshOptions {
   /**
-   * 唯一开启意愿。框架只读取它，**从不写入**：查询执行失败只结算并通知，
-   * 是否停止轮询由调用方在 `onError` 里自行决定。
+   * 唯一开启意愿。框架只读取它，**从不写入**：共享请求失败只结算并通知，
+   * 是否停止订阅由调用方在 `onError` 里自行决定。
    */
   readonly enabled: RefreshInput<boolean>
   /** 刷新间隔（毫秒）；只接受正安全整数，不自动转换或取整。 */
@@ -165,18 +152,20 @@ export interface RefreshOptions {
   readonly onError?: (error: RefreshError) => void | Promise<void>
 }
 
-/** 组件句柄：表达刷新需求并读取本页快照。 */
+/** 组件句柄：声明订阅、主动刷新并读取本页快照。 */
 export interface RefreshHandle<P extends object, T> {
   /** 本页最近一次发布值；只读、整体替换，不做深响应式。 */
   readonly display: Readonly<ShallowRef<RefreshDisplay<P, T> | null>>
+  /** 声明或更新订阅身份；相同身份重复声明幂等，不隐含刷新。 */
   submit(args: P): SubmitResult
-  query(args: P, runner: (args: DeepReadonly<P>, context: RefreshQueryContext) => Promise<T>): Promise<QueryResult>
+  /** 显式刷新当前身份；与自动刷新共用同一条获取与交付路径。 */
+  refresh(): Promise<RefreshResult>
 }
 
 /** 创建 Manager 的必填配置。参数边界见[统一文档](./统一刷新管理.md) §5 G01。 */
 export interface RefreshManagerOptions {
   readonly pinia: Pinia
-  /** 后台任务的并发上限；独立查询不占该槽位。 */
+  /** 共享请求的并发上限；显式刷新与自动刷新共用这些槽位。 */
   readonly maxConcurrent: number
 }
 

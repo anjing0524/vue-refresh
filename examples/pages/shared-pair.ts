@@ -7,9 +7,9 @@
 import { defineComponent, h, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import type { Ref } from 'vue'
 import { useRefresh } from '../../src/vue'
-import { ageLine, quoteSource, readShared, runQuote } from '../sources'
+import { ageLine, quoteSource, readShared } from '../sources'
 import type { QuoteParams, QuoteResult } from '../sources'
-import type { DeepReadonly, RefreshHandle, RefreshQueryContext } from '../../src/public-types'
+import type { RefreshHandle } from '../../src/public-types'
 
 interface Entry { task: RefreshHandle<QuoteParams, QuoteResult>; enabled: Ref<boolean> }
 
@@ -130,7 +130,7 @@ export const SharedPairPage = defineComponent({
   },
 })
 
-/** 无启停按钮的查询组合（B09）：开启意愿只由「前次失败」与「runner 内部」两处代码决定。 */
+/** 无启停按钮的刷新组合（B09）：开启意愿只由「前次失败」与「按钮回调」两处代码决定。 */
 export const B09View = defineComponent({
   name: 'B09View',
   setup() {
@@ -147,27 +147,25 @@ export const B09View = defineComponent({
     })
     onMounted(() => task.submit({ account: 'demo', symbol: 'B09' }))
 
-    const queryAndResume = (): void => {
-      void task.query({ account: 'demo', symbol: 'B09-NEW' }, async (
-        args: DeepReadonly<QuoteParams>, context: RefreshQueryContext,
-      ) => {
-        // 在 runner 内开启意愿：框架必须先登记本次 query、退出旧订阅，不能先按旧参数发后台请求。
-        enabled.value = true
-        return runQuote(args, context)
-      })
+    const refreshAndResume = (): void => {
+      // 在同一个同步块里开启意愿并声明新身份：框架必须先退出旧订阅、按新身份请求，
+      // 不能先按旧参数发后台请求（旧契约由 runner 的同步前缀保证，现在由声明顺序保证）。
+      enabled.value = true
+      task.submit({ account: 'demo', symbol: 'B09-NEW' })
+      void task.refresh()
     }
     return () => {
       const display = task.display.value
       return h('section', { class: 'page', 'data-testid': 'page-b09' }, [
-        h('h2', '无启停按钮的查询组合（B09）'),
-        h('p', { class: 'intro' }, '本视图没有任何启停按钮。挂载时按 B09 参数提交并失败一次，页面在 onError 里关闭意愿；点下面的按钮做一次单查，并在 runner 里把意愿改回真。'),
+        h('h2', '无启停按钮的刷新组合（B09）'),
+        h('p', { class: 'intro' }, '本视图没有任何启停按钮。挂载时按 B09 参数提交并失败一次，页面在 onError 里关闭意愿；点下面的按钮开启意愿、声明新身份并刷新一次。'),
         h('p', { 'data-testid': 'b09-failures' }, `前次后台失败：${failures.value} 次`),
         h('p', { 'data-testid': 'b09-state' }, enabled.value ? '开启意愿：真' : '开启意愿：假（页面已关闭）'),
         h('p', { class: 'price', 'data-testid': 'b09-price' }, display ? display.data.quote.price.toFixed(2) : '等待首查'),
         h('p', { 'data-testid': 'b09-request' }, display
           ? `来自请求 ${display.data.quote.requestId} · ${display.args.symbol} · 来源 ${display.origin}`
           : '尚未交付'),
-        h('button', { 'data-testid': 'b09-query', onClick: queryAndResume }, '单查并在 runner 内开启订阅'),
+        h('button', { 'data-testid': 'b09-refresh', onClick: refreshAndResume }, '刷新并在页面内开启订阅'),
       ])
     }
   },

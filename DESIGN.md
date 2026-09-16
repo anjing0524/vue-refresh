@@ -10,10 +10,9 @@
 ```text
 public-types.ts            公共类型唯一代码定义；不依赖运行时模块
 diagnostics.ts             诊断出口与返回值观察；零依赖叶子
-model.ts                  内部模型：Handle / activity / Submission / Resource / Task / 端口
+model.ts                  内部模型：Handle / subscription / refreshes / Submission / Resource / Task / 端口
 source.ts                 固定资源定义、提交边界准备与稳定键、只读定位
 delivery.ts               结果复制、observer 诊断、onError 通知隔离
-query.ts                  独立查询执行、commit 与结算
 store.ts                  Pinia 结果分区适配
 scheduler.ts              后台调度：唯一 Timer、FIFO 队列与并发槽位；只经 ScheduleHost 端口回调
 vue.ts                    组件适配：配置快照读取、句柄、配置 watcher、生命周期、Display
@@ -22,7 +21,7 @@ manager.ts                Manager：状态观测、页面操作、资源关系�
 index.ts                  包入口（只导出三个正式函数与公共类型）
 ```
 
-依赖方向单向：`public-types`/`diagnostics` ← `source`/`model`/`delivery` ← `query`/`store`/`scheduler` ← `manager` ← `vue`/`app`。
+依赖方向单向：`public-types`/`diagnostics` ← `source`/`model`/`delivery` ← `store`/`scheduler` ← `manager` ← `vue`/`app`。
 核心不依赖 Vue、Pinia 或 HTTP。这条方向由 `pnpm check:docs` 校验：**运行期边必须严格向下**，同层或向上的运行期边
 必须同时在 `check-docs.mjs` 与本节登记，否则直接失败；类型回边只报告（运行期被擦除）。
 `diagnostics.ts` 是零依赖叶子：结果边界（`delivery.ts`）与参数边界（`source.ts`）都要上报，
@@ -30,7 +29,7 @@ index.ts                  包入口（只导出三个正式函数与公共类型
 唯一被登记的等层运行期边是 `vue.ts → app.ts`：组件适配只需要安装器提供的注入键 `managerKey`，
 而这个键必须在 `provide` 之前存在，因此它留在安装器里；二者之间没有别的运行期共享。
 
-核心拆成两个文件：`manager.ts` 按职责分成八个分段：状态观测、页面操作、需求关系、后台执行、调度入口、有效性与身份、释放、提交与交付要求；
+核心拆成两个文件：`manager.ts` 按职责分成八个分段：状态观测、页面操作、需求关系、后台执行、刷新要求、调度入口、有效性与身份、释放；
 唯一的 Timer、FIFO 队列与并发槽位归 `scheduler.ts`（L2），它是「何时、按什么顺序执行」的唯一所有者。
 
 ## 2. 模块职责
@@ -40,13 +39,11 @@ index.ts                  包入口（只导出三个正式函数与公共类型
 | `source.ts` | 固定定义、冻结快照与稳定键、只读定位 |
 | `delivery.ts` | 结果复制、通知异常隔离（诊断出口与返回值观察在 `diagnostics.ts`） |
 | `diagnostics.ts` | `FrameworkIdentity`、`reportObserverError`、`observeRejection`；零依赖 |
-| `query.ts` | 独立查询的取消、commit 与结算；只经 `QueryHost` 窄端口（4 项事实）访问编排层 |
-| `vue.ts` | 配置快照读取以 `createConfigurationBinding` 为唯一入口（快照、关闭边沿、通知去重、watcher 四件事在同处）；配置绑定只经 `ConfigurationHost` 窄端口（3 项事实）访问编排层 |
+| `vue.ts` | 配置快照读取以 `createConfigurationBinding` 为唯一入口（快照、关闭边沿、通知去重、watcher 四件事在同处），加句柄建立、生命周期与 Display 绑定；配置绑定只经 `ConfigurationHost` 窄端口（3 项事实）访问编排层 |
 | `store.ts` | 分区替换、删除与私有 Store 释放 |
-| `vue.ts` | 配置快照读取、句柄建立、配置 watcher、生命周期、Display 绑定 |
 | `app.ts` | 安装绑定、可见性监听、只读快照、销毁 |
 | `scheduler.ts` | 唯一 Timer、FIFO 队列、真实并发槽位、活跃 Resource 遍历；只经 `ScheduleHost`（5 项事实）回调编排层 |
-| `manager.ts` | 需求接纳、Resource 生存期、后台任务、释放；调度入口转发给 `scheduler.ts` |
+| `manager.ts` | 声明接纳、刷新要求、Resource 生存期、共享任务、交付与释放；调度入口转发给 `scheduler.ts` |
 | `model.ts` / `public-types.ts` | 内部模型 / 公共类型的唯一代码定义 |
 | `index.ts` | 包导出 |
 
@@ -57,32 +54,36 @@ index.ts                  包入口（只导出三个正式函数与公共类型
 ```text
 useRefresh（组件 setup）
   ├─ 配置变化 → readConfiguration → Input 快照 → applyConfigurationEvents（关闭边沿）
-  │                                               → manager.closeQuery → manager.reconcile
-  ├─ submit   → manager.submit → beginOperation（新 operationId）→ prepareParameters
+  │                                               → manager.cancelRefresh → manager.reconcile
+  ├─ submit   → manager.submit → 新 declaration（operationId）→ prepareParameters
   │                            → Submission → requestFlush
-  ├─ query    → manager.query  → 入口闸（销毁／配置非法／失活或隐藏）→ beginOperation(QueryRun)
-  │                            → prepareParameters → Submission({barrier: null})
-  │                            → executeQuery → publish 本页
+  ├─ refresh  → manager.refresh → 入口闸（销毁／配置非法／失活或隐藏／无身份）
+  │                            → resourceFor（必要时建实例）→ RefreshWaiter（minVersion）
+  │                            → 无当前任务时登记一次共享任务
   └─ 生命周期 → onMounted / onActivated → manager.activate → lifecycleActive=true → reconcile
                 onDeactivated → manager.deactivate；onScopeDispose → removeHandle
 
 reconcile  = synchronize ＋ requestFlush（两步必须分开，见 manager.ts 注释）
 flush      → 逐句柄 synchronize ＋ attach → enqueueDue（一趟同时收齐到期入队与下次唤醒）→ startQueuedTasks → setWakeup
              （前两步与最后一步由 Manager 经 ScheduleHost 提供，队列与 Timer 在 Scheduler 内）
-synchronize→ 查询分支只处理取消边沿（present／refused 两个谓词）；订阅分支按 eligible 决定保留、换任务或释放
-             eligible / allowed / present / refused 是「环境是否允许」的唯一判定处，三处调用点不再各写一遍
-attach     → 要求无活动且 eligible → resourceFor（Source＋key 建或查实例）→ Subscription
-             → 交付已有 entry（普通加入）或 enqueueTask（欠一次新请求）
-enqueueTask→ 新版本与新门槛先就位 → abort 旧任务
-startTask  → source.load → copyResult → publishResult（记录时间、写 Store、逐页 deliver）
-                                     └ publishError（逐有效订阅 notify）
-closeQuery      → 关闭边沿的命名操作：只结算并 abort 进行中的 QueryRun
-releaseActivity → QueryRun 结算加 abort／Subscription 退订；最后一个订阅退出删除实例、分区与排队任务
+synchronize→ 失去存在时结算本页刷新要求；订阅按 eligible 决定保留或释放；改频率只更新间隔
+             eligible / allowed / present 是「环境是否允许」的唯一判定处，调用点不再各写一遍
+attach     → 要求已声明身份、无订阅且 eligible → resourceFor（Source＋key 建或查实例）→ Subscription
+             → 交付已有 entry；没有 entry 时由调度器的到期遍历登记首查
+refresh    → 入口闸 → resourceFor → RefreshWaiter{minVersion = 在动作之后启动的版本} → 无当前任务则 enqueueTask
+refreshFloor → 无任务取 nextVersion；任务在排队取它的版本；任务在执行取 version+1
+refillWaiters→ 任务结算后仍有未满足要求且没有当前任务时，补一次后继请求
+settleWaiter → 从两侧集合移除后结算 success／error／cancelled；无人订阅与要求时销毁实例
+enqueueTask→ 分配新版本 → 登记 Task（全部调用点都确认没有当前任务，因此不替换、不 abort 在途）
+startTask  → source.load → copyResult → publishResult（记录时间、写 Store、按收货方 deliver）
+                                     └ publishError（逐有效订阅 notify，并按失败结算刷新要求）
+cancelRefresh   → 关闭边沿的命名操作：结算并移除本页未完成的刷新要求
+releaseSubscription → 退订；最后一个订阅与刷新要求都退出时删除实例、分区与排队任务
 readSnapshot    → 算 key → 读分区 → 独立副本（不建实例、不保活）
 ```
 
-需求侧对应：`U01/U03` → `submit` 与 `beginOperation`；`U04` → `query` 入口闸与 `executeQuery`；
-`U05/U06/U10` → `Submission.delivery` 与 `attach` 的接管；`U07/U18/U25` → 配置快照、`closeQuery` 关闭边沿与 `eligible`；
+需求侧对应：`U01/U03` → `submit`、`commitDeclaration` 与 `sameIdentity`；`U04` → `refresh` 入口闸与附条 A 的刷新要求；
+`U05/U06/U10` → `refreshFloor`／`refillWaiters`／`settleWaiter`；`U07/U18/U25` → 配置快照、`cancelRefresh` 关闭边沿与 `eligible`；
 `U08/U21` → `releaseActivity`、`removeHandle`、`dispose`；`U11–U14` → `enqueueTask` 与 `Scheduler` 的 `flush`、`dueAt`、`enqueueDue`；
 `U15/U19` → `publishError`、`notify` 与 observer；`U16/U17` → `deliver` 与 `readSnapshot`。
 
@@ -93,10 +94,12 @@ readSnapshot    → 算 key → 读分区 → 独立副本（不建实例、不�
 ```mermaid
 flowchart LR
   Source[Source 固定业务定义] --> Parameters[Parameters 快照与 key]
-  Handle[Handle 页面需求] --> Submission[Submission 恢复记录]
+  Handle[Handle 页面需求] --> Submission[Submission 已声明身份]
   Submission --> Parameters
-  Handle --> Activity[activity: QueryRun / Subscription / null]
+  Handle --> Activity[subscription: Subscription / null]
+  Handle --> Refresh[refreshes: Set<RefreshWaiter>]
   Activity --> Resource[Resource 共享运行实例]
+  Refresh --> Resource
   Resource --> Task[Task 当前后台执行]
   Resource --> Entry[StoreEntry 共享结果]
   Handle --> Display[Vue publish 端口 → Display]
@@ -104,15 +107,15 @@ flowchart LR
 
 Source 的生命周期是应用定义；Resource 的生命周期从首个有效订阅到最后退出。
 两者不能因名字相似而合成一个可变对象。
-`QueryRun` 独立执行，`Subscription` 共享后台，二者是同一句柄活动的互斥分支。
+`Subscription` 是周期需求，`RefreshWaiter` 是一次性刷新要求：两者互不排斥，可同时挂在同一 Resource 上，交付时按句柄去重。
 
 ### 3.2 身份与版本域
 
 - Source 对象身份 ＋ `Parameters.key` 定位 Resource；`Resource.id` 区分同 key 的不同生存期。
-- `Handle.operationId` 区分页面显式操作；`Resource.nextVersion` 分配后台版本；
+- `Handle.operationId` 区分声明代次；`Resource.nextVersion` 分配共享任务版本；
   `Task.version` 与 `DeliveryBarrier.minVersion` 处于同一 Resource 版本域。
 - 任务版本只在同一 Resource 内比较，跨 Resource 由 `id` 隔离；
-  句柄操作号不能替代任务版本，后台执行与独立查询也不共用并发状态。
+  句柄声明代次不能替代任务版本，刷新要求与本页身份也不共用计数。
 - 序号域足够大，取值按安全整数上界假设：三个计数器同处一个量级（单页每毫秒一次提交也要约 28.5 万年才耗尽），
   因此耗尽不是产品行为，不写进 §3；实现里它统一复用 `Manager.dispose`，不新增故障状态。
 
@@ -124,15 +127,15 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 |---|---|---|
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；准备成功后只读 | 提交边界复制/冻结/编码；需求与运行实例释放后回收 |
-| Handle | `operationId=0`、`submission=null`、`activity=null`、`cleanup=null`、`lifecycleActive=false`、`disposed=false` | 全部写入都在 `manager.ts` 内：操作与关系由 Manager 写，生命周期走 `activate` / `deactivate`，`cleanup` 走 `setHandleCleanup`；适配层只读 `operationId` / `disposed` / `activity`。`source` / `readInput` / `publish` / `onError` 为固定端口；`enabled` 只被读取，框架从不写入 |
-| Submission | `parameters`、`delivery` | Manager 接纳准备结果后创建；新操作清旧记录，临时退出保留 |
-| Subscription | `owner`、`resource`、`every` | `attach` 建立双向关系；`synchronize` 更新频率；`releaseActivity` 解除 |
-| QueryRun | `controller`、`settle` | `query` 创建；原生 Promise 首次结算生效，无 settled 镜像；活动结束后引用释放，底层闭包可能稍后结束 |
-| Resource | `id`、`source`、`parameters`、`subscribers` 空集合、`nextVersion=0`、`task=null`、`lastSettledAt=null` | Manager 建立与修改；最后退订移除注册及 Store；创建后参数不被新加入者改写 |
-| Task | `resource`、`version`、`controller` | `enqueueTask` 创建；`Scheduler` 的 `queue` / `running` 记录位置，finally 释放真实运行位置 |
+| Handle | `operationId=0`、`submission=null`、`subscription=null`、`refreshes` 空集合、`cleanup=null`、`lifecycleActive=false`、`disposed=false` | 全部写入都在 `manager.ts` 内：声明与关系由 Manager 写，生命周期走 `activate` / `deactivate`，`cleanup` 走 `setHandleCleanup`；适配层只读 `operationId` / `disposed` / `subscription`。`source` / `readInput` / `publish` / `onError` 为固定端口；`enabled` 只被读取，框架从不写入 |
+| Submission | `parameters` | Manager 接纳准备结果后建立；同身份重复声明幂等保留，新身份整体替换，校验失败清空 |
+| Subscription | `owner`、`resource`、`every` | `attach` 建立双向关系；`synchronize` 只更新频率；`releaseSubscription` 解除 |
+| RefreshWaiter | `owner`、`resource`、`minVersion`、`settle` | `refresh` 创建并同时挂到句柄与实例两侧；原生 Promise 首次结算生效，无 settled 镜像；结算或取消后从两侧移除 |
+| Resource | `id`、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`nextVersion=0`、`task=null`、`lastSettledAt=null` | Manager 建立与修改；最后一个订阅与刷新要求都退出时移除注册及 Store；创建后参数不被新加入者改写 |
+| Task | `resource`、`version`、`controller` | `enqueueTask` 创建（同一资源同时至多一个当前任务）；`Scheduler` 的 `queue` / `running` 记录位置，finally 释放真实运行位置 |
 | StoreEntry | `version`、`data`、`updatedAt` | 当前有效后台成功时整条替换，时间取提交那一刻的墙钟；最后退订删除；Store 不放任务或取消对象 |
 | Display | 初始 `null`，发布 `args` / `data` / `origin` / `updatedAt` | Vue `shallowRef` 整体替换；时间来自产生该结果的那次提交，不随后续交付改写；临时退出保留，组件卸载释放，Manager 不镜像保存 |
-| Manager | `handles` / `resources` 空集合；`nextResourceId=0`；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `closeQuery` / `reconcile` / `requestFlush` / `submit` / `query` / `readSnapshot` / `dispose` / `forgetActivity`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
+| Manager | `handles` / `resources` 空集合；`nextResourceId=0`；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `cancelRefresh` / `reconcile` / `requestFlush` / `submit` / `refresh` / `readSnapshot` / `dispose`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
 | Scheduler | `queue` / `running` 空集合；`cancelTimer=null`；`flushPending=false`；构造时注入 Resource 注册表 | **全部 `private`**：对外只有 `add` / `cancel` / `release` / `requestFlush` / `inspect` / `dispose`；回到编排层只经 `ScheduleHost` 的 5 个回调（销毁、协调句柄、登记任务、任务身份、执行任务）。销毁事实由该端口的 `isDisposed()` 现读，不另存镜像字段 |
 | Clock | `now`（单调，调度）、`timestamp`（墙钟，交付时间）、`setTimer` 返回取消函数 | Vue 闭包拥有平台 Timer ID，Scheduler 只持有取消能力；两个时间域不互相替代 |
 | 配置边沿与快照状态 | `snapshot.current`（配置快照，初值无效）、`lastEnabled`（`undefined`）、`reported`（`false`） | 字段名见 `vue.ts`；只在 Vue 适配闭包内，随组件作用域释放。`snapshot.current` 同时是 `Handle.readInput` 返回的唯一事实，核心不重新调用 getter |
@@ -141,64 +144,59 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 
 | 事件 | 同步转换 | 后续动作与重入边界 |
 |---|---|---|
-| `submit` / `query` 接纳 | 分配新 `operationId`、清旧 Submission、装新 activity，再释放旧活动 | 旧 abort / Store 通知可能重入；返回后复核身份 |
-| 准备参数成功 | 保存 Parameters 与 delivery | 参数准备只执行一次；`validate` 结束后复核身份 |
+| `submit` 接纳 | 分配新 `operationId`、清旧 Submission，再释放被替换的订阅与刷新要求 | 旧 abort / Store 通知可能重入；替换后复核代次 |
+| 准备参数成功 | 保存 Parameters 作为已声明身份 | 参数准备只执行一次；`validate` 结束后复核代次 |
 | 配置变化 | Vue 先更新快照并处理关闭边沿，核心撤销不合格订阅或替换任务 | `onError` / abort 可能重入；判断函数本身无外部效果 |
-| `query` 成功 | 复制后发布本页（带墙钟产生时间），复核后结算并清当前活动 | 请求 flush；不写 Store |
-| `query` 失活 | 结算 `unavailable`，清活动，保留已准备 Submission | D01 恢复后台 `load`，不重新准备、不重跑 runner |
-| 后台成功 | 准备副本、记录结束时间与产生时间、写 Store、逐页交付 | 每次外部写入后复核当前 Task 与订阅 |
-| 最后退订 | 删除注册、清 task、删排队项与分区 | abort 旧 `load`；running 等 finally |
+| `refresh` 接纳 | 建立刷新要求（版本下限）并在没有当前任务时登记一次共享任务 | 与自动刷新同一条路径；不复制第二份 DTO |
+| `refresh` 退出 | 结算 `unavailable`，移除要求，保留已声明身份 | D01 恢复按订阅规则，不重放刷新、不重新准备参数 |
+| 后台成功 | 准备副本、记录结束时间与产生时间、写 Store、交付给有效订阅与满足门槛的刷新要求 | 每次外部写入后复核当前 Task、订阅与要求 |
+| 最后退出 | 删除注册、清 task、删排队项与分区 | 最后一个订阅与刷新要求都退出才销毁；abort 旧 `load`，running 等 finally |
 | `dispose` | 先置 `disposed`，再释放句柄、注册、队列、Store 与 Timer | 幂等；迟到执行只能清自己的 running |
 
 ### 3.5 十条必须成立的不变量
 
-1. `activity` 只能为 `QueryRun`、`Subscription` 或 `null`；类型排除双活组合；旧执行闭包不等于当前活动。
-2. 对外通知及入口返回时，`h.activity === s` 当且仅当 `s.resource.subscribers.has(s)` 且 `s.owner === h`；退订再加入必换 Subscription 对象。内部更新期间不暴露半完成关系。
+1. `subscription` 只能是 `Subscription` 或 `null`，`refreshes` 只包含仍挂在本实例上的刷新要求；旧执行闭包不等于当前订阅或当前要求。
+2. 对外通知及入口返回时，`h.subscription === s` 当且仅当 `s.resource.subscribers.has(s)` 且 `s.owner === h`；对刷新要求同理（`h.refreshes` 与 `resource.waiters` 两侧一致）。退订再加入必换 Subscription 对象，内部更新期间不暴露半完成关系。
 3. 注册表只指向当前生存期的 Resource；首次 `attach` 在暴露任何回调前绑定非空订阅；销毁先从注册表移除。
 4. 每次调度或设置 Timer 都用当前 `subscribers.every` 的最小值；Resource 不缓存 interval，关系变化不逐条扫描聚合。
 5. Resource 至多一个有效 `task`；Task 至多在 `Scheduler` 的 `queue` / `running` 之一；已失效的 running 可继续占槽但不可写。
 6. 新后台提交要求注册身份、当前 Task、未取消成立；历史快照交付不依赖 Task 存活，但要求当前 entry、Subscription 与门槛成立。
 7. StoreEntry 只来自该 Resource 的有效成功；删除后旧请求不得重建该 id 分区。
-8. `query` 只经 `publish` 写本页 Ref，后台才写 Store；Display 的 `args` / `data` / `origin` / `updatedAt` 同次发布，DTO 与 Store 无可变别名；核心不另存 Display。
+8. 只有共享路径写 Store 与交付 `display`；Display 的 `args` / `data` / `origin` / `updatedAt` 同次发布，DTO 与 Store 无可变别名；核心不另存 Display。
 9. 当前 Task 的正常成功/失败在必要数据准备之后、外部通知之前更新 `lastSettledAt`；取消及旧 Task 不更新；`running.size` 只随真实执行开始/结束变化。
 10. `dispose` 后 handles / registry / queue / 分区 / Timer / 监听已清，私有 Store 已释放；未结束的 running 先隔离，到真实 finally 才移除。
 
-### 3.6 delivery 的唯一更新表
+### 3.6 刷新要求的唯一更新表
 
-`DeliveryBarrier` 是 `{resourceId, minVersion}` 值，只在「尚欠一次合格请求」时作为
-`Submission.delivery` 的 `barrier` 存在，不是 Handle 的第二个状态。它只比较客户端请求版本，不承诺服务端数据强一致。
+`RefreshWaiter` 是 `{owner, resource, minVersion, settle}`，只代表一次显式刷新尚未满足；它不是 `Handle` 的第二个状态，
+也不是订阅的一部分。`minVersion` 只比较客户端任务版本，不承诺服务端数据强一致。
 
-| 事件 / 当前值 | delivery 更新 | 结果与交付规则 |
+| 事件 / 当前值 | 刷新要求更新 | 结果与交付规则 |
 |---|---|---|
-| 首次 `submit` 参数通过 | `null` | 普通加入，可交付已有合格 entry |
-| 后续 `submit` / `query` 参数通过 | `{barrier: null}` | 尚欠新任务；无资格时保留，D01 直接复用 |
-| `attach` 遇到 `{barrier: null}` | 填入新 Task 的门槛；必须在旧 abort 前 | 这次新请求要求已落实；旧 entry 不交付 |
-| 已订阅时主动改频率 | 填入新 Task 的门槛；在 abort 前 | 复用同一任务登记入口，不暂存未登记状态 |
-| 普通 `attach`，门槛与目标 id 相同 | 保留同一门槛对象 | entry 版本达标才交付 |
-| 普通 `attach`，门槛属于其他 id | 清为 `null` | 按新生存期交付已有 entry；没有则等首查 |
-| 普通 `attach`，`null` | 保持 `null` | 可交付目标已有 entry |
-| 合格交付完成 | 只在刚判定通过的那条 Submission 上清 `null` | 清空是同步的，不会清掉通知重入后建立的新提交或门槛 |
-| 失败或暂时退出 | 保留当前值 | 画面不发布；恢复由当前阶段继续 |
-| 接纳新操作 / 参数拒绝 | 旧 Submission 被清除；通过验证才建立新的 | 无参数时无需保留旧门槛；入口拒绝不清原 Submission |
+| `refresh` 且实例没有当前任务 | 新建要求，`minVersion = resource.nextVersion`；登记一次任务 | 任务启动即满足「动作之后启动」；成功时结算 `success` |
+| `refresh` 且当前任务在排队（未启动） | 新建要求，`minVersion = 该任务的版本` | 不追加请求：排队任务已经算「动作之后启动」 |
+| `refresh` 且当前任务已启动 | 新建要求，`minVersion = 该任务版本 + 1` | 不 abort 在途任务；它结束后由 `refillWaiters` 补一次后继请求 |
+| 同一个实例上多个未满足要求 | 各自保留，携带相同或不同的 `minVersion` | 任务成功时结算所有 `minVersion ≤ 本次版本` 的要求，更高的留待后继任务 |
+| 任务成功 | 满足门槛的要求结算 `success` 并移除 | 先交付（含仅由刷新要求产生的接收者），再结算；同一句柄只交付一次 |
+| 任务失败 | 该实例全部未结算要求结算 `error` / `background` 并移除 | 旧画面保留，订阅与开启意愿保留，下个周期继续 |
+| 页面退出 / 暂停边沿 / 卸载 / 销毁 | 相应要求结算 `cancelled`（`unavailable` / `disposed`）并移除 | 取消立即结算，不等底层结束 |
+| 实例再无订阅与要求 | 随最后一个要求移除而销毁实例（分区、排队任务、abort） | 与「最后需求退出即清理」一致，不引入 TTL 或历史缓存 |
 
-强制请求只更新发起句柄的要求；其他订阅者已有较低门槛，可由未来有效的较高版本满足。
-「尚欠请求」优先于普通加入分支，因此同 key 新 Resource 不会省略 D01 / query 要求的新请求。
-
-只有两种要求（外加「没有要求」）就足以表达旧设计三项状态的全部信息：尚欠请求时旧门槛会被新任务覆盖；
-已登记请求后只需留下具体门槛；合格交付后没有门槛。没有字符串哨兵，没有 Submission 就不能自动恢复，
-旧门槛也没有独立用途；不建立额外枚举副本或独立恢复标志。
+刷新要求不携带 DTO：结果仍只经 `display` 交付；`refresh` 的 Promise 只报结算。
+需要按结果写业务 Store 的页面在自己的适配层完成，框架不代管业务副作用。
 
 ### 3.7 派生值：不重复保存
 
 - `Task` 的执行阶段由 `Scheduler` 的 `queue` / `running` 归属决定。
 - 有效最短 `every` 由 `subscribers` 计算，不缓存。
-- 资格由存活、已提交参数、生命周期与浏览器可见性、配置快照四组事实决定，不镜像 `enabled`；
-  独立查询不参与资格，由调用点分流（见 U25 与本文件 §2.1）。
+- 刷新要求的版本下限由当前任务是否已启动现算（`refreshFloor`），不保存「上一次刷新」之类的镜像。
+- 资格由存活、已声明身份、生命周期与浏览器可见性、配置快照四组事实决定，不镜像 `enabled`；
+  刷新要求不参与资格，由 `refresh` 的入口闸与 `waiters` 归属表达（见 U25 与本文件 §2.1）。
 - 不增加 `ready` / `blocked` / 第二调度器 / 独立恢复标志。
 - 不交付「正在刷新」这类实时状态：它必须随任务开始/结束与资格变化另行发布，等于第二条反应面；
   交付面只给结果与它的产生时间（`updatedAt`），失败由通知通道给出。
 - `null` DTO 是有效结果，`undefined` 表示没有快照，`Display=null` 表示尚未展示。
-  StoreEntry 与 Display 不是镜像：`query` 只改变后者，暂停页保留后者，后台只向有效订阅交付。
+  StoreEntry 与 Display 不是镜像：共享成功写前者并交付给有效接收者，暂停页保留后者，不因刷新恢复订阅。
 
 ---
 
@@ -206,8 +204,8 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 
 状态字面量的唯一来源是 3 个公开常量对象枚举：`RequestOrigin`、`ErrorOrigin`、`CancelReason`
 （`public-types.ts`），以及只在核心内部使用的 `ActivityKind`（`model.ts`）。
-`QueryErrorOrigin` 不单独维护常量对象，它是 `ErrorOrigin` 去掉 `background` 后的类型收窄：
-页面查询的执行失败在两条通道上都叫 `execution`，不再是一个出口叫 `query`、另一个叫 `execution`。
+`RefreshErrorOrigin` 不单独维护常量对象，它是 `ErrorOrigin` 去掉 `validation` 后的类型收窄：
+刷新入口的配置失败与共享请求失败都不会是参数校验失败。
 `SubmitCancelReason` 同理，是 `CancelReason` 去掉 `unavailable` 后的收窄：两处都由常量对象推导，
 不手写字面量，因此成员重命名或删除时类型会一起报错。
 结果判别式（`status`）不单独枚举 —— 判别联合本身就是这份枚举。不使用 TS enum：`erasableSyntaxOnly` 与 Node 的类型擦除都不接受该语法；
@@ -218,14 +216,14 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 
 | 状态域 | 取值 | 存放 |
 |---|---|---|
-| 请求来源 | `query` / `background` | `RefreshDisplay.origin`，每次发布的事实 |
+| 请求来源 | `refresh` / `background` | `RefreshDisplay.origin`，每次发布的事实（按接收者判定：本次刷新满足其要求则为 `refresh`） |
 | 结果产生时间 | 墙钟 epoch 毫秒（不保证单调，校时可能回拨） | `StoreEntry.updatedAt` → 交付时进入 `RefreshDisplay.updatedAt`；与调度的单调时间 `Resource.lastSettledAt` 是两个域；相对时间由页面自行把差值钳制到 0 |
-| 错误来源 | `execution` / `background` / `validation` / `configuration` | `RefreshError.origin`，通知时的事实 |
-| 独立查询失败阶段 | `validation` / `configuration` / `execution` | `QueryResult` 的 error 分支 |
+| 错误来源 | `background` / `validation` / `configuration` | `RefreshError.origin`，通知时的事实 |
+| 刷新失败来源 | `background` / `configuration` | `RefreshResult` 的 error 分支 |
 | 取消原因 | `superseded` / `unavailable` / `disposed` | `QueryResult` 的 cancelled 分支 |
 | submit 取消原因 | `CancelReason` 的可达子集：`superseded` / `disposed` | `SubmitResult` 的 cancelled 分支；子集由 `SubmitCancelReason` 从常量对象推导（`Exclude` 掉 `unavailable`），不手写字面量 |
-| 交付要求 | `null`（无要求）／`{barrier}`（尚欠一次请求；`barrier` 为 null 表示尚未登记资源） | `Submission.delivery` |
-| 当前活动 | QueryRun / Subscription（由 `kind` 区分） / null | `Handle.activity`（二者互斥） |
+| 刷新要求 | 无 / 待满足（版本下限 `minVersion`） | `Handle.refreshes` 与 `Resource.waiters`（两侧一致） |
+| 当前订阅 | Subscription / null | `Handle.subscription` |
 | 配置快照 | 有效 / 无效；无效时 `enabled`、`visible` 可为 `null`（读不到） | Vue 闭包 → `Handle.readInput` |
 | 组件激活 | true / false | `Handle.lifecycleActive` |
 | 句柄已释放 | true / false | `Handle.disposed` |
@@ -274,9 +272,9 @@ structuredClone → 在副本上检查 JSON 值域与循环并冻结 → fast-js
 
 ### 4.3 数据所有权
 
-- DTO 业务校验由 `load` / runner 所在的 HTTP 适配器负责。
+- DTO 业务校验由 `load` 所在的 HTTP 适配器负责。
 - 框架 `copyResult` 拒绝 `undefined` 并执行 `structuredClone`；不做原型白名单、自有描述符、循环或复制后形状复核。
-- 原生支持的 `Date` / `Map` / 循环等可被复制，**不表示**框架验证了业务合法性；不支持的值由原生复制抛错，沿用 execution/background 失败处理。
+- 原生支持的 `Date` / `Map` / 循环等可被复制，**不表示**框架验证了业务合法性；不支持的值由原生复制抛错，沿用共享请求失败（`background`）处理。
 - Store → 每页 / `readSnapshot` 分别复制；不冻结业务原对象，不用 JSON 来回 `parse`。
 - 退订冻结依靠独立数据快照，不能直接绑定共享 Store 对象，也不能只复制最外层对象。
   共享请求内部不得先写业务 Store 再让框架检查有效性。
@@ -318,7 +316,7 @@ structuredClone → 在副本上检查 JSON 值域与循环并冻结 → fast-js
 先建立新身份与交付门槛，移除旧排队项，新项排到队尾，然后才 abort 旧执行。
 
 - abort 不释放物理槽位；finally 只删除自身在 `Scheduler.running` 里的成员，不清新 Task。
-- 独立 `query` 不占后台槽，也不受 `maxConcurrent` 限制。
+- 显式刷新与自动刷新共用 `queue` / `running` 与 `maxConcurrent`；满槽时排队，不绕过上限。
 - 并发上限只约束尚未结束的框架 `load`；只有请求适配器的 Promise 真实反映底层完成，
   才能进一步保证浏览器侧请求数。不承诺服务器因 abort 立即停止。
 
@@ -329,7 +327,7 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 
 后台成功时先准备全部页面副本，再记录结束时间、写 Store、逐页发布；
 每次外部发布之后，下一个接收者重新判断。历史结果不要求原 Task 仍存活，
-但必须满足当前订阅与 delivery 门槛，避免查询快照回退。
+但必须满足当前订阅或未结算的刷新要求，避免把更旧的结果重新交付给已经看到新结果的页面。
 
 ---
 
@@ -352,7 +350,7 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 - `mounted` / `activated` 恢复资格，`deactivated` / scope dispose 撤销；
   两者可能交叠（KeepAlive），因此进入与退出都必须幂等。
 - 浏览器隐藏同步退订，恢复仅在 `enabled` 仍为开时加入。
-- 暂停后仍允许独立 `query`；`true→false` 取消当时的查询。
+- 暂停后仍允许显式 `refresh`；`true→false` 的关闭边沿结算当时未完成的刷新要求。
 - 生命周期取消不报查询失败、不修改开启意愿。
 - 重新显示时：Resource 仍在则交付已有数据并按间隔调度；已删除则重建并首查。
   用户手动关闭时不恢复。
@@ -375,16 +373,16 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
   开启意愿或调度；任务已被替换或 Manager 已销毁后的晚到失败同样只作诊断。
 - 诊断只输出固定说明与框架生成的身份标识；不读取或序列化原始异常。
 - 后台失败保留需求与开启意愿，旧画面不变，下个周期继续重试。
-- `query` 执行失败只结算并通知，不改写调用方 `enabled`；是否停止轮询由调用方在 `onError` 里决定。
-  只要 `enabled` 仍为真，已准备的参数会被后台路径接管，与 `query` 成功、D01 恢复共用同一机制。
-- 同一规则适用于 query、background、validation、configuration 的 `onError` 通知。
+- 共享请求失败只结算并通知，不改写调用方 `enabled`；是否停止自动刷新由调用方在 `onError` 里决定。
+  只要 `enabled` 仍为真，下个周期继续；暂停页仍可显式刷新一次。
+- 同一规则适用于 refresh 与 background 的 `onError` 通知，以及 validation、configuration 的入口通知。
 - 框架不合并业务提示；多个组件只需要一条提示时，由调用方统一呈现。
 
 ---
 
 ## 7. 顺序约束
 
-1. **先建立新身份，再通知旧取消。** 新 Task 与版本、新 operationId、新 `activity` 必须在 abort 之前就位。
+1. **先建立新身份，再通知旧取消。** 新 Task 与版本、新 operationId、新 `subscription` 与新 `RefreshWaiter` 必须在 abort 之前就位。
 2. **先让内部关系完整失效，再产生外部效果。** 退订先解绑与删注册，再删分区，最后 abort。
 3. **外部效果之后复核身份。** `await`、复制结果、发布 Display、写 Store、`onError`（调用方可能在其中同步改 `enabled`）。
 4. **旧清理只清自己。** 旧任务的 finally 只释放自己的 running 成员。

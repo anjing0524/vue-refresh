@@ -14,7 +14,7 @@ import { notify } from './delivery.ts'
 import { prepareParameters, sourceRuntime } from './source.ts'
 import type { ConfigurationHost, Handle, Input } from './model.ts'
 import { ErrorOrigin } from './public-types.ts'
-import type { DeepReadonly, RefreshDisplay, RefreshHandle, RefreshInput, RefreshOptions, RefreshSource } from './public-types.ts'
+import type { RefreshDisplay, RefreshHandle, RefreshInput, RefreshOptions, RefreshSource } from './public-types.ts'
 
 /**
  * 把 enabled / every / visible 三个响应式输入投影成不可变的配置快照。
@@ -106,7 +106,7 @@ function createConfigurationBinding(
 
     const closed = lastEnabled === true && input.enabled === false
     if (input.enabled !== null) lastEnabled = input.enabled
-    if (closed) manager.closeQuery(handle)
+    if (closed) manager.cancelRefresh(handle)
 
     if (input.valid) {
       reported = false
@@ -147,7 +147,8 @@ export function useRefresh<P extends object, T>(
     cleanup: null,
     operationId: 0,
     submission: null,
-    activity: null,
+    subscription: null,
+    refreshes: new Set(),
     lifecycleActive: false,
     disposed: false,
   }
@@ -168,10 +169,6 @@ export function useRefresh<P extends object, T>(
   return {
     display,
     submit: args => manager.submit(handle, () => prepareParameters(args, runtime.validate)),
-    query: (args, runner) => manager.query(
-      handle,
-      () => prepareParameters(args, runtime.validate),
-      (snapshot, context) => runner(snapshot as DeepReadonly<P>, context),
-    ),
+    refresh: () => manager.refresh(handle),
   }
 }

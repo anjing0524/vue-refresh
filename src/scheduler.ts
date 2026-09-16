@@ -70,6 +70,11 @@ export class Scheduler {
     this.running.delete(task)
   }
 
+  /** 该任务的真实执行是否已经开始；刷新要求用它区分「排队」与「在执行」。 */
+  isRunning(task: Task): boolean {
+    return this.running.has(task)
+  }
+
   /** 安排一次 flush；同一轮内的多次请求合并成一次微任务。 */
   requestFlush(): void {
     if (this.host.isDisposed() || this.flushPending) return

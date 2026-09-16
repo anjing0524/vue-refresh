@@ -1,43 +1,40 @@
 import { cloneSnapshot, copyResult, notify, observe } from './delivery.ts'
 import { reportObserverError } from './diagnostics.ts'
-import { currentOperation, currentQuery, executeQuery, failQuery } from './query.ts'
-import type { QueryRunner } from './query.ts'
 import { Scheduler } from './scheduler.ts'
 import type { Parameters, SourceRuntime } from './source.ts'
-import { ActivityKind } from './model.ts'
 import type {
-  Activity, Clock, Delivery, DeliveryRequest, Handle, Input, ManagerInspection, QueryRun, Resource,
-  ResultStore, ScheduleHost, StoreEntry, Submission, Subscription, Task, ValidInput,
+  Clock, Handle, Input, ManagerInspection, RefreshWaiter, Resource, ResultStore, ScheduleHost,
+  StoreEntry, Subscription, Task, ValidInput,
 } from './model.ts'
 import { CancelReason, ErrorOrigin, RequestOrigin } from './public-types.ts'
-import type { QueryResult, SubmitResult } from './public-types.ts'
+import type { RefreshResult, SubmitResult } from './public-types.ts'
 
-/** 本次显式操作尚欠一次新后台请求：登记任务前 `barrier` 为 null。 */
-function requestDelivery(): DeliveryRequest {
-  return { barrier: null }
-}
-
-/**
- * 接管机制的唯一判据：该交付要求是否仍在等一次尚未登记资源的新请求。
- * 三个产生点（`submit` 的非首次操作、`query`、`enqueueTask` 的登记）都收敛到这个谓词与
- * `setRequirement`，避免「欠一次请求」在代码里被表达成三种写法。
- */
-function owesRequest(delivery: Delivery): boolean {
-  return delivery !== null && delivery.barrier === null
+/** 一次成功结果的全部收货方；订阅与刷新要求在同一处收齐，同一句柄只交付一次。 */
+interface Publisher {
+  readonly handle: Handle
+  readonly subscription: Subscription | null
+  readonly waiter: RefreshWaiter | null
+  readonly data: unknown
 }
 
 /**
  * 应用协调者：拥有页面需求与资源注册表，并把后台调度委托给 {@link Scheduler}。
  *
+ * 声明（{@link submit}）与刷新（{@link refresh}）共用同一条获取与交付路径：
+ * - 声明建立或更新身份；资格成立时接入共享实例，到期由调度器登记任务；
+ * - 刷新为同一身份登记一次「不低于某版本」的临时要求，需要时就地登记任务，不等周期。
+ * 交付的接收者是「有效订阅 ∪ 满足本次版本门槛的刷新要求」，两者都只经
+ * {@link publishResult} / {@link publishError} 到达。
+ *
  * 两类事实是「唯一」的：
  * - `handles` 是页面需求的唯一集合，句柄的每个字段只有本文件会写；
- * - `resources` 是共享实例的唯一注册表，最后一个订阅退出即销毁。
+ * - `resources` 是共享实例的唯一注册表，最后一个订阅与刷新要求都退出即销毁。
  *
  * 这些可变状态全部是 `private`：外部只能调用下面这些被命名过的操作，或通过
  * {@link inspect} 读一份只读投影。`DESIGN.md` 「谁写哪个字段」的表因此在编译期成立，
  * 而不是靠约定。
  *
- * 全文反复出现的一条顺序约束：**先建立新身份（新 operationId / 新 Task / 新 activity），
+ * 全文反复出现的一条顺序约束：**先建立新身份（新 operationId / 新 Task / 新订阅），
  * 再触发会同步重入的外部效果（abort、Store 通知、publish、onError）。**
  * 每一步之后都要重新复核当前身份，旧执行只允许清理自己。
  */
@@ -56,7 +53,7 @@ export class Manager {
   private nextResourceId = 0
   private browserVisible = true
   private disposed = false
-  /** 可控时间端口；查询执行路径通过 {@link QueryHost} 只读使用。 */
+  /** 可控时间端口。 */
   readonly clock: Clock
 
   constructor(store: ResultStore, clock: Clock, maxConcurrent: number, namespace: string) {
@@ -69,7 +66,7 @@ export class Manager {
       reconcileHandles: () => {
         for (const handle of [...this.handles]) {
           // 两步分开：synchronize 只决定「还要不要有订阅」，attach 只决定「接入哪个实例」。
-          // 中间可能有 abort / 通知回调同步重入，所以 attach 重新读取活动与资格。
+          // 中间可能有 abort / 通知回调同步重入，所以 attach 重新读取声明与资格。
           this.synchronize(handle)
           this.attach(handle)
         }
@@ -106,85 +103,116 @@ export class Manager {
   // ══════════════════════════════ 页面操作 ══════════════════════════════
 
   /**
-   * 记录一次刷新需求。同步返回接纳结果，不代表请求已完成。
+   * 声明或更新本页的订阅身份。相同身份重复声明是幂等的：不产生新请求、不重建订阅。
+   * 同步返回接纳结果，不代表请求已完成。
+   *
    * `prepare` 在身份就位之后才调用：参数准备会执行业务 `validate`，它可能同步重入。
    */
   submit(handle: Handle, prepare: () => Parameters): SubmitResult {
     if (this.disposed || handle.disposed) {
       return { status: 'cancelled', reason: CancelReason.Disposed }
     }
-    const firstOperation = handle.operationId === 0
     const id = this.nextIdentity(handle.operationId)
     if (id === null) return { status: 'cancelled', reason: CancelReason.Disposed }
+    const previous = handle.subscription
 
-    this.beginOperation(handle, id, null)
-    const cancelled = (): SubmitResult => ({
-      status: 'cancelled',
-      reason: this.disposed || handle.disposed ? CancelReason.Disposed : CancelReason.Superseded,
-    })
-    if (!currentOperation(this, handle, id)) return cancelled()
+    // 新身份（代次与空声明）先就位，再释放旧订阅：旧 abort 回调可能同步重入。
+    handle.operationId = id
+    handle.submission = null
+    handle.subscription = null
 
+    if (!this.currentOperation(handle, id)) return this.cancelledResult(handle, previous)
     let parameters: Parameters
     try {
       parameters = prepare()
     } catch (error) {
-      // 校验失败：清空本次可恢复参数、保留画面，但不关闭开启意愿。
-      if (!currentOperation(this, handle, id)) return cancelled()
+      // 校验失败：清空本次声明、保留画面，但不关闭开启意愿。
+      if (!this.currentOperation(handle, id)) return this.cancelledResult(handle, previous)
+      this.abandonDeclaration(handle, previous)
       notify(handle, { origin: ErrorOrigin.Validation, error }, { operationId: id })
       return { status: 'rejected', error }
     }
-    // prepare 或 validate 可能同步提交了新操作；被替代时由新操作拥有结果。
-    if (!currentOperation(this, handle, id)) return cancelled()
-    // 首次显式操作是普通加入；之后的显式提交即使同参也欠一次新的后台请求。
-    this.setSubmission(handle, parameters, firstOperation ? null : requestDelivery())
+    // prepare 或 validate 可能同步提交了新声明；被替代时由新声明拥有结果。
+    if (!this.currentOperation(handle, id)) return this.cancelledResult(handle, previous)
+    return this.commitDeclaration(handle, id, previous, parameters)
+  }
+
+  /**
+   * 声明成立：同一身份是幂等的（保留订阅与未结算的刷新要求）；新身份整体替换。
+   *
+   * 替换会 abort 旧执行，而 abort 回调可以同步提交新声明，因此替换之后必须复核代次。
+   */
+  private commitDeclaration(
+    handle: Handle,
+    id: number,
+    previous: Subscription | null,
+    parameters: Parameters,
+  ): SubmitResult {
+    if (previous && this.sameIdentity(previous, handle.source, parameters)) {
+      handle.submission = { parameters }
+      handle.subscription = previous
+      this.requestFlush()
+      return { status: 'accepted' }
+    }
+    handle.submission = { parameters }
+    this.abandonDeclaration(handle, previous)
+    if (!this.currentOperation(handle, id)) return this.cancelledResult(handle, previous)
     this.requestFlush()
     return { status: 'accepted' }
   }
 
-  /**
-   * 查询入口裁决：返回「应当立即结算的拒绝结果」，`null` 表示可以接纳。
-   *
-   * 配置非法在接纳之前拒绝：既不替换此前的有效提交，也不关闭开启意愿。
-   */
-  private admitQuery(handle: Handle, input: Input): QueryResult | null {
-    if (!input.valid) return { status: 'error', origin: ErrorOrigin.Configuration, error: input.error }
-    if (!this.allowed(handle, input)) return { status: 'cancelled', reason: CancelReason.Unavailable }
-    return null
+  /** 旧订阅与本次声明是否指向同一身份：Source 身份 + 完整参数值稳定键。 */
+  private sameIdentity(previous: Subscription, source: SourceRuntime, parameters: Parameters): boolean {
+    return previous.resource.source === source && previous.resource.parameters.key === parameters.key
   }
 
-  /** 页面主动查询：立即独立执行一次，不占后台并发槽，只发布本页。 */
-  query(handle: Handle, prepare: () => Parameters, runner: QueryRunner): Promise<QueryResult> {
-    if (this.disposed || handle.disposed) {
-      return Promise.resolve({ status: 'cancelled', reason: CancelReason.Disposed })
-    }
-    const refused = this.admitQuery(handle, handle.readInput())
-    if (refused) return Promise.resolve(refused)
+  /** 本次声明不成立：作废本页未结算的刷新要求并退出旧订阅。 */
+  private abandonDeclaration(handle: Handle, previous: Subscription | null): void {
+    this.settleRefreshes(handle, CancelReason.Superseded)
+    if (previous) this.releaseSubscription(previous)
+  }
 
-    const id = this.nextIdentity(handle.operationId)
-    if (id === null) return Promise.resolve({ status: 'cancelled', reason: CancelReason.Disposed })
+  /** 已被替代或已销毁的声明结果；顺带清理本次声明要退出的旧订阅。 */
+  private cancelledResult(handle: Handle, previous: Subscription | null): SubmitResult {
+    this.abandonDeclaration(handle, previous)
+    return {
+      status: 'cancelled',
+      reason: this.disposed || handle.disposed ? CancelReason.Disposed : CancelReason.Superseded,
+    }
+  }
+
+  /**
+   * 显式刷新当前已声明的身份：与自动刷新共用同一条获取与交付路径。
+   *
+   * 入口闸与旧查询一致——配置非法直接结算 `configuration`，失去存在结算 `unavailable`，
+   * 没有已声明身份同样结算 `unavailable`；**开启意愿不参与**，暂停页仍可刷新。
+   * 结算条件见 {@link refreshFloor}：等待一个在本次动作之后启动的请求。
+   */
+  refresh(handle: Handle): Promise<RefreshResult> {
+    const settled = (result: RefreshResult): Promise<RefreshResult> => Promise.resolve(result)
+    if (this.disposed || handle.disposed) {
+      return settled({ status: 'cancelled', reason: CancelReason.Disposed })
+    }
+    const input = handle.readInput()
+    if (!input.valid) return settled({ status: 'error', origin: ErrorOrigin.Configuration, error: input.error })
+    if (!this.allowed(handle, input)) return settled({ status: 'cancelled', reason: CancelReason.Unavailable })
+    const submission = handle.submission
+    if (!submission) return settled({ status: 'cancelled', reason: CancelReason.Unavailable })
+
+    const resource = this.resourceFor(handle.source, submission.parameters)
+    if (!resource) return settled({ status: 'cancelled', reason: CancelReason.Disposed })
 
     // Promise 执行器同步运行，resolver 只接受第一个结果；取消可以先于底层结束结算。
-    let settle!: QueryRun['settle']
-    const resultPromise = new Promise<QueryResult>(resolve => { settle = resolve })
-    const run: QueryRun = { kind: ActivityKind.Query, controller: new AbortController(), settle }
+    let settle!: RefreshWaiter['settle']
+    const result = new Promise<RefreshResult>(resolve => { settle = resolve })
+    const waiter: RefreshWaiter = { owner: handle, resource, minVersion: this.refreshFloor(resource), settle }
+    resource.waiters.add(waiter)
+    handle.refreshes.add(waiter)
 
-    this.beginOperation(handle, id, run)
-    if (!currentQuery(this, handle, run)) return resultPromise
-
-    let parameters: Parameters
-    try {
-      parameters = prepare()
-    } catch (error) {
-      failQuery(this, handle, run, ErrorOrigin.Validation, error)
-      return resultPromise
-    }
-    if (!currentQuery(this, handle, run)) return resultPromise
-
-    // 查询成功接入共享资源时要求一次新的后台请求，而不是交付旧的分区结果。
-    this.setSubmission(handle, parameters, requestDelivery())
-    // async 函数在第一个 await 之前同步执行 runner；无需等待即可返回公开 Promise。
-    void executeQuery(this, handle, run, parameters, runner)
-    return resultPromise
+    // 没有当前任务就由本次刷新登记请求；已有任务（排队或执行中）则等它，或等它之后补一次。
+    if (!resource.task) this.enqueueTask(resource)
+    this.requestFlush()
+    return result
   }
 
   /** 只读快照：按参数键查已有分区并返回独立副本。不创建资源、不保活后台任务。 */
@@ -197,27 +225,23 @@ export class Manager {
 
   // ══════════════════════════════ 需求关系 ══════════════════════════════
 
-  /** 按最新配置快照协调一个句柄；配置变化与生命周期变化的唯一入口。 */
+  /**
+   * 按最新配置快照协调一个句柄；配置变化与生命周期变化的唯一入口。
+   *
+   * 失去存在（失活或隐藏）先作废本页未结算的刷新要求，再按资格退出或保留订阅。
+   * 有效订阅改频率只更新间隔：保留在途请求，由下一次调度按新间隔重算到期。
+   */
   private synchronize(handle: Handle): void {
     if (this.disposed || handle.disposed) return
     const input = handle.readInput()
-    const captured = handle.activity
+    if (!this.present(handle)) this.cancelRefresh(handle)
 
-    if (captured?.kind === ActivityKind.Query) {
-      // 独立查询不因 every 非法而取消；只有明确的取消事件（关闭/失活/隐藏）才生效。
-      // 读不到（null）不足以否定需求，因此这里用「明确否决」而不是「不满足允许」。
-      if (!this.present(handle) || this.refused(input)) {
-        this.releaseActivity(handle, captured, CancelReason.Unavailable)
-      }
+    const subscription = handle.subscription
+    if (!this.eligible(handle, input)) {
+      if (subscription) this.releaseSubscription(subscription)
       return
     }
-    if (!this.eligible(handle, input)) {
-      this.releaseActivity(handle, captured)
-    } else if (captured && captured.every !== input.every) {
-      // 有效订阅改频率：替换该 Resource 的当前任务，而不是只改一个数字。
-      captured.every = input.every
-      this.enqueueTask(captured.resource, captured)
-    }
+    if (subscription && subscription.every !== input.every) subscription.every = input.every
   }
 
   /**
@@ -248,7 +272,7 @@ export class Manager {
   /**
    * 浏览器可见性变化：更新唯一事实并重新协调全部句柄。
    *
-   * 这里的 `synchronize` 与 {@link reconcile} 同构且必须同步执行：隐藏页面时要当场结算在途查询
+   * 这里的 `synchronize` 与 {@link reconcile} 同构且必须同步执行：隐藏页面时要当场结算在途刷新
    * （取消立即结算），只排一次 flush 会把它推迟一个微任务。随后的 `requestFlush` 会让 `flush`
    * 再协调一次，两次调用是幂等的。
    */
@@ -269,57 +293,37 @@ export class Manager {
   }
 
   /**
-   * 配置关闭边沿的命名操作：只取消进行中的独立查询，其余活动与既有需求不受影响。
+   * 关闭边沿的命名操作：结算并取消本页进行中的刷新要求，其余需求不受影响。
    *
-   * 适配层因此不必自己取活动引用、判断 kind、再传取消原因；`releaseActivity` 也不必对外可见。
+   * 适配层因此不必自己取等待者、判断归属；`settleWaiter` 也不必对外可见。
    */
-  closeQuery(handle: Handle): void {
-    const activity = handle.activity
-    if (activity?.kind === ActivityKind.Query) {
-      this.releaseActivity(handle, activity, CancelReason.Unavailable)
+  cancelRefresh(handle: Handle): void {
+    this.settleRefreshes(handle, CancelReason.Unavailable)
+  }
+
+  /** 结算并移除本页全部未结算的刷新要求；只由命名操作与释放路径调用。 */
+  private settleRefreshes(handle: Handle, reason: CancelReason): void {
+    for (const waiter of [...handle.refreshes]) {
+      this.settleWaiter(waiter, { status: 'cancelled', reason })
     }
   }
 
-  /**
-   * 释放句柄当前捕获的活动。
-   *
-   * 只处理传入的那一个活动对象，因此旧清理不会覆盖已经登记的新活动。
-   */
-  private releaseActivity(
-    handle: Handle,
-    captured: Activity | null = handle.activity,
-    reason: CancelReason = CancelReason.Superseded,
-  ): void {
-    if (!captured) return
-    this.forgetActivity(handle, captured)
-    if (captured.kind === ActivityKind.Query) this.releaseQuery(captured, reason)
-    else this.releaseSubscription(captured)
-    this.requestFlush()
-  }
-
-  /**
-   * 只解除活动登记：忘掉这个活动对象，不结算、不取消、不销毁，也不安排调度。
-   *
-   * 与 {@link releaseActivity} 的分工：查询自己正常结束时走这里（它已经结算完了）；
-   * 被替代、失活、关闭或销毁时走 releaseActivity（由那里负责结算与 abort）。
-   * 只清理仍然是传入对象的那一个，因此旧执行的清理不会覆盖已经登记的新活动。
-   */
-  forgetActivity(handle: Handle, activity: Activity): void {
-    if (handle.activity === activity) handle.activity = null
-  }
-
-  /** 取消独立查询：立即结算，不等底层请求真正结束。 */
-  private releaseQuery(run: QueryRun, reason: CancelReason): void {
-    run.settle({ status: 'cancelled', reason })
-    run.controller.abort()
-  }
-
-  /** 解除订阅关系；若是最后一个订阅，则销毁实例、分区和排队任务，最后才 abort。 */
+  /** 解除订阅关系；实例再无订阅者与刷新要求时才销毁。 */
   private releaseSubscription(subscription: Subscription): void {
-    const resource = subscription.resource
-    resource.subscribers.delete(subscription)
+    const handle = subscription.owner
+    if (handle.subscription === subscription) handle.subscription = null
+    subscription.resource.subscribers.delete(subscription)
+    this.releaseResourceIfUnused(subscription.resource)
+  }
+
+  /**
+   * 没有订阅者也没有刷新要求时销毁实例：删注册与分区、作废排队任务，最后才 abort。
+   * 已启动的执行仍会真实结束，并在自己的 finally 里释放槽位。
+   */
+  private releaseResourceIfUnused(resource: Resource): void {
+    if (resource.subscribers.size > 0 || resource.waiters.size > 0) return
     const bucket = this.resources.get(resource.source)
-    if (resource.subscribers.size > 0 || !bucket || bucket.get(resource.parameters.key) !== resource) return
+    if (!bucket || bucket.get(resource.parameters.key) !== resource) return
 
     bucket.delete(resource.parameters.key)
     if (!bucket.size) this.resources.delete(resource.source)
@@ -331,35 +335,25 @@ export class Manager {
   }
 
   /**
-   * 尝试把一个有资格、已提交的句柄接入共享 Resource。
+   * 尝试把一个有资格、已声明身份的句柄接入共享 Resource。
    * 只有这里会创建实际 Resource：首次有效订阅建立实例，其余情况复用。
    */
   private attach(handle: Handle): void {
     const submission = handle.submission
-    // 活动互斥：独立查询或订阅仍在时不再接入；配置变化走 synchronize 替换。
-    if (!submission || handle.activity) return
+    // 订阅互斥：已接入的句柄不再重复接入；配置变化走 synchronize 更新间隔。
+    if (!submission || handle.subscription) return
     const input = handle.readInput()
     if (!this.eligible(handle, input)) return
 
     const resource = this.resourceFor(handle.source, submission.parameters)
     if (!resource) return
-    const subscription: Subscription = {
-      kind: ActivityKind.Subscription, owner: handle, resource, every: input.every,
-    }
-    handle.activity = subscription
+    const subscription: Subscription = { owner: handle, resource, every: input.every }
+    handle.subscription = subscription
     resource.subscribers.add(subscription)
 
-    if (owesRequest(submission.delivery)) {
-      // 显式新操作尚欠请求：登记任务时把「尚未登记资源」换成具体门槛。
-      this.enqueueTask(resource, subscription)
-      return
-    }
-    // 其他生存期的旧门槛不约束新实例；同实例仍需等待合格的新结果。
-    const barrier = submission.delivery?.barrier
-    if (barrier && barrier.resourceId !== resource.id) this.setRequirement(submission, null)
+    // 已有合格结果就交付；没有结果时由调度器的到期遍历登记首次请求。
     const entry = this.store.entries[resource.id]
-    // 交付自身的异常隔离在 deliver 内，这里不再包一层，否则内部不变式违规会被伪装成通知失败。
-    if (entry) this.deliver(subscription, entry, cloneSnapshot(entry))
+    if (entry) this.deliver(resource, handle, entry, cloneSnapshot(entry), RequestOrigin.Background)
   }
 
   /** 按「Source 身份 + 完整参数值稳定键」查找运行实例；序号耗尽时统一销毁。 */
@@ -380,6 +374,7 @@ export class Manager {
       source,
       parameters,
       subscribers: new Set(),
+      waiters: new Set(),
       nextVersion: 0,
       task: null,
       lastSettledAt: null,
@@ -391,25 +386,20 @@ export class Manager {
   // ══════════════════════════════ 后台执行 ══════════════════════════════
 
   /**
-   * 登记一次后台执行，并（可选）把它记为发起订阅的强制要求。
+   * 为一个已登记的资源分配版本并登记一次后台执行。
    *
-   * 先建立新任务、新版本和交付门槛，再 abort 旧任务：旧 abort 监听可能同步重入，
-   * 重入方必须已经能看到完整的新身份。
+   * 同一资源同时至多一个当前任务：全部调用点（到期遍历、显式刷新、结算后补一次）都在
+   * 确认没有当前任务之后才调用，因此这里不替换、也不 abort 在途执行。
    */
-  private enqueueTask(resource: Resource, requester?: Subscription): void {
+  private enqueueTask(resource: Resource): void {
     if (!this.registered(resource)) return
     const version = this.nextIdentity(resource.nextVersion)
     if (version === null) return
     resource.nextVersion = version
 
-    const previous = resource.task
-    if (previous) this.scheduler.cancel(previous)
     const task: Task = { resource, version, controller: new AbortController() }
     resource.task = task
     this.scheduler.add(task)
-    const submission = requester?.owner.submission
-    if (submission) this.setRequirement(submission, { barrier: { resourceId: resource.id, minVersion: version } })
-    previous?.controller.abort()
   }
 
   /**
@@ -431,30 +421,70 @@ export class Manager {
     } finally {
       if (this.currentTask(task)) resource.task = null
       this.scheduler.release(task)
+      this.refillWaiters(resource)
       this.requestFlush()
     }
   }
 
-  /** 后台成功：先准备全部页面副本，再记结束时间、写 Store、逐页交付。 */
+  /**
+   * 后台成功：先准备全部页面副本，再记结束时间、写 Store、逐页交付，最后结算刷新要求。
+   *
+   * 收货方一次收齐：有效订阅与满足本次版本门槛的刷新要求；同一句柄只交付一次，
+   * 但它的刷新要求仍要结算。版本门槛更高的要求留给后继任务（见 {@link refillWaiters}）。
+   */
   private publishResult(task: Task, entry: StoreEntry): void {
     const resource = task.resource
-    // 受控复制不会回调业务，因此可先一次性完成，避免部分交付。
-    const deliveries: { subscription: Subscription; data: unknown }[] = []
-    for (const subscription of resource.subscribers) {
-      if (this.deliverable(subscription, entry)) deliveries.push({ subscription, data: cloneSnapshot(entry) })
-    }
+    const { publishers, satisfied } = this.collectReceivers(resource, entry)
 
     resource.lastSettledAt = this.clock.now()
     observe(() => this.store.put(resource.id, entry), { resourceId: resource.id, taskVersion: task.version })
 
-    for (const { subscription, data } of deliveries) {
-      // 上一次 Store 或页面通知可能已经替换了当前任务。
+    for (const publisher of publishers) {
       if (!this.currentTask(task)) return
-      this.deliver(subscription, entry, data)
+      this.publishTo(publisher, resource, entry)
+    }
+    for (const waiter of satisfied) {
+      if (!this.currentTask(task)) return
+      this.settleWaiter(waiter, { status: 'success' })
     }
   }
 
-  /** 后台失败：保留订阅与开启意愿，按下个周期继续；任务被替换即停止旧通知。 */
+  /** 一次收齐本次成功结果的收货方：有效订阅与满足版本门槛的刷新要求，同一句柄只交付一次。 */
+  private collectReceivers(
+    resource: Resource,
+    entry: StoreEntry,
+  ): { publishers: Publisher[]; satisfied: RefreshWaiter[] } {
+    const publishers: Publisher[] = []
+    const satisfied: RefreshWaiter[] = []
+    const receivers = new Set<Handle>()
+    for (const subscription of resource.subscribers) {
+      if (!this.currentSubscription(subscription) || receivers.has(subscription.owner)) continue
+      receivers.add(subscription.owner)
+      publishers.push({
+        handle: subscription.owner, subscription, waiter: null, data: cloneSnapshot(entry),
+      })
+    }
+    for (const waiter of resource.waiters) {
+      if (waiter.minVersion > entry.version) continue
+      satisfied.push(waiter)
+      if (receivers.has(waiter.owner)) continue
+      receivers.add(waiter.owner)
+      publishers.push({ handle: waiter.owner, subscription: null, waiter, data: cloneSnapshot(entry) })
+    }
+    return { publishers, satisfied }
+  }
+
+  /** 交付一条结果；交付前复核订阅与刷新要求的身份，任何一条失效就跳过本次发布。 */
+  private publishTo(publisher: Publisher, resource: Resource, entry: StoreEntry): void {
+    if (publisher.subscription && !this.currentSubscription(publisher.subscription)) return
+    if (publisher.waiter && !resource.waiters.has(publisher.waiter)) return
+    const origin = publisher.waiter ? RequestOrigin.Refresh : RequestOrigin.Background
+    this.deliver(resource, publisher.handle, entry, publisher.data, origin)
+  }
+
+  /**
+   * 后台失败：保留订阅与开启意愿，按下个周期继续；本次未结算的刷新要求按同一失败结算。
+   */
   private publishError(task: Task, error: unknown): void {
     if (!this.currentTask(task)) return
     const resource = task.resource
@@ -466,20 +496,60 @@ export class Manager {
           { resourceId: resource.id, taskVersion: task.version })
       }
     }
+    for (const waiter of [...resource.waiters]) {
+      this.settleWaiter(waiter, { status: 'error', origin: ErrorOrigin.Background, error })
+    }
   }
 
-  /** 把后台结果交付给一个订阅；合格交付会消费本次提交的交付门槛。 */
-  private deliver(subscription: Subscription, entry: StoreEntry, data: unknown): void {
-    const submission = this.deliverable(subscription, entry)
+  /** 把一个共享结果交付给一个句柄的 Display 端口。 */
+  private deliver(
+    resource: Resource,
+    handle: Handle,
+    entry: StoreEntry,
+    data: unknown,
+    origin: RequestOrigin,
+  ): void {
+    const submission = handle.submission
     if (!submission) return
-    const handle = subscription.owner
-    this.setRequirement(submission, null)
     observe(
       () => handle.publish({
-        args: submission.parameters.args, data, origin: RequestOrigin.Background, updatedAt: entry.updatedAt,
+        args: submission.parameters.args, data, origin, updatedAt: entry.updatedAt,
       }),
-      { resourceId: subscription.resource.id, taskVersion: entry.version },
+      { resourceId: resource.id, taskVersion: entry.version },
     )
+  }
+
+  // ══════════════════════════════ 刷新要求 ══════════════════════════════
+
+  /**
+   * 本次刷新要求的版本下限：一次「在本次动作之后启动」的任务所拥有的版本。
+   *
+   * 排队未启动的任务已经算「之后启动」，可以直接满足它；已在执行的任务不算，
+   * 本次刷新等它结束后由 {@link refillWaiters} 补一次后继请求。没有当前任务时取下一个
+   * 未分配的版本，本次刷新自己登记这次请求。
+   */
+  private refreshFloor(resource: Resource): number {
+    const task = resource.task
+    if (!task) return resource.nextVersion
+    return this.scheduler.isRunning(task) ? task.version + 1 : task.version
+  }
+
+  /** 一次任务结算后：仍有未结算的刷新要求、又没有当前任务时，补一次后继请求。 */
+  private refillWaiters(resource: Resource): void {
+    if (resource.waiters.size === 0 || resource.task !== null) return
+    if (!this.registered(resource)) return
+    this.enqueueTask(resource)
+  }
+
+  /**
+   * 结算并移除一个刷新要求：只处理仍然挂在实例上的那一个，因此旧路径不会覆盖新要求。
+   * 结算后实例可能已经没有订阅者与要求，由 {@link releaseResourceIfUnused} 收尾。
+   */
+  private settleWaiter(waiter: RefreshWaiter, result: RefreshResult): void {
+    if (!waiter.resource.waiters.delete(waiter)) return
+    waiter.owner.refreshes.delete(waiter)
+    waiter.settle(result)
+    this.releaseResourceIfUnused(waiter.resource)
   }
 
   // ══════════════════════════════ 调度入口 ══════════════════════════════
@@ -491,15 +561,17 @@ export class Manager {
 
   // ══════════════════════════════ 有效性与身份 ══════════════════════════════
 
+  /** 该句柄的声明代次仍是本次声明；用于参数准备阶段的复核。 */
+  private currentOperation(handle: Handle, id: number): boolean {
+    return !this.disposed && !handle.disposed && handle.operationId === id
+  }
+
   /**
    * 句柄当前是否在表达后台需求。四组事实缺一不可：
-   * 存活（Manager 与句柄）／已提交参数／环境允许（{@link allowed}）／配置明确开启。
+   * 存活（Manager 与句柄）／已声明身份／环境允许（{@link allowed}）／配置明确开启。
    *
-   * 环境事实只有两个谓词：{@link present}（与快照无关）与 {@link refused}（明确否决）。
-   * 三处原本各自内联的「是否允许」写法已收敛到这两个谓词上，写法差异只留在这里。
-   *
-   * 独立查询不在这里判断：三处调用点都已先行分流——`synchronize` 的查询分支直接返回，
-   * `attach` 要求当前没有活动，`currentSubscription` 要求当前活动就是该订阅。
+   * 刷新要求不在这里判断：它由 {@link refresh} 的入口闸与 `waiters` 集合自身的归属表达，
+   * 因此暂停页的刷新不会被资格否定。
    */
   private eligible(handle: Handle, input: Input): input is ValidInput {
     return !this.disposed && !handle.disposed && handle.submission !== null
@@ -516,11 +588,6 @@ export class Manager {
     return this.present(handle) && input.visible === true
   }
 
-  /** 配置快照是否明确否决可见性；`null` 表示读不到，不构成否决。 */
-  private refused(input: Input): boolean {
-    return input.visible === false
-  }
-
   /** Resource 仍注册在自己的 Source 桶中，且身份就是当前生存期实例。 */
   private registered(resource: Resource): boolean {
     return !this.disposed && this.resources.get(resource.source)?.get(resource.parameters.key) === resource
@@ -535,26 +602,8 @@ export class Manager {
   private currentSubscription(subscription: Subscription): boolean {
     const handle = subscription.owner
     return this.registered(subscription.resource)
-      && handle.activity === subscription
+      && handle.subscription === subscription
       && this.eligible(handle, handle.readInput())
-  }
-
-  /**
-   * 本次交付要消费的提交；不满足交付门槛时返回 null。
-   *
-   * `delivery === null` 是没有要求，已有合格结果即可交付；否则要么尚未登记资源
-   * （`barrier === null`，必须等新请求），要么要求同一实例且版本达标。
-   * 返回提交对象而不是布尔值，调用方不需要再用非空断言把它取回来。
-   */
-  private deliverable(subscription: Subscription, entry: StoreEntry): Submission | null {
-    if (!this.currentSubscription(subscription)) return null
-    const submission = subscription.owner.submission
-    if (!submission) return null
-    const delivery = submission.delivery
-    if (delivery && (delivery.barrier === null
-      || delivery.barrier.resourceId !== subscription.resource.id
-      || entry.version < delivery.barrier.minVersion)) return null
-    return submission
   }
 
   /**
@@ -577,19 +626,21 @@ export class Manager {
     this.handles.add(handle)
   }
 
-  /** 释放一个组件句柄：先停止接纳并清空状态，再退订。 */
+  /** 释放一个组件句柄：先停止接纳并清空状态，再退订与结算刷新要求。 */
   removeHandle(handle: Handle): void {
     if (handle.disposed) return
     handle.disposed = true
     this.handles.delete(handle)
 
-    const previous = handle.activity
+    const previous = handle.subscription
     handle.submission = null
     // 先取走再执行：回调可能重入并读到这个句柄。
     const cleanup = handle.cleanup
     handle.cleanup = null
     if (cleanup) observe(cleanup)
-    this.releaseActivity(handle, previous, CancelReason.Disposed)
+    this.settleRefreshes(handle, CancelReason.Disposed)
+    if (previous) this.releaseSubscription(previous)
+    this.requestFlush()
   }
 
   /**
@@ -609,32 +660,5 @@ export class Manager {
 
     for (const handle of [...this.handles]) this.removeHandle(handle)
     observe(() => this.store.dispose())
-  }
-
-  /**
-   * 安装一次新操作并释放被它取代的旧活动。
-   * 新 operationId、空 Submission 和新 activity 必须在释放旧活动之前就位。
-   */
-  private beginOperation(handle: Handle, id: number, run: QueryRun | null): void {
-    const previous = handle.activity
-    handle.operationId = id
-    handle.submission = null
-    handle.activity = run
-    this.releaseActivity(handle, previous, CancelReason.Superseded)
-  }
-
-  // ══════════════════════════════ 提交与交付要求 ══════════════════════════════
-
-  /** 建立本次显式操作的参数与交付要求：新操作一经接纳就整体替换旧 Submission。 */
-  private setSubmission(handle: Handle, parameters: Parameters, delivery: Delivery): void {
-    handle.submission = { parameters, delivery }
-  }
-
-  /**
-   * 交付要求的唯一写入点。只接受已经取到的 Submission，因此不需要空值守卫，
-   * 调用方也不必用非空断言；`grep` 这个函数名即可定位全部交付要求变更。
-   */
-  private setRequirement(submission: Submission, delivery: Delivery): void {
-    submission.delivery = delivery
   }
 }
