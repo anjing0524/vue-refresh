@@ -50,7 +50,7 @@ export class Manager {
   private readonly scheduler: Scheduler
   /** Manager 自身的释放回调；至多一个。 */
   private cleanup: (() => void) | null = null
-  private nextResourceId = 0
+  private issuedResourceId = 0
   private browserVisible = true
   private disposed = false
   /** 可控时间端口。 */
@@ -366,16 +366,16 @@ export class Manager {
     const existing = bucket.get(parameters.key)
     if (existing) return existing
 
-    const id = this.nextIdentity(this.nextResourceId)
+    const id = this.nextIdentity(this.issuedResourceId)
     if (id === null) return undefined
-    this.nextResourceId = id
+    this.issuedResourceId = id
     const resource: Resource = {
       id: `${this.namespace}:${id}`,
       source,
       parameters,
       subscribers: new Set(),
       waiters: new Set(),
-      nextVersion: 0,
+      issuedVersion: 0,
       task: null,
       lastSettledAt: null,
     }
@@ -393,9 +393,9 @@ export class Manager {
    */
   private enqueueTask(resource: Resource): void {
     if (!this.registered(resource)) return
-    const version = this.nextIdentity(resource.nextVersion)
+    const version = this.nextIdentity(resource.issuedVersion)
     if (version === null) return
-    resource.nextVersion = version
+    resource.issuedVersion = version
 
     const task: Task = { resource, version, controller: new AbortController() }
     resource.task = task
@@ -530,7 +530,7 @@ export class Manager {
    */
   private refreshFloor(resource: Resource): number {
     const task = resource.task
-    if (!task) return resource.nextVersion
+    if (!task) return resource.issuedVersion
     return this.scheduler.isRunning(task) ? task.version + 1 : task.version
   }
 

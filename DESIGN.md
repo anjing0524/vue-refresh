@@ -71,7 +71,7 @@ synchronize→ 失去存在时结算本页刷新要求；订阅按 eligible 决�
 attach     → 要求已声明身份、无订阅且 eligible → resourceFor（Source＋key 建或查实例）→ Subscription
              → 交付已有 entry；没有 entry 时由调度器的到期遍历登记首查
 refresh    → 入口闸 → resourceFor → RefreshWaiter{minVersion = 在动作之后启动的版本} → 无当前任务则 enqueueTask
-refreshFloor → 无任务取 nextVersion；任务在排队取它的版本；任务在执行取 version+1
+refreshFloor → 无任务取 issuedVersion；任务在排队取它的版本；任务在执行取 version+1
 refillWaiters→ 任务结算后仍有未满足要求且没有当前任务时，补一次后继请求
 settleWaiter → 从两侧集合移除后结算 success／error／cancelled；无人订阅与要求时销毁实例
 enqueueTask→ 分配新版本 → 登记 Task（全部调用点都确认没有当前任务，因此不替换、不 abort 在途）
@@ -112,7 +112,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 ### 3.2 身份与版本域
 
 - Source 对象身份 ＋ `Parameters.key` 定位 Resource；`Resource.id` 区分同 key 的不同生存期。
-- `Handle.operationId` 区分声明代次；`Resource.nextVersion` 分配共享任务版本；
+- `Handle.operationId` 区分声明代次；`Resource.issuedVersion` 分配共享任务版本（存的是**最后一个已分配**的版本，下一次分配取 +1）；
   `Task.version` 与 `DeliveryBarrier.minVersion` 处于同一 Resource 版本域。
 - 任务版本只在同一 Resource 内比较，跨 Resource 由 `id` 隔离；
   句柄声明代次不能替代任务版本，刷新要求与本页身份也不共用计数。
@@ -131,11 +131,11 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | Submission | `parameters` | Manager 接纳准备结果后建立；同身份重复声明幂等保留，新身份整体替换，校验失败清空 |
 | Subscription | `owner`、`resource`、`every` | `attach` 建立双向关系；`synchronize` 只更新频率；`releaseSubscription` 解除 |
 | RefreshWaiter | `owner`、`resource`、`minVersion`、`settle` | `refresh` 创建并同时挂到句柄与实例两侧；原生 Promise 首次结算生效，无 settled 镜像；结算或取消后从两侧移除 |
-| Resource | `id`、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`nextVersion=0`、`task=null`、`lastSettledAt=null` | Manager 建立与修改；最后一个订阅与刷新要求都退出时移除注册及 Store；创建后参数不被新加入者改写 |
+| Resource | `id`、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`issuedVersion=0`、`task=null`、`lastSettledAt=null` | Manager 建立与修改；最后一个订阅与刷新要求都退出时移除注册及 Store；创建后参数不被新加入者改写 |
 | Task | `resource`、`version`、`controller` | `enqueueTask` 创建（同一资源同时至多一个当前任务）；`Scheduler` 的 `queue` / `running` 记录位置，finally 释放真实运行位置 |
 | StoreEntry | `version`、`data`、`updatedAt` | 当前有效后台成功时整条替换，时间取提交那一刻的墙钟；最后退订删除；Store 不放任务或取消对象 |
 | Display | 初始 `null`，发布 `args` / `data` / `origin` / `updatedAt` | Vue `shallowRef` 整体替换；时间来自产生该结果的那次提交，不随后续交付改写；临时退出保留，组件卸载释放，Manager 不镜像保存 |
-| Manager | `handles` / `resources` 空集合；`nextResourceId=0`；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `cancelRefresh` / `reconcile` / `requestFlush` / `submit` / `refresh` / `readSnapshot` / `dispose`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
+| Manager | `handles` / `resources` 空集合；`issuedResourceId=0`（同样存最后一个已分配的序号）；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `cancelRefresh` / `reconcile` / `requestFlush` / `submit` / `refresh` / `readSnapshot` / `dispose`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
 | Scheduler | `queue` / `running` 空集合；`cancelTimer=null`；`flushPending=false`；构造时注入 Resource 注册表 | **全部 `private`**：对外只有 `add` / `cancel` / `release` / `requestFlush` / `inspect` / `dispose`；回到编排层只经 `ScheduleHost` 的 5 个回调（销毁、协调句柄、登记任务、任务身份、执行任务）。销毁事实由该端口的 `isDisposed()` 现读，不另存镜像字段 |
 | Clock | `now`（单调，调度）、`timestamp`（墙钟，交付时间）、`setTimer` 返回取消函数 | Vue 闭包拥有平台 Timer ID，Scheduler 只持有取消能力；两个时间域不互相替代 |
 | 配置边沿与快照状态 | `snapshot.current`（配置快照，初值无效）、`lastEnabled`（`undefined`）、`reported`（`false`） | 字段名见 `vue.ts`；只在 Vue 适配闭包内，随组件作用域释放。`snapshot.current` 同时是 `Handle.readInput` 返回的唯一事实，核心不重新调用 getter |
@@ -173,7 +173,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 
 | 事件 / 当前值 | 刷新要求更新 | 结果与交付规则 |
 |---|---|---|
-| `refresh` 且实例没有当前任务 | 新建要求，`minVersion = resource.nextVersion`；登记一次任务 | 任务启动即满足「动作之后启动」；成功时结算 `success` |
+| `refresh` 且实例没有当前任务 | 新建要求，`minVersion = resource.issuedVersion`；登记一次任务 | 任务启动即满足「动作之后启动」；成功时结算 `success` |
 | `refresh` 且当前任务在排队（未启动） | 新建要求，`minVersion = 该任务的版本` | 不追加请求：排队任务已经算「动作之后启动」 |
 | `refresh` 且当前任务已启动 | 新建要求，`minVersion = 该任务版本 + 1` | 不 abort 在途任务；它结束后由 `refillWaiters` 补一次后继请求 |
 | 同一个实例上多个未满足要求 | 各自保留，携带相同或不同的 `minVersion` | 任务成功时结算所有 `minVersion ≤ 本次版本` 的要求，更高的留待后继任务 |

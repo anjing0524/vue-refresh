@@ -117,7 +117,7 @@ export interface Resource {
   /** 尚未结算的刷新要求；有它时实例不因最后一个订阅退出而销毁。 */
   readonly waiters: Set<RefreshWaiter>
   /** 任务版本分配计数，与 Task.version 处于同一版本域。 */
-  nextVersion: number
+  issuedVersion: number
   /** 至多一个当前后台任务；没有当前任务时由到期或刷新要求登记。 */
   task: Task | null
   /** 最近一次正常结束（成功或失败）的时间；取消不更新。 */

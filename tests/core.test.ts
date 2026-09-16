@@ -687,7 +687,7 @@ test('B10.09: foreign-realm promises and runtime thenables are observed without 
  */
 function exhaustSequence(manager: Manager, page: { handle: Handle }, which: 'operation' | 'resource'): void {
   if (which === 'operation') page.handle.operationId = Number.MAX_SAFE_INTEGER
-  if (which === 'resource') (manager as unknown as { nextResourceId: number }).nextResourceId = Number.MAX_SAFE_INTEGER
+  if (which === 'resource') (manager as unknown as { issuedResourceId: number }).issuedResourceId = Number.MAX_SAFE_INTEGER
 }
 
 test('B04/F08: 同一同步栈内多次改频率不产生请求；随后关闭让在途失效且不排队', async () => {
@@ -728,7 +728,7 @@ test('Q06/sequence exhaustion: all three counters dispose the manager once and c
         const subscription = a.handle.subscription
         assert.ok(subscription)
         f.calls[1]!.resolve(null); await tick()                // a 的任务结束，没有当前任务
-        subscription.resource.nextVersion = Number.MAX_SAFE_INTEGER
+        subscription.resource.issuedVersion = Number.MAX_SAFE_INTEGER
         const exhausted = a.refresh()                          // 需要登记新任务 → 序号耗尽
         assert.deepEqual(await exhausted, { status: 'cancelled', reason: 'disposed' })
       } else {
