@@ -88,14 +88,23 @@ export interface Submission {
   readonly parameters: Parameters
 }
 
-/** 组件需求的所有者。 */
-export interface Handle {
+/**
+ * 组件需求的所有者。`P` / `T` 只出现在 {@link publish} 上；缺省即异构注册表持有的擦除形态。
+ */
+export interface Handle<P extends object = object, T = unknown> {
   /** 该句柄的固定资源定义；创建后不变。 */
   readonly source: SourceRuntime
   /** 读取最近一次 Vue 配置快照；绝不调用业务 getter。 */
   readonly readInput: () => Input
-  /** 发布本页快照（args/data/origin 同次整体替换）。 */
-  readonly publish: (display: Display) => void
+  /**
+   * 发布本页快照（args/data/origin 同次整体替换）。
+   *
+   * 写成**方法**而不是函数类型属性：方法参数按双变比较，`Handle<P, T>` 因此可以直接进
+   * 异构注册表的 `Handle`（＝`Handle<object, unknown>`）槽位，适配层不必在创建点保留一次
+   * 类型断言。代价是注册表侧投递形状不匹配的 Display 编译器不再拦——安全靠不变量
+   * 「每个句柄的 Display 只经它自己的 publish 投递」，见 ADR-24。
+   */
+  publish(display: RefreshDisplay<P, T>): void
   /** 错误通知出口；框架立即观察其异步拒绝，但不等待。 */
   readonly onError: (error: RefreshError) => void | Promise<void>
   /** 作用域释放回调；至多一个，卸载时执行。 */

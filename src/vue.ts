@@ -149,10 +149,10 @@ export function useRefresh<P extends object, T>(
 
   // Manager 保存异构 Source。P/T 只在这个适配边界还原：本句柄的 Source 不变，
   // 且 DTO 在发布前已经由框架建立了独立所有权。
-  const handle: Handle = {
+  const handle: Handle<P, T> = {
     source: runtime,
     readInput: () => snapshot.current,
-    publish: value => { display.value = value as RefreshDisplay<P, T> },
+    publish: value => { display.value = value },
     onError: error => toValue(options).onError?.(error),
     cleanup: null,
     operationId: 0,

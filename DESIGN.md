@@ -128,7 +128,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 |---|---|---|
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；准备成功后只读 | 提交边界复制/冻结/编码；需求与运行实例释放后回收 |
-| Handle | `operationId=0`、`submission=null`、`subscription=null`、`refreshes` 空集合、`cleanup=null`、`lifecycleActive=false`、`disposed=false` | 全部写入都在 `manager.ts` 内：声明与关系由 Manager 写，生命周期走 `activate` / `deactivate`，`cleanup` 走 `setHandleCleanup`；适配层只读 `operationId` / `disposed` / `subscription`。`source` / `readInput` / `publish` / `onError` 为固定端口；`enabled` 只被读取，框架从不写入 |
+| Handle | `operationId=0`、`submission=null`、`subscription=null`、`refreshes` 空集合、`cleanup=null`、`lifecycleActive=false`、`disposed=false` | 全部写入都在 `manager.ts` 内：声明与关系由 Manager 写，生命周期走 `activate` / `deactivate`，`cleanup` 走 `setHandleCleanup`；适配层只读 `operationId` / `disposed` / `subscription`。`source` / `readInput` / `publish` / `onError` 为固定端口；`enabled` 只被读取，框架从不写入。`Handle<P, T>` 的两个类型参数只出现在 `publish` 上，且 `publish` 声明为**方法**（参数双变）：异构注册表的 `Handle`（＝`Handle<object, unknown>`）因此可以持有任意具体句柄，适配层不必在创建点断言（见 ADR-24） |
 | Submission | `parameters` | Manager 校验通过后才建立；同身份重复声明幂等保留，新身份整体替换，校验失败不改动 |
 | Subscription | `owner`、`resource`、`every` | `attach` 建立双向关系；`synchronize` 只更新频率；`releaseSubscription` 解除 |
 | RefreshWaiter | `owner`、`resource`、`minVersion`、`settle` | `refresh` 创建并同时挂到句柄与实例两侧；原生 Promise 首次结算生效，无 settled 镜像；结算或取消后从两侧移除 |
