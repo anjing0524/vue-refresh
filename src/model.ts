@@ -148,7 +148,7 @@ export interface Resource {
   lastSettledAt: number | null
 }
 
-/** 一次后台执行；队列位置由 Manager.queue / Manager.running 决定。 */
+/** 一次后台执行；队列位置由 `Scheduler` 的 `queue` / `running` 决定。 */
 export interface Task {
   readonly resource: Resource
   readonly version: number
@@ -162,7 +162,7 @@ export interface Task {
  * - `now()` 单调不减，只用于调度与到期计算；它不是墙钟，校时不影响它；
  * - `timestamp()` 是墙钟读数，允许回拨，只用于对外交付的结果时间；
  * - `setTimer` 返回的取消函数幂等，且**不得同步回调**：同步回调会在赋值完成前重入
- *   调度，把已经清空的取消句柄又覆盖回去（见 `Manager.scheduleNextWakeup`）。
+ *   调度，把已经清空的取消句柄又覆盖回去（见 `Scheduler.setWakeup`）。
  */
 export interface Clock {
   /** 单调时间，只用于调度与到期计算。 */

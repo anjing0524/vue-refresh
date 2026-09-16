@@ -135,7 +135,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | Manager | `handles` / `resources` 空集合；`nextResourceId=0`；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `closeQuery` / `reconcile` / `requestFlush` / `submit` / `query` / `readSnapshot` / `dispose` / `forgetActivity`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
 | Scheduler | `queue` / `running` 空集合；`cancelTimer=null`；`flushPending=false`；构造时注入 Resource 注册表 | **全部 `private`**：对外只有 `add` / `cancel` / `release` / `requestFlush` / `inspect` / `dispose`；回到编排层只经 `ScheduleHost` 的 5 个回调（销毁、协调句柄、登记任务、任务身份、执行任务）。销毁事实由该端口的 `isDisposed()` 现读，不另存镜像字段 |
 | Clock | `now`（单调，调度）、`timestamp`（墙钟，交付时间）、`setTimer` 返回取消函数 | Vue 闭包拥有平台 Timer ID，Scheduler 只持有取消能力；两个时间域不互相替代 |
-| 配置边沿与快照状态 | `configuration`（配置快照，初值无效）、`lastEnabled`（`undefined`）、`reportedConfigurationError`（`false`） | 字段名见 `vue.ts`；只在 Vue 适配闭包内，随组件作用域释放。`configuration` 同时是 `Handle.readInput` 返回的唯一事实，核心不重新调用 getter |
+| 配置边沿与快照状态 | `snapshot.current`（配置快照，初值无效）、`lastEnabled`（`undefined`）、`reported`（`false`） | 字段名见 `vue.ts`；只在 Vue 适配闭包内，随组件作用域释放。`snapshot.current` 同时是 `Handle.readInput` 返回的唯一事实，核心不重新调用 getter |
 
 ### 3.4 事件与主流程
 
@@ -304,9 +304,10 @@ structuredClone → 在副本上检查 JSON 值域与循环并冻结 → fast-js
 → 按剩余需求设置一个最近到期 Timer
 ```
 
-**一次 flush 只读一次时钟。** `dueAt` 接收这个读数，不在函数内再读一次：真实时钟在一次 flush
+**本轮的到期判断只读一次时钟。** `dueAt` 接收这个读数，不在函数内再读一次：真实时钟在一次 flush
 内会前进，两次读数会把「从未结算的 Resource 立即到期」变成 `due > now`，于是首次入队被推迟到
 一个 0ms Timer（虚拟时钟下看不出来）。“立即到期”因此是确定性的：首次订阅在同一次 flush 内入队。
+设置唤醒 Timer 时会重新读一次时钟来计算剩余延迟。
 
 新追加的任务留到下一次 flush；满槽的队列等待真实执行结束唤醒，不自旋；
 间隔超过平台 Timer 范围时分段等待。同一轮内的多次配置变化合并为一次 flush。
