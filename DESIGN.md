@@ -37,7 +37,7 @@ index.ts                  包入口（只导出三个正式函数与公共类型
 | 文件 | 职责 |
 |---|---|
 | `source.ts` | 固定定义、冻结快照与稳定键、只读定位；公开的 `RefreshSource` 只带类型品牌，运行时擦除为内部端口 `SourceRuntime`（`load` ＋ 可选 `validate`） |
-| `delivery.ts` | 结果复制、通知异常隔离、声明代次身份（`declarationIdentity`）；诊断出口与返回值观察在 `diagnostics.ts` |
+| `delivery.ts` | 结果复制、通知异常隔离、声明代次身份（`declarationIdentity`）与四类效果的固定诊断说明（`EFFECT_FAILED`）；诊断出口与返回值观察在 `diagnostics.ts` |
 | `diagnostics.ts` | `FrameworkIdentity`、`reportObserverError`、`observeRejection`；零依赖 |
 | `vue.ts` | 配置快照读取以 `createConfigurationBinding` 为唯一入口（快照、通知去重、watcher 三件事在同处），加句柄建立、生命周期与 Display 绑定；配置绑定只经 `ConfigurationHost` 窄端口（2 项事实）访问编排层 |
 | `store.ts` | 分区替换、删除与私有 Store 释放 |
@@ -391,7 +391,8 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 - `onError` 同步执行，返回的 Promise 拒绝立即观察但不等待，不阻塞其他接收者。
 - 通知自身的同步或异步失败只进入固定 observer 诊断出口，不改变已结算结果、页面快照、
   开启意愿或调度；任务已被替换或 Manager 已销毁后的晚到失败同样只作诊断。
-- 诊断只输出固定说明与框架生成的身份标识；不读取或序列化原始异常。
+- 诊断只输出固定说明（按效果类别区分：publish / onError / cleanup / Store，见 `EFFECT_FAILED`）
+  与框架生成的身份标识；不读取或序列化原始异常。
 - 后台失败保留需求与开启意愿，旧画面不变，下个周期继续重试。
 - 共享请求失败只结算并通知，不改写调用方 `enabled`；是否停止自动刷新由调用方在 `onError` 里决定。
   只要 `enabled` 仍为真，下个周期继续；暂停页仍可显式刷新一次。

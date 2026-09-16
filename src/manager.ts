@@ -1,4 +1,4 @@
-import { cloneSnapshot, copyResult, declarationIdentity, notify, observe } from './delivery.ts'
+import { EFFECT_FAILED, cloneSnapshot, copyResult, declarationIdentity, notify, observe } from './delivery.ts'
 import { reportObserverError } from './diagnostics.ts'
 import { Scheduler } from './scheduler.ts'
 import type { Parameters, SourceRuntime } from './source.ts'
@@ -300,7 +300,7 @@ export class Manager {
     const previousTask = resource.task
     resource.task = null
     if (previousTask) this.scheduler.cancel(previousTask)
-    observe(() => this.store.remove(resource.id), { resourceId: resource.id })
+    observe(() => this.store.remove(resource.id), EFFECT_FAILED.store, { resourceId: resource.id })
     previousTask?.controller.abort()
   }
 
@@ -407,7 +407,7 @@ export class Manager {
     const { publishers, satisfied } = this.collectReceivers(resource, entry)
 
     resource.lastSettledAt = this.clock.now()
-    observe(() => this.store.put(resource.id, entry), { resourceId: resource.id, taskVersion: task.version })
+    observe(() => this.store.put(resource.id, entry), EFFECT_FAILED.store, { resourceId: resource.id, taskVersion: task.version })
 
     for (const publisher of publishers) {
       if (!this.currentTask(task)) return
@@ -485,6 +485,7 @@ export class Manager {
       () => handle.publish({
         args: submission.parameters.args, data, origin, updatedAt: entry.updatedAt,
       }),
+      EFFECT_FAILED.publish,
       { resourceId: resource.id, taskVersion: entry.version },
     )
   }
@@ -612,7 +613,7 @@ export class Manager {
     // 先取走再执行：回调可能重入并读到这个句柄。
     const cleanup = handle.cleanup
     handle.cleanup = null
-    if (cleanup) observe(cleanup, declarationIdentity(handle))
+    if (cleanup) observe(cleanup, EFFECT_FAILED.cleanup, declarationIdentity(handle))
     this.settleRefreshes(handle, CancelReason.Disposed)
     if (previous) this.releaseSubscription(previous)
     this.requestFlush()
@@ -631,9 +632,9 @@ export class Manager {
     this.scheduler.dispose()
     const cleanup = this.cleanup
     this.cleanup = null
-    if (cleanup) observe(cleanup)
+    if (cleanup) observe(cleanup, EFFECT_FAILED.cleanup)
 
     for (const handle of [...this.handles]) this.removeHandle(handle)
-    observe(() => this.store.dispose())
+    observe(() => this.store.dispose(), EFFECT_FAILED.store)
   }
 }

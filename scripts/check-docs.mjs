@@ -182,11 +182,29 @@ const LAYERS = {
   'store.ts': 2, 'scheduler.ts': 2, 'manager.ts': 3, 'app.ts': 4, 'vue.ts': 4, 'index.ts': 5,
 }
 const ACKNOWLEDGED_EDGES = ['vue.ts → app.ts']
+// Three forms are edges: a static `from './x'` clause, a bare side-effect import (`import './x'`),
+// and a dynamic `import('./x')`. Matching only the static form left the graph partly invisible: a
+// same-layer or upward runtime edge written as a bare or dynamic import passed this gate, so the
+// acknowledged-edge list could look clean while the direction was broken. Dynamic imports are
+// runtime edges whatever the importer later does with the value.
 const edges = []
+const addEdge = (from, spec, typeOnly) => {
+  if (!spec.startsWith('./')) return
+  const to = spec.replace(/^\.\//, '')
+  if (!edges.some(edge => edge.from === from && edge.to === to && edge.typeOnly === typeOnly)) {
+    edges.push({ from, to, typeOnly })
+  }
+}
 for (const file of modules) {
   for (const statement of read(`/src/${file}`).split(/\n(?=(?:import|export)\s)/)) {
-    const match = /^(import|export)\s+(type\s+)?[\s\S]*?from\s+'(\.\/[^']+)'/.exec(statement)
-    if (match) edges.push({ from: file, to: match[3].replace(/^\.\//, ''), typeOnly: Boolean(match[2]) })
+    const named = /\bfrom\s*['"](\.\/[^'"]+)['"]/.exec(statement)
+    if (named) addEdge(file, named[1], /^(?:import|export)\s+type\s/.test(statement))
+    for (const bare of statement.matchAll(/\bimport\s*['"](\.\/[^'"]+)['"]/g)) {
+      addEdge(file, bare[1], false)
+    }
+    for (const dynamic of statement.matchAll(/\bimport\s*\(\s*['"](\.\/[^'"]+)['"]\s*\)/g)) {
+      addEdge(file, dynamic[1], false)
+    }
   }
 }
 const designText = read('/DESIGN.md')

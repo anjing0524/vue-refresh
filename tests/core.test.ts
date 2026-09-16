@@ -550,7 +550,7 @@ test('C05: a throwing page delivery keeps the committed Store and the other subs
     assert.equal(f.entries['test:1']!.version, 1)
     assert.deepEqual(f.entries['test:1']!.data, { x: 'ok' })
     assert.equal(a.display, null); assert.deepEqual(b.display!.data, { x: 'ok' })
-    assert.deepEqual(logs, [['[vue-refresh]', { origin: 'observer', error: 'observer notification failed', resourceId: 'test:1', taskVersion: 1 }]])
+    assert.deepEqual(logs, [['[vue-refresh]', { origin: 'observer', error: 'publish callback failed', resourceId: 'test:1', taskVersion: 1 }]])
     // 诊断出口本身也抛错时，必要清理与后续有效交付仍不受影响。
     await f.advance(100); assert.equal(f.calls.length, 2)
     console.error = () => { throw new Error('report failed') }
@@ -571,7 +571,7 @@ test('B10: notifications are nonblocking and diagnostic projection never reads a
     a.submit({ x: 1 }); b.submit({ x: 1 }); await tick()
     f.calls[0]!.reject(hostile); await tick()
     assert.equal(b.errors.length, 1); assert.equal(logs.length, 1); assert.equal(touched, 0)
-    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'observer notification failed', resourceId: 'test:1', taskVersion: 1 }])
+    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
     console.error = () => { throw hostile }
     a.submit(undefined); await tick()
   } finally { restore(); f.manager.dispose() }
@@ -599,7 +599,7 @@ test('B10.06: a rejection arriving after the notification was replaced or dispos
     late.reject('late'); await tick()
     // 身份是通知当时捕获的旧任务版本；画面、分区、开启意愿与调度时间都不变。
     assert.equal(logs.length, 1)
-    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'observer notification failed', resourceId: 'test:1', taskVersion: 1 }])
+    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
     assert.equal(a.display, display); assert.equal(a.errors.length, 1)
     assert.equal(f.entries['test:1']!.version, 2)
     assert.deepEqual([...f.timers.values()].map(timer => timer.at), timers)
@@ -612,7 +612,7 @@ test('B10.06: a rejection arriving after the notification was replaced or dispos
     g.manager.dispose()
     afterDispose.reject('late after dispose'); await tick()
     assert.equal(logs.length, 2)
-    assert.deepEqual(logs[1], ['[vue-refresh]', { origin: 'observer', error: 'observer notification failed', resourceId: 'test:1', taskVersion: 1 }])
+    assert.deepEqual(logs[1], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
     assert.deepEqual(g.manager.inspect().running, []); assert.deepEqual(g.manager.inspect().queued, [])
     assert.equal(g.manager.isDisposed(), true)
   } finally { restore(); f.manager.dispose(); g.manager.dispose() }
@@ -631,7 +631,7 @@ test('B10.08: an already rejected onError promise is observed once and a complet
     assert.equal(a.errors.length, 1); assert.equal(b.errors.length, 1)
     assert.equal(b.errors[0]!.error, failure); assert.equal(b.errors[0]!.origin, 'background')
     assert.equal(logs.length, 1)
-    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'observer notification failed', resourceId: 'test:1', taskVersion: 1 }])
+    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
     await tick(); assert.equal(logs.length, 1)
 
     // 完成值：已 resolve 的 Promise 与普通返回值都只忽略完成值，不产生诊断。
@@ -681,6 +681,31 @@ test('B10.09: foreign-realm promises and runtime thenables are observed without 
     assert.equal(logs.length, 3)
     assert.deepEqual(logs.map(log => (log[1] as { taskVersion?: number }).taskVersion), [1, 2, 3])
     assert.ok(logs.every(log => (log[1] as { origin?: string }).origin === 'observer'))
+  } finally { restore(); f.manager.dispose() }
+})
+
+test('B10.12: a throwing cleanup is reported once with the declaration identity and does not stop teardown', async () => {
+  const { logs, restore } = captureConsoleError()
+  const f = fixture(), a = f.page()
+  let cleaned = 0
+  try {
+    a.submit({ x: 1 }); await tick()
+    f.calls[0]!.resolve({ x: 'ok' }); await tick()
+    assert.deepEqual(f.entries['test:1']!.data, { x: 'ok' })
+    const pending = a.refresh()                       // 卸载时这条刷新要求应一并结算
+    await tick()
+    f.manager.setHandleCleanup(a.handle, () => { cleaned += 1; throw new Error('cleanup failed') })
+    f.manager.removeHandle(a.handle)
+
+    // 清理自身失败只写一条诊断，说明标出类别，身份是这次声明的代次而不是 0。
+    assert.equal(cleaned, 1)
+    assert.deepEqual(logs, [['[vue-refresh]', { origin: 'observer', error: 'cleanup callback failed', operationId: 1 }]])
+    // 其余清理继续：刷新要求结算、订阅释放、资源与分区删除、句柄清空。
+    assert.deepEqual(await pending, { status: 'cancelled', reason: 'disposed' })
+    assert.equal(a.handle.subscription, null)
+    assert.equal(f.manager.inspect().handles.length, 0)
+    assert.equal(f.manager.inspect().resources.length, 0)
+    assert.equal(Object.keys(f.entries).length, 0)
   } finally { restore(); f.manager.dispose() }
 })
 

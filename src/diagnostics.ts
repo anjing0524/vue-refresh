@@ -9,9 +9,6 @@
  * - 诊断自身失败被吞掉，不改变调用方的清理与后续交付。
  */
 
-/** 观察者自身失败时的固定说明；`observe` 与 `notify` 共用。 */
-export const OBSERVER_FAILED = 'observer notification failed'
-
 /** 诊断事件里允许出现的框架身份标识；不包含原始异常内容，也不属于公开契约。 */
 export interface FrameworkIdentity {
   readonly operationId?: number

@@ -1,4 +1,4 @@
-import { OBSERVER_FAILED, observeRejection, reportObserverError } from './diagnostics.ts'
+import { observeRejection, reportObserverError } from './diagnostics.ts'
 import type { FrameworkIdentity } from './diagnostics.ts'
 import type { Handle, StoreEntry } from './model.ts'
 import type { RefreshError } from './public-types.ts'
@@ -27,16 +27,27 @@ export function cloneSnapshot(entry: StoreEntry): unknown {
 }
 
 /**
+ * 四类外部效果的固定诊断说明：日志要能分辨是哪条通道坏了，只说类别、不写异常内容（U19）。
+ * 与文件头的四类回调一一对应，不再共用一个串。
+ */
+export const EFFECT_FAILED = {
+  publish: 'publish callback failed',
+  onError: 'onError callback failed',
+  cleanup: 'cleanup callback failed',
+  store: 'store effect failed',
+} as const
+
+/**
  * 调用一次可能重入或异步失败的外部效果，并隔离其异常。
  *
  * 同步抛错与返回的 Promise 拒绝都只报告一次 observer；不等待 Promise，
  * 因此一个慢速或 pending 的通知不会阻塞其他接收者。
  */
-export function observe(effect: () => unknown, identity: FrameworkIdentity = {}): void {
+export function observe(effect: () => unknown, reason: string, identity: FrameworkIdentity = {}): void {
   try {
-    observeRejection(effect(), OBSERVER_FAILED, identity)
+    observeRejection(effect(), reason, identity)
   } catch {
-    reportObserverError(OBSERVER_FAILED, identity)
+    reportObserverError(reason, identity)
   }
 }
 
@@ -53,5 +64,5 @@ export function declarationIdentity(handle: Handle): FrameworkIdentity {
  * `identity` 只在本条通知自身失败、需要写诊断日志时使用，不进入 `RefreshError`。
  */
 export function notify(handle: Handle, event: RefreshError, identity: FrameworkIdentity = {}): void {
-  observe(() => handle.onError(event), identity)
+  observe(() => handle.onError(event), EFFECT_FAILED.onError, identity)
 }
