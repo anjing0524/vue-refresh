@@ -458,6 +458,6 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 
 `pnpm typecheck` → `pnpm test` → `pnpm build` → `pnpm build:demo` → `pnpm test:browser`；
 `pnpm complexity` 输出每文件与函数的行数、结构分支、圈复杂度和嵌套深度；
-`pnpm check:docs` 的 13 项一致性门禁，清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准。
+`pnpm check:docs` 的 15 项一致性门禁，清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准。
 实际执行环境与已通过项见 [README](./README.md)「实际验证与边界」。
 测试预期属于契约，修正测试前先确认契约。

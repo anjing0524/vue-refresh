@@ -1,11 +1,12 @@
 // Documentation/code consistency gate. Read-only: it never rewrites a file.
 // Checks what actually drifted before: the module manifest, the dependency direction,
-// the public-contract mirror in the unified document, the README metrics row, the
-// unified document's own section numbering, and the §0 vocabulary table's forms.
+// the public-contract mirror in the unified document, the README metrics row, the recorded
+// built-artifact size, the code symbols both normative documents promise, the unified
+// document's own section numbering, and the §0 vocabulary table's forms.
 // The unified document lives in this repository root, so the check is self-contained.
 // Usage: pnpm check:docs
 import { execFileSync } from 'node:child_process'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '')
@@ -326,6 +327,58 @@ for (const field of INTERNAL_FIELDS) {
     `§0 states outward meaning only, but names the internal field ${field} (DESIGN §3.3)`)
 }
 
+// 14) The README records the built artifact's size, and that number drifted three times because
+//     nothing measured it (someone re-ran `pnpm build` and forgot the doc). Both recorded forms —
+//     `22.33 kB，22330 字节` — must match `dist/index.js` when it exists; a clean checkout without
+//     `dist/` prints a note and skips, so the gate never manufactures a signal. The gzip figure
+//     `vite` prints is deliberately not recorded here: it has no reproducible definition in this
+//     script (node zlib level 9 gives a different number), and an ungated number is what drifted.
+const recordedSizes = [...read('/README.md').matchAll(/([\d.]+) kB，(\d+) 字节/g)]
+check(recordedSizes.length >= 2, '/README.md', 'missing the built-artifact size in kB + 字节 form')
+if (existsSync(`${root}/dist/index.js`)) {
+  const bytes = statSync(`${root}/dist/index.js`).size
+  for (const [, kilobytes, recorded] of recordedSizes) {
+    check(kilobytes === (bytes / 1000).toFixed(2) && Number(recorded) === bytes, '/README.md',
+      `dist/index.js size differs\n    documented: ${kilobytes} kB，${recorded} 字节\n    measured:   ${(bytes / 1000).toFixed(2)} kB，${bytes} 字节`)
+  }
+} else {
+  console.log('[docs] dist/index.js is absent; the recorded artifact size was not re-measured (run pnpm build)')
+}
+
+// 15) Both normative documents name code symbols, and nothing checked that those names exist:
+//     DESIGN once promised the type `DeliveryBarrier` and the method `cancelRefresh`, neither of
+//     which ever existed in `src/`, and every gate stayed green. Two automatic checks, no curated
+//     list to go stale:
+//     (a) every backticked PascalCase token must occur somewhere in `src/` — acceptance ids
+//         (`U13`, `B10`) and the trace-report labels are exempt, nothing else is;
+//     (b) the Manager row in DESIGN §3.3 is the public-surface promise, so every method it names
+//         must exist in `src/manager.ts`.
+//     ADR.md is excluded on purpose: it quotes historical names ("`OBSERVER_FAILED` 已不存在").
+const DOC_SYMBOL_EXEMPT = new Set(['EVIDENCE', 'STATIC', 'PARTIAL', 'UNVERIFIED',
+  'ActivityKind', 'NoInfer', 'ToggleEvent'])
+const sourceText = modules.map(file => read(`/src/${file}`)).join('\n')
+const documentedSymbols = new Set([...designText.matchAll(/`([A-Z][A-Za-z0-9]{2,})`/g)].map(match => match[1]))
+for (const symbol of documentedSymbols) {
+  if (/^[A-Z]\d/.test(symbol) || DOC_SYMBOL_EXEMPT.has(symbol)) continue
+  check(new RegExp(`\\b${symbol}\\b`).test(sourceText), 'DESIGN.md / 统一刷新管理.md',
+    `documented code symbol ${symbol} does not appear in src/`)
+}
+const managerRow = designText.split('\n').find(line => line.startsWith('| Manager |'))
+check(Boolean(managerRow), 'DESIGN.md §3.3', 'missing the Manager ownership row')
+if (managerRow) {
+  const namedOperations = /外部只能走命名操作（([^）]*)）/.exec(managerRow)?.[1] ?? ''
+  const promised = new Set([
+    ...[...namedOperations.matchAll(/`([^`]+)`/g)].map(match => match[1]),
+    ...[...managerRow.matchAll(/`([a-zA-Z][\w$]*)\(\)`/g)].map(match => match[1]),
+  ])
+  check(promised.size > 0, 'DESIGN.md §3.3', 'no named operations parsed from the Manager row')
+  const managerSource = read('/src/manager.ts')
+  for (const name of promised) {
+    check(new RegExp(`\\b${name}\\s*\\(`).test(managerSource), 'DESIGN.md §3.3',
+      `the Manager row promises ${name}(), which src/manager.ts does not define`)
+  }
+}
+
 if (problems.length) {
   for (const problem of problems) console.error('[docs]', problem)
   process.exit(1)
@@ -334,7 +387,7 @@ if (problems.length) {
 // test title is a review aid, not a defect, so it must not fail this gate.
 console.log(execFileSync(process.execPath, [`${root}/scripts/trace-leaves.mjs`], { cwd: root, encoding: 'utf8' }).trimEnd())
 console.log(`[docs] consistent: ${modules.length} modules, contract mirror, README metrics, `
-  + `${declared.size} trigger anchors, capability blocks, `
+  + `README artifact size, documented symbols, ${declared.size} trigger anchors, capability blocks, `
   + `dependency direction, published entry, manager sections, ${TOPIC_CITATIONS.length} topic citations, `
   + `${vocabularyRows.length} vocabulary rows, ${leaves.size} layered leaves, `
   + `${peerTypeEdges} peer type edges, ${backTypeEdges} type-only back edges`)
