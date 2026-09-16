@@ -24,6 +24,8 @@ for (const scenario of scenarios) {
       resolve: (id, price) => page.evaluate(({ id, price }) => window.experiment.resolve(id, price), { id, price }),
       mutatePage: (name, price) => page.evaluate(({ name, price }) => window.experiment.mutatePage(name, price), { name, price }),
       refresh: (name, symbol) => page.evaluate(({ name, symbol }) => window.experiment.refresh(name, symbol), { name, symbol }),
+      nestedOuter: shown => page.evaluate(value => window.experiment.nestedOuter(value), shown),
+      visibility: hidden => page.evaluate(value => window.experiment.visibility(value), hidden),
       unmount: () => page.evaluate(() => window.experiment.unmount()),
       async requests() { return (await request.get('/__fixture/state')).json() },
       async release(id) { await request.post(`/__fixture/release/${id}`) },

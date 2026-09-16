@@ -1,4 +1,4 @@
-import { createApp, defineComponent, h, inject, onMounted, ref } from 'vue'
+import { createApp, defineComponent, h, inject, KeepAlive, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { createPinia } from 'pinia'
 import { defineRefresh } from '../src/source'
@@ -33,6 +33,8 @@ export interface HarnessSnapshot {
 export interface HarnessBridge {
   snapshot(): HarnessSnapshot
   refresh(name: string, symbol: string): void
+  nestedOuter(shown: boolean): void
+  visibility(hidden: boolean): void
   enable(name: string, enabled: boolean): void
   resolve(id: number, price: number): void
   mutatePage(name: string, price: number): void
@@ -52,7 +54,7 @@ export interface ShellBridge {
 /**
  * 集成验证台。
  *
- * `tests/browser.html` 与 Playwright 的七条场景共用这一个视图，代码保持原样：它带
+ * `tests/browser.html` 与 Playwright 的八条场景共用这一个视图，代码保持原样：它带
  * `?mode=controlled` 的手动结算与只读测试桥，与三条代表页面不是同一类东西，因此不合并；
  * 它的请求函数也不能复用 `sources.ts` 的 `runQuote`——手动结算只在这里需要。
  */
@@ -126,13 +128,40 @@ function mountHarness(): void {
       ])
     },
   })
+  /**
+   * 祖先 KeepAlive 组合（L07.02）：外层 KeepAlive 切走时，内层 KeepAlive 里的页面
+   * 必须收到 deactivated 并退订，画面留在缓存里；切回时按订阅规则恢复。
+   */
+  // 默认不挂载：只有 L07/A05 场景会打开它，避免给其它场景增加第三个身份与请求。
+  const nestedOuterShown = ref(false)
+  const NestedWidget = defineComponent({
+    name: 'NestedWidget',
+    setup() {
+      const enabled = ref(true)
+      const task = useRefresh(source, { enabled, every, onError: () => { events.push('嵌套页后台请求失败，等待下一周期') } })
+      components.set('嵌套', { task, enabled })
+      onMounted(() => task.submit({ account: 'demo', symbol: 'NESTED' }))
+      return () => h('section', { class: 'card', 'data-testid': 'nested' }, [
+        h('div', { class: 'card-heading' }, [h('h2', '嵌套页'), h('span', enabled.value ? '订阅中' : '已暂停')]),
+        h('p', { class: 'price', 'data-testid': 'price-嵌套' }, task.display.value?.data.quote.price.toString() ?? '等待首查'),
+      ])
+    },
+  })
+  const OuterKeepAlive = defineComponent({
+    name: 'OuterKeepAlive',
+    setup() {
+      return () => h(KeepAlive, null, { default: () => h(NestedWidget) })
+    },
+  })
   const app = createApp({
     render: () => h('main', [
       h('p', { class: 'eyebrow' }, '真实 Vue · Pinia · HTTP'),
       h('h1', '两个组件，一份共享刷新'),
       h('p', { class: 'intro' }, '暂停一页，另一页继续；全部暂停后取消请求，恢复时重新获取。暂停页面保留自己的画面。'),
       h('div', { class: 'cards' }, [h(Widget, { label: '甲' }), h(Widget, { label: '乙' })]),
-      h('p', { class: 'note' }, '固定业务参数接口 · 共享刷新与独立查询 · 验证范围见运行记录。'),
+      // 双层 KeepAlive：外层切走会让内层页面收到祖先失活。
+      h(KeepAlive, null, { default: () => nestedOuterShown.value ? h(OuterKeepAlive) : null }),
+      h('p', { class: 'note' }, '固定业务参数接口 · 共享刷新与显式刷新 · 验证范围见运行记录。'),
     ]),
   })
   const pinia = createPinia()
@@ -173,6 +202,13 @@ function mountHarness(): void {
       data.quote.price = price
     },
     submit(name: string, args: QuoteParams) { return components.get(name)!.task.submit(args) },
+    nestedOuter(shown: boolean) { nestedOuterShown.value = shown },
+    // 受控可见性：真实浏览器里覆写 document.hidden 并派发真正的 visibilitychange 事件，
+    // 走的是 app.ts 注册的那条监听，而不是直接调用核心的 setBrowserVisible。
+    visibility(hidden: boolean) {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
+      document.dispatchEvent(new Event('visibilitychange'))
+    },
     unmount() { app.unmount() },
   }
   window.experiment = bridge

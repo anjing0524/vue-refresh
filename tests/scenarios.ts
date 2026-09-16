@@ -7,8 +7,10 @@ export interface Driver {
   resolve(id: number, price: number): Promise<void>
   mutatePage(name: string, price: number): Promise<void>
   refresh(name: string, symbol: string): Promise<void>
+  nestedOuter(shown: boolean): Promise<void>
+  visibility(hidden: boolean): Promise<void>
   unmount(): Promise<void>
-  requests(): Promise<Array<{ id: number; status: string }>>
+  requests(): Promise<Array<{ id: number; status: string; query: string }>>
   release(id: number): Promise<void>
   price(name: string): Promise<string>
 }
@@ -147,5 +149,59 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await until(async () => (await d.snapshot()).running === 0, 'late load settled')
     const now = await d.snapshot()
     check(!now.resources && !now.queued && !now.timer && !Object.keys(now.entries).length && now.pages['甲'] === null, 'disposed state must stay empty')
+  } },
+
+  { name: 'L07/A05: 真实浏览器下祖先 KeepAlive 失活与受控 visibilitychange', async run(d) {
+    // controlled 模式下 harness 的 deferred 先于 HTTP 发起，因此断言走 calls／pages，而不是 fixture 的请求表。
+    await d.open('/?mode=controlled')
+    const calls = async () => (await d.snapshot()).calls
+    const nestedDisplay = async () => (await d.snapshot()).pages['嵌套']
+    await until(async () => (await calls()).length === 1, '共享首查一次')
+    // 先让共享首查真实结束：controlled 模式下未结算的 harness deferred 会一直占着物理槽。
+    await d.resolve(1, 101)
+    await until(async () => (await d.snapshot()).pages['甲'] !== null, '共享首查交付')
+    // 挂载双层 KeepAlive 组合：嵌套页声明自己的身份并首查。
+    await d.nestedOuter(true)
+    await until(async () => (await calls()).length === 2, '嵌套页首查')
+    const first = (await calls())[1]!.id
+    await d.resolve(first, 100 + first)
+    await until(async () => (await nestedDisplay())?.data.quote.price === 100 + first, '嵌套页拿到首查结果')
+    check((await d.snapshot()).resources === 2, '两个身份各自一个实例')
+
+    // L07.02 祖先失活：外层 KeepAlive 切走 → 嵌套页 deactivated → 退订、画面保留、不请求。
+    const before = (await calls()).length
+    await d.nestedOuter(false)
+    await until(async () => (await d.snapshot()).resources === 1, '祖先失活后嵌套页退订且实例清理')
+    await sleep(200)
+    check((await calls()).length === before, '祖先失活不得产生请求')
+    check((await nestedDisplay())?.data.quote.price === 100 + first, '失活时画面保留')
+
+    // 切回：按订阅规则恢复（实例已删 → 首查），不重复订阅。
+    await d.nestedOuter(true)
+    await until(async () => (await calls()).length === 3, '恢复后按订阅规则取数')
+    const resumed = (await calls())[2]!.id
+    check((await d.snapshot()).resources === 2, '恢复只建立一个订阅')
+    await d.resolve(resumed, 100 + resumed)
+    await until(async () => (await nestedDisplay())?.data.quote.price === 100 + resumed, '恢复后画面更新')
+
+    // 受控 visibilitychange：走 app.ts 注册的那条真实监听，而不是直接调用核心。
+    await d.visibility(true)
+    await until(async () => (await d.snapshot()).resources === 0, '隐藏时全部退订')
+    const hidden = (await calls()).length
+    await sleep(200)
+    check((await calls()).length === hidden, '隐藏期间不产生请求')
+    await d.visibility(false)
+    await until(async () => (await d.snapshot()).resources === 2, '显示后按订阅规则重建')
+    await until(async () => (await calls()).length === hidden + 2, '两个身份各取一次')
+    for (const call of await calls()) if (!call.finished) await d.resolve(call.id, 0)
+
+    // 卸载后：监听不再产生任何可观察效果（「监听已摘除」本身需要 CDP 才能取证，见 README）。
+    await d.unmount()
+    const disposed = (await calls()).length
+    await d.visibility(true)
+    await sleep(200)
+    check((await calls()).length === disposed, '卸载后派发 visibilitychange 不产生请求')
+    const final = await d.snapshot()
+    check(final.running === 0 && final.queued === 0, '卸载后没有在途或排队任务')
   } },
 ]

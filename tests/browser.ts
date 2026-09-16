@@ -14,6 +14,8 @@ const driver: Driver = {
   async resolve(id, price) { api().resolve(id, price) },
   async mutatePage(name, price) { api().mutatePage(name, price) },
   async refresh(name, symbol) { api().refresh(name, symbol) },
+  async nestedOuter(shown) { api().nestedOuter(shown) },
+  async visibility(hidden) { api().visibility(hidden) },
   async unmount() { api().unmount() },
   async requests() { return (await fetch('/__fixture/state')).json() },
   async release(id) { await fetch(`/__fixture/release/${id}`, { method: 'POST' }) },
