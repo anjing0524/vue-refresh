@@ -780,6 +780,8 @@ for (const [name, make] of badData) test('C11/A02/B12a: ' + name + ' 结果不�
 
 test('A01/A02/A06/B06/P08/Q08: 入口返回契约在正确边界保留或清空需求', async () => {
   const f = fixture(), a = f.page()
+  // 从未声明过：刷新没有身份可用。
+  assert.deepEqual(await a.refresh(), { status: 'cancelled', reason: 'unavailable' })
   a.handle.lifecycleActive = false
   assert.deepEqual(a.submit({ x: 1 }), { status: 'accepted' })   // 失活仍可声明身份
   const submission = a.handle.submission
@@ -788,16 +790,21 @@ test('A01/A02/A06/B06/P08/Q08: 入口返回契约在正确边界保留或清空�
   assert.equal(f.readSnapshot({ x: 3 }), undefined)
   assert.equal(f.manager.inspect().resources.length, 0)
   assert.throws(() => f.readSnapshot([]))
-  a.handle.lifecycleActive = true
-  assert.equal(a.submit([]).status, 'rejected')                  // 参数非法：清空本次声明
-  assert.equal(a.handle.submission, null); assert.equal(a.input.enabled, true)
-  assert.deepEqual(await a.refresh(), { status: 'cancelled', reason: 'unavailable' })
-  a.submit({ x: 1 }); await tick()
+  f.manager.activate(a.handle); await tick()
+  assert.equal(f.calls.length, 1)                                // 恢复资格才接入并首查
+  // 无效声明不改动任何状态：旧声明、订阅与画面都原样保留。
+  assert.equal(a.submit([]).status, 'rejected')
+  assert.equal(a.handle.submission, submission); assert.equal(a.input.enabled, true)
+  assert.equal(f.manager.inspect().resources.length, 1)
+  a.submit({ x: 1 }); await tick()                               // 同身份重声明是幂等的
+  assert.equal(f.calls.length, 1)
   f.calls[0]!.resolve(null); await tick()
   assert.equal(f.readSnapshot({ x: 1 }), null)
   assert.equal(a.submit(undefined).status, 'rejected')
-  await tick(); assert.equal(a.handle.submission, null); assert.equal(a.display!.data, null)
-  assert.equal(f.manager.inspect().resources.length, 0)          // 声明被清 → 订阅退出
+  await tick()
+  assert.equal(a.handle.submission, submission)                  // 失败声明不动旧声明
+  assert.equal(a.display!.data, null)
+  assert.equal(f.manager.inspect().resources.length, 1)
   f.manager.dispose()
   assert.equal(f.readSnapshot([]), undefined)
   assert.deepEqual(await a.refresh(), { status: 'cancelled', reason: 'disposed' })
@@ -919,33 +926,43 @@ test('B03: 保留 A 画面时声明 B，B 失败后展示参数仍标注 A', asy
   } finally { f.manager.dispose() }
 })
 
-test('B07: 校验失败后改频率或隐藏再恢复都不恢复旧参数、不建立订阅', async () => {
-  const f = fixture(), a = f.page()
+test('B07: 校验失败不改状态——已声明则原样保留，从未声明则仍无身份', async () => {
+  const f = fixture(), a = f.page(), b = f.page()
   try {
+    // 已声明：校验失败后旧声明与订阅原样，周期继续。
     a.submit({ x: 'A' }); await tick()
     f.calls[0]!.resolve({ v: 'a' }); await tick()
-    assert.ok(a.handle.subscription)
-    // 新参数校验失败：清空声明并退出订阅（不保留旧参数）。
+    const submission = a.handle.submission, subscription = a.handle.subscription
     f.setValidate(() => false)
     assert.equal(a.submit({ x: 'B' }).status, 'rejected')
     await tick()
-    assert.equal(a.handle.submission, null)
-    assert.equal(a.handle.subscription, null)
-    assert.deepEqual(f.manager.inspect().resources, [])
-    // 校验失败后改频率：不恢复、不请求。
+    assert.equal(a.handle.submission, submission)
+    assert.equal(a.handle.subscription, subscription)
+    assert.equal(f.manager.inspect().resources.length, 1)
     a.set({ ...active, every: 300 }); await tick()
     assert.equal(f.calls.length, 1)
-    // 校验失败后隐藏再恢复：同样不恢复旧参数。
-    a.set({ ...active, visible: false }); await tick()
-    a.set(active); await tick()
-    assert.equal(f.calls.length, 1)
-    assert.equal(a.handle.submission, null)
-    assert.deepEqual(f.manager.inspect().resources, [])
-    // 只有新的有效声明才解除「无身份」事实。
-    f.setValidate(() => true)
-    a.submit({ x: 'C' }); await tick()
+    // 已发起的刷新要求也不因无效声明被结算。
+    const pending = a.refresh(); await tick()
     assert.equal(f.calls.length, 2)
-    assert.deepEqual(f.calls[1]!.args, { x: 'C' })
+    assert.equal(a.submit({ x: 'D' }).status, 'rejected')
+    assert.equal(a.handle.refreshes.size, 1)
+    f.calls[1]!.resolve({ v: 'fresh' }); await tick()
+    assert.deepEqual(await pending, { status: 'success' })
+    // 从未声明过：改频率、隐藏再恢复都不建立身份、不请求。
+    assert.equal(b.submit({ x: 'B' }).status, 'rejected')
+    b.set({ ...active, every: 300 }); await tick()
+    b.set({ ...active, visible: false }); await tick()
+    b.set(active); await tick()
+    assert.equal(b.handle.submission, null)
+    assert.equal(b.handle.subscription, null)
+    assert.equal(f.manager.inspect().resources.length, 1)
+    assert.equal(f.calls.length, 2)
+    // 只有新的有效声明才建立身份并取数。
+    f.setValidate(() => true)
+    b.submit({ x: 'C' }); await tick()
+    assert.equal(f.calls.length, 3)
+    assert.deepEqual(f.calls[2]!.args, { x: 'C' })
+    assert.ok(b.handle.subscription)
   } finally { f.manager.dispose() }
 })
 

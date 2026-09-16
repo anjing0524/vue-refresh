@@ -128,7 +128,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；准备成功后只读 | 提交边界复制/冻结/编码；需求与运行实例释放后回收 |
 | Handle | `operationId=0`、`submission=null`、`subscription=null`、`refreshes` 空集合、`cleanup=null`、`lifecycleActive=false`、`disposed=false` | 全部写入都在 `manager.ts` 内：声明与关系由 Manager 写，生命周期走 `activate` / `deactivate`，`cleanup` 走 `setHandleCleanup`；适配层只读 `operationId` / `disposed` / `subscription`。`source` / `readInput` / `publish` / `onError` 为固定端口；`enabled` 只被读取，框架从不写入 |
-| Submission | `parameters` | Manager 接纳准备结果后建立；同身份重复声明幂等保留，新身份整体替换，校验失败清空 |
+| Submission | `parameters` | Manager 校验通过后才建立；同身份重复声明幂等保留，新身份整体替换，校验失败不改动 |
 | Subscription | `owner`、`resource`、`every` | `attach` 建立双向关系；`synchronize` 只更新频率；`releaseSubscription` 解除 |
 | RefreshWaiter | `owner`、`resource`、`minVersion`、`settle` | `refresh` 创建并同时挂到句柄与实例两侧；原生 Promise 首次结算生效，无 settled 镜像；结算或取消后从两侧移除 |
 | Resource | `id`、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`issuedVersion=0`、`task=null`、`lastSettledAt=null` | Manager 建立与修改；最后一个订阅与刷新要求都退出时移除注册及 Store；创建后参数不被新加入者改写 |
@@ -144,7 +144,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 
 | 事件 | 同步转换 | 后续动作与重入边界 |
 |---|---|---|
-| `submit` 接纳 | 分配新 `operationId`、清旧 Submission，再释放被替换的订阅与刷新要求 | 旧 abort / Store 通知可能重入；替换后复核代次 |
+| `submit` 接纳 | 只推进 `operationId`；校验通过后才建立新声明、释放被替换的订阅与刷新要求 | 校验失败不改动任何状态；旧 abort / Store 通知可能重入，替换后复核代次 |
 | 准备参数成功 | 保存 Parameters 作为已声明身份 | 参数准备只执行一次；`validate` 结束后复核代次 |
 | 配置变化 | Vue 先更新快照并处理关闭边沿，核心撤销不合格订阅或替换任务 | `onError` / abort 可能重入；判断函数本身无外部效果 |
 | `refresh` 接纳 | 建立刷新要求（版本下限）并在没有当前任务时登记一次共享任务 | 与自动刷新同一条路径；不复制第二份 DTO |

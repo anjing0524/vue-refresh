@@ -112,69 +112,47 @@ export class Manager {
     if (this.disposed || handle.disposed) {
       return { status: 'cancelled', reason: CancelReason.Disposed }
     }
-    const id = this.nextIdentity(handle.operationId)
+    const previousId = handle.operationId
+    const id = this.nextIdentity(previousId)
     if (id === null) return { status: 'cancelled', reason: CancelReason.Disposed }
-    const previous = handle.subscription
-
-    // 新身份（代次与空声明）先就位，再释放旧订阅：旧 abort 回调可能同步重入。
+    // 只推进代次：它用于识别「本次声明是否仍被接纳」，不改变任何已声明事实。
     handle.operationId = id
-    handle.submission = null
-    handle.subscription = null
 
-    if (!this.currentOperation(handle, id)) return this.cancelledResult(handle, previous)
     let parameters: Parameters
     try {
       parameters = prepare()
     } catch (error) {
-      // 校验失败：清空本次声明、保留画面，但不关闭开启意愿。
-      if (!this.currentOperation(handle, id)) return this.cancelledResult(handle, previous)
-      this.abandonDeclaration(handle, previous)
+      // 无效声明不改动任何状态：旧声明、订阅与未结算的刷新要求原样保留。
+      if (!this.currentOperation(handle, id)) return this.supersededResult(handle)
+      handle.operationId = previousId
       notify(handle, { origin: ErrorOrigin.Validation, error }, { operationId: id })
       return { status: 'rejected', error }
     }
     // prepare 或 validate 可能同步提交了新声明；被替代时由新声明拥有结果。
-    if (!this.currentOperation(handle, id)) return this.cancelledResult(handle, previous)
-    return this.commitDeclaration(handle, id, previous, parameters)
+    if (!this.currentOperation(handle, id)) return this.supersededResult(handle)
+    return this.commitDeclaration(handle, id, parameters)
   }
 
   /**
-   * 声明成立：同一身份是幂等的（保留订阅与未结算的刷新要求）；新身份整体替换。
+   * 声明成立：同一身份是幂等的（不写状态、不请求）；新身份整体替换。
    *
    * 替换会 abort 旧执行，而 abort 回调可以同步提交新声明，因此替换之后必须复核代次。
    */
-  private commitDeclaration(
-    handle: Handle,
-    id: number,
-    previous: Subscription | null,
-    parameters: Parameters,
-  ): SubmitResult {
-    if (previous && this.sameIdentity(previous, handle.source, parameters)) {
-      handle.submission = { parameters }
-      handle.subscription = previous
-      this.requestFlush()
-      return { status: 'accepted' }
-    }
+  private commitDeclaration(handle: Handle, id: number, parameters: Parameters): SubmitResult {
+    const declared = handle.submission
+    if (declared && declared.parameters.key === parameters.key) return { status: 'accepted' }
+    // 新身份：先建立新声明，再作废未结算的刷新要求并退出旧订阅。
     handle.submission = { parameters }
-    this.abandonDeclaration(handle, previous)
-    if (!this.currentOperation(handle, id)) return this.cancelledResult(handle, previous)
+    this.settleRefreshes(handle, CancelReason.Superseded)
+    const replaced = handle.subscription
+    if (replaced) this.releaseSubscription(replaced)
+    if (!this.currentOperation(handle, id)) return this.supersededResult(handle)
     this.requestFlush()
     return { status: 'accepted' }
   }
 
-  /** 旧订阅与本次声明是否指向同一身份：Source 身份 + 完整参数值稳定键。 */
-  private sameIdentity(previous: Subscription, source: SourceRuntime, parameters: Parameters): boolean {
-    return previous.resource.source === source && previous.resource.parameters.key === parameters.key
-  }
-
-  /** 本次声明不成立：作废本页未结算的刷新要求并退出旧订阅。 */
-  private abandonDeclaration(handle: Handle, previous: Subscription | null): void {
-    this.settleRefreshes(handle, CancelReason.Superseded)
-    if (previous) this.releaseSubscription(previous)
-  }
-
-  /** 已被替代或已销毁的声明结果；顺带清理本次声明要退出的旧订阅。 */
-  private cancelledResult(handle: Handle, previous: Subscription | null): SubmitResult {
-    this.abandonDeclaration(handle, previous)
+  /** 已被同步新声明替代或实例已销毁：不写回任何状态。 */
+  private supersededResult(handle: Handle): SubmitResult {
     return {
       status: 'cancelled',
       reason: this.disposed || handle.disposed ? CancelReason.Disposed : CancelReason.Superseded,
