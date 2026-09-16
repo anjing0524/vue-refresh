@@ -140,7 +140,7 @@ for (const line of rulesText.split('\n')) {
 check(declared.size > 0, '统一刷新管理.md §3', 'no trigger anchors declared')
 const doubled = [...declared].filter(([, count]) => count > 1).map(([id]) => id)
 check(doubled.length === 0, '统一刷新管理.md §3', `trigger anchors declared more than once: ${doubled.join(' ') || '-'}`)
-for (const file of ['/统一刷新管理.md', '/DESIGN.md', '/README.md']) {
+for (const file of ['/统一刷新管理.md', '/DESIGN.md', '/README.md', '/ADR.md']) {
   const danglingAnchors = [...new Set([...read(file).matchAll(/\bU\d{1,3}\b/g)].map(match => match[0]))]
     .filter(id => !declared.has(id)).sort()
   check(danglingAnchors.length === 0, file,
