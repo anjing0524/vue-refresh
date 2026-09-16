@@ -13,7 +13,7 @@ const driver: Driver = {
   async enable(name, value) { api().enable(name, value) },
   async resolve(id, price) { api().resolve(id, price) },
   async mutatePage(name, price) { api().mutatePage(name, price) },
-  async query(name, symbol) { api().query(name, symbol) },
+  async refresh(name, symbol) { api().refresh(name, symbol) },
   async unmount() { api().unmount() },
   async requests() { return (await fetch('/__fixture/state')).json() },
   async release(id) { await fetch(`/__fixture/release/${id}`, { method: 'POST' }) },

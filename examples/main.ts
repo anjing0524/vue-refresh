@@ -32,7 +32,7 @@ export interface HarnessSnapshot {
 }
 export interface HarnessBridge {
   snapshot(): HarnessSnapshot
-  query(name: string, symbol: string): void
+  refresh(name: string, symbol: string): void
   enable(name: string, enabled: boolean): void
   resolve(id: number, price: number): void
   mutatePage(name: string, price: number): void
@@ -157,7 +157,7 @@ function mountHarness(): void {
         timer: view.scheduled, pending: view.pendingFlush,
       }
     },
-    query(name: string, symbol: string) {
+    refresh(name: string, symbol: string) {
       const page = components.get(name)!
       queryResults[name] = null
       // 主动刷新：先声明身份，再用与自动刷新同一条路径取一次。

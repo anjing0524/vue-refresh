@@ -70,9 +70,9 @@ const EVIDENCE = {
   'F05/A05: onError reentry cannot be overwritten by old failure': ['M08'],
   'S05: two real SSR renders create no request, timer or shared state': ['C08'],
   'P01/C03/C13: resource validation runs once per submission, never on restore or lookup': ['C12', 'S03'],
-  '查询列表：提交才发请求、分页排序复用已提交参数、独立启停、暂停仍可单查、失败关闭': ['Q10'],
+  '查询列表：提交才发请求、分页排序复用已提交参数、独立启停、暂停仍可刷新、失败关闭': ['Q10'],
   '双组件共享：1s/5s 同参共享、单页暂停、重新进入交付已有结果、切换品种、全部退订、快照隔离': ['P04', 'S03', 'S04'],
-  'B09：无启停按钮，前次失败后在 runner 内开启意愿，不先请求旧参数': ['Q11'],
+  'B09：无启停按钮，前次失败后在同一个同步块里开启意愿并声明新身份，不先请求旧参数': ['Q11'],
   '真实HTTP：共享、单页冻结、最后取消、恢复': ['R10'],
 }
 const STATIC = {

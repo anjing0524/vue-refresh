@@ -23,7 +23,7 @@ for (const scenario of scenarios) {
       enable: (name, value) => page.evaluate(({ name, value }) => window.experiment.enable(name, value), { name, value }),
       resolve: (id, price) => page.evaluate(({ id, price }) => window.experiment.resolve(id, price), { id, price }),
       mutatePage: (name, price) => page.evaluate(({ name, price }) => window.experiment.mutatePage(name, price), { name, price }),
-      query: (name, symbol) => page.evaluate(({ name, symbol }) => window.experiment.query(name, symbol), { name, symbol }),
+      refresh: (name, symbol) => page.evaluate(({ name, symbol }) => window.experiment.refresh(name, symbol), { name, symbol }),
       unmount: () => page.evaluate(() => window.experiment.unmount()),
       async requests() { return (await request.get('/__fixture/state')).json() },
       async release(id) { await request.post(`/__fixture/release/${id}`) },

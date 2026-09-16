@@ -45,7 +45,7 @@ test.beforeEach(async ({ request, page }) => {
   page.on('pageerror', error => { throw error })
 })
 
-test('查询列表：提交才发请求、分页排序复用已提交参数、独立启停、暂停仍可单查、失败关闭', async ({ page, request }) => {
+test('查询列表：提交才发请求、分页排序复用已提交参数、独立启停、暂停仍可刷新、失败关闭', async ({ page, request }) => {
   await page.goto('/?page=query-list')
   await expect(page.getByTestId('page-query-list')).toBeVisible()
 
@@ -81,16 +81,16 @@ test('查询列表：提交才发请求、分页排序复用已提交参数、�
   await expect(page.getByTestId('ql-origin')).toContainText('共享刷新')
   await expect(page.getByTestId('ql-price-600000')).toHaveText(`${100 + revalidated * 10}.00`)
 
-  // 暂停仍可单查：只影响本页，不恢复后台刷新。
+  // 暂停后仍可刷新一次：走同一条共享路径更新本页，不恢复自动刷新。
   await page.getByTestId('ql-toggle').click()
   await expect(page.getByTestId('ql-status')).toHaveText('已暂停')
   const frozen = (await state(request)).length
   await page.getByTestId('ql-once').click()
-  const queryId = await pendingId(request)
+  const refreshed = await pendingId(request)
   expect((await state(request)).length).toBe(frozen + 1)
-  await release(request, queryId)
-  await expect(page.getByTestId('ql-origin')).toContainText('本页单查')
-  await expect(page.getByTestId('ql-price-600000')).toHaveText(`${100 + queryId * 10}.00`)
+  await release(request, refreshed)
+  await expect(page.getByTestId('ql-origin')).toContainText('本页刷新')
+  await expect(page.getByTestId('ql-price-600000')).toHaveText(`${100 + refreshed * 10}.00`)
   await page.waitForTimeout(500)
   const afterQuery = (await state(request)).length
   expect(afterQuery).toBe(frozen + 1)
@@ -131,10 +131,8 @@ test('行情面板：无查询按钮、一次提交、响应式频率、显示�
   await expect(page.getByTestId('qp-age')).toContainText('数据时间：')
   await expect(page.getByTestId('qp-age')).toContainText('秒前')
 
-  // 响应式频率：改成 5 秒后不再刷新（只换任务那一次）。
+  // 频率变化不再解释成数据失效：改成 5 秒后保留在途请求，也不立刻补一次。
   await page.getByTestId('qp-every').selectOption('5000')
-  const replaced = await pendingId(request)
-  await release(request, replaced)
   const quiet = (await state(request)).length
   await page.waitForTimeout(3_200)
   expect((await state(request)).length).toBe(quiet)
@@ -225,7 +223,7 @@ test('双组件共享：1s/5s 同参共享、单页暂停、重新进入交付�
   await expect(page.getByTestId('sp-price-甲')).toHaveText(`${100 + fresh}.00`)
 })
 
-test('B09：无启停按钮，前次失败后在 runner 内开启意愿，不先请求旧参数', async ({ page, request }) => {
+test('B09：无启停按钮，前次失败后在同一个同步块里开启意愿并声明新身份，不先请求旧参数', async ({ page, request }) => {
   await request.post('/__fixture/fail-next', { data: { count: 1 } })
   await page.goto('/?page=b09')
   await expect(page.getByTestId('page-b09')).toBeVisible()
@@ -241,18 +239,19 @@ test('B09：无启停按钮，前次失败后在 runner 内开启意愿，不先
   expect(symbolOf(before[0]!)).toBe('B09')
   expect(before[0]!.status).toBe('failed')
 
-  // runner 内开启意愿：第一笔就是新参数，不先按旧参数发后台请求。
-  await page.getByTestId('b09-query').click()
+  // 同步块内开启意愿并声明新身份：第一笔就是新参数，不先按旧参数发共享请求。
+  await page.getByTestId('b09-refresh').click()
   await expect.poll(async () => (await state(request)).length).toBe(2)
   const afterQuery = await state(request)
   expect(symbolOf(afterQuery[1]!)).toBe('B09-NEW')
   expect(afterQuery.slice(1).some(row => symbolOf(row) === 'B09')).toBe(false)
 
-  // 单查成功后转为普通订阅：仍按新参数继续取数。
+  // 刷新成功后转为普通订阅：仍按新参数继续取数。
   await release(request, afterQuery[1]!.id)
   await expect(page.getByTestId('b09-request')).toContainText('B09-NEW')
   await expect(page.getByTestId('b09-state')).toHaveText('开启意愿：真')
-  await expect.poll(async () => (await state(request)).length).toBe(3)
+  // 刷新成功后按普通订阅继续：下一次请求由新间隔（5 秒）到期产生。
+  await expect.poll(async () => (await state(request)).length, { timeout: 8_000 }).toBe(3)
   const background = (await state(request))[2]!
   expect(symbolOf(background)).toBe('B09-NEW')
   await release(request, background.id)

@@ -6,7 +6,7 @@ export interface Driver {
   enable(name: string, value: boolean): Promise<void>
   resolve(id: number, price: number): Promise<void>
   mutatePage(name: string, price: number): Promise<void>
-  query(name: string, symbol: string): Promise<void>
+  refresh(name: string, symbol: string): Promise<void>
   unmount(): Promise<void>
   requests(): Promise<Array<{ id: number; status: string }>>
   release(id: number): Promise<void>
@@ -25,34 +25,36 @@ async function until(condition: () => Promise<boolean>, message: string) {
 }
 
 export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> }> = [
-  { name: '暂停后独立查询：固定interface对象、只更新本页、不写共享分区', async run(d) {
+  { name: '暂停后显式刷新：同一条共享路径取一次、只更新本页、不恢复自动刷新', async run(d) {
     await d.open('/?test')
     await until(async () => (await d.requests()).length === 1, 'initial shared request')
     await d.enable('甲', false); await d.enable('乙', false)
-    await d.query('甲', 'OTHER')
-    await until(async () => (await d.requests()).length === 2, 'independent query')
+    // 两页都暂停后实例已清理；甲刷新一次：临时要求建立实例并产生一次共享请求。
+    await d.refresh('甲', 'OTHER')
+    await until(async () => (await d.requests()).length === 2, 'refresh request')
     await d.release((await d.requests())[1]!.id)
-    await until(async () => (await d.snapshot()).queryResults['甲']?.status === 'success', 'query settles')
+    await until(async () => (await d.snapshot()).queryResults['甲']?.status === 'success', 'refresh settles')
     const state = await d.snapshot()
-    check(state.pages['甲']!.args.symbol === 'OTHER' && state.pages['甲']!.origin === 'query', 'display contains query parameters and origin')
-    check(state.pages['乙'] === null && state.resources === 0 && Object.keys(state.entries).length === 0, 'paused query must not publish shared data')
+    check(state.pages['甲']!.args.symbol === 'OTHER' && state.pages['甲']!.origin === 'refresh', 'display contains refreshed parameters and origin')
+    check(state.pages['乙'] === null, 'paused page without a refresh requirement receives nothing')
+    check(Object.keys(state.entries).length === 0 && state.resources === 0, 'temporary requirement is cleaned up once it settles')
     await sleep(200)
-    check((await d.requests()).length === 2, 'paused query must not start background refresh')
+    check((await d.requests()).length === 2, 'refresh must not start polling')
   } },
-  { name: '独立查询不等后台槽：关闭立即取消，其他订阅继续', async run(d) {
+  { name: '刷新与自动刷新共用队列：满槽时排队，不绕过并发上限', async run(d) {
     await d.open('/?test&slots=1')
     await until(async () => (await d.requests()).length === 1, 'background fills slot')
-    await d.query('甲', 'OTHER')
-    await until(async () => (await d.requests()).length === 2, 'query bypasses full slot')
-    check((await d.snapshot()).running === 1, 'query must not consume background slot')
     await d.enable('甲', false)
-    await until(async () => (await d.snapshot()).queryResults['甲']?.status === 'cancelled', 'query cancellation settles')
-    const result = (await d.snapshot()).queryResults['甲']!
-    check(result.status === 'cancelled' && result.reason === 'unavailable', 'close edge cancellation reason')
-    check(!(await d.snapshot()).calls[0]!.aborted, 'remaining subscriber keeps background request')
+    await d.refresh('甲', 'OTHER')
+    await sleep(200)
+    const blocked = await d.snapshot()
+    check(blocked.running === 1 && blocked.calls.length === 1 && blocked.queued === 1, 'refresh must queue behind the full slot')
+    check(blocked.queryResults['甲'] === null, 'refresh has not settled while queued')
     await d.release((await d.requests())[0]!.id)
-    await until(async () => (await d.snapshot()).pages['乙'] !== null, 'remaining page receives data')
-    check((await d.snapshot()).pages['甲'] === null, 'cancelled query cannot publish')
+    await until(async () => (await d.requests()).length === 2, 'queued refresh starts once the slot is really free')
+    await d.release((await d.requests())[1]!.id)
+    await until(async () => (await d.snapshot()).queryResults['甲']?.status === 'success', 'refresh settles after the slot frees')
+    check(await d.price('甲') === String(100 + 2), 'refresh delivered the shared result to the initiating paused page')
   } },
 
   { name: '真实HTTP：共享、单页冻结、最后取消、恢复', async run(d) {
