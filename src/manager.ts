@@ -1,5 +1,4 @@
 import { EFFECT_FAILED, cloneSnapshot, copyResult, declarationIdentity, notify, observe } from './delivery.ts'
-import { reportObserverError } from './diagnostics.ts'
 import { Scheduler } from './scheduler.ts'
 import type { Parameters, SourceRuntime } from './source.ts'
 import type {
@@ -122,7 +121,6 @@ export class Manager {
     }
     const previousId = handle.operationId
     const id = this.nextIdentity(previousId)
-    if (id === null) return { status: 'cancelled', reason: CancelReason.Disposed }
     // 只推进代次：它用于识别「本次声明是否仍被接纳」，不改变任何已声明事实。
     handle.operationId = id
 
@@ -186,7 +184,6 @@ export class Manager {
     if (!submission) return settled({ status: 'cancelled', reason: CancelReason.Unavailable })
 
     const resource = this.resourceFor(handle.source, submission.parameters)
-    if (!resource) return settled({ status: 'cancelled', reason: CancelReason.Disposed })
 
     // Promise 执行器同步运行，resolver 只接受第一个结果；取消可以先于底层结束结算。
     let settle!: RefreshWaiter['settle']
@@ -324,7 +321,6 @@ export class Manager {
     if (!this.eligible(handle, input)) return
 
     const resource = this.resourceFor(handle.source, submission.parameters)
-    if (!resource) return
     const subscription: Subscription = { owner: handle, resource, every: input.every }
     handle.subscription = subscription
     resource.subscribers.add(subscription)
@@ -334,8 +330,8 @@ export class Manager {
     if (entry) this.deliver(resource, handle, entry, cloneSnapshot(entry), RequestOrigin.Background)
   }
 
-  /** 按「Source 身份 + 完整参数值稳定键」查找运行实例；序号耗尽时统一销毁。 */
-  private resourceFor(source: SourceRuntime, parameters: Parameters): Resource | undefined {
+  /** 按「Source 身份 + 完整参数值稳定键」查找，没有就创建运行实例。 */
+  private resourceFor(source: SourceRuntime, parameters: Parameters): Resource {
     let bucket = this.resources.get(source)
     if (!bucket) {
       bucket = new Map()
@@ -345,7 +341,6 @@ export class Manager {
     if (existing) return existing
 
     const id = this.nextIdentity(this.issuedResourceId)
-    if (id === null) return undefined
     this.issuedResourceId = id
     const resource: Resource = {
       id: `${this.namespace}:${id}`,
@@ -372,7 +367,6 @@ export class Manager {
   private enqueueTask(resource: Resource): void {
     if (!this.registered(resource)) return
     const version = this.nextIdentity(resource.issuedVersion)
-    if (version === null) return
     resource.issuedVersion = version
 
     const task: Task = { resource, version, controller: new AbortController() }
@@ -626,16 +620,14 @@ export class Manager {
   }
 
   /**
-   * 分配下一个序号。安全整数区间内逐个递增，耗尽时统一销毁当前 Manager，
-   * 不新增 faulted 之类的局部降级状态；调用方必须把 null 当作「已销毁」。
+   * 分配下一个序号：安全整数区间内逐个递增，到达上界后停在原地。
+   *
+   * 不设「耗尽即销毁」或 `null` 协议：上界（约 9×10¹⁵ 次分配，单页每毫秒一次提交也要
+   * 28.5 万年）不可达，热路径上不引入恐慌式失败模式，调用方也不需要处理「拿不到序号」。
+   * 见 ADR-23。
    */
-  private nextIdentity(previous: number): number | null {
-    if (previous >= Number.MAX_SAFE_INTEGER) {
-      this.dispose()
-      reportObserverError('identity sequence exhausted')
-      return null
-    }
-    return previous + 1
+  private nextIdentity(previous: number): number {
+    return previous < Number.MAX_SAFE_INTEGER ? previous + 1 : previous
   }
 
   // ══════════════════════════════ 释放 ══════════════════════════════

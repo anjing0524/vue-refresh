@@ -21,6 +21,7 @@ import type { RefreshDisplay, RefreshHandle, RefreshInput, RefreshOptions, Refre
  *
  * 这个函数同时是 Vue watch 的取值函数，所以它访问到的响应式依赖就是框架跟踪的全部依赖。
  * 它必须同步、纯，并且不调用任何业务回调；参数和表单草稿不在这里，也不会触发调度。
+ * 整个 options 也可以是 Ref / getter：先 `toValue` 再读字段，因此替换整个对象同样被跟踪。
  */
 
 /** 读一个布尔输入：只接受解包后的布尔值，读不到就抛，绝不猜测。 */
@@ -44,8 +45,9 @@ function readEvery(input: RefreshInput<number> | undefined): number | null {
 }
 
 function readConfiguration(
-  options: Pick<RefreshOptions, 'enabled' | 'every' | 'visible'>,
+  options: RefreshInput<RefreshOptions>,
 ): Input {
+  const resolved = toValue(options)
   let enabled: boolean | null = null
   let visible: boolean | null = null
   let every: number | null = null
@@ -54,21 +56,21 @@ function readConfiguration(
 
   // 三项各自独立捕错：一个 getter 抛错不能掩盖其余项的依赖收集。
   try {
-    enabled = readBoolean(options.enabled, 'enabled')
+    enabled = readBoolean(resolved.enabled, 'enabled')
   } catch (error) {
     failure ??= error
   }
 
   try {
     // 缺省视为可见：`undefined` 直接短路，不产生对这一项的依赖。
-    visible = readBoolean(options.visible === undefined ? true : options.visible, 'visible')
+    visible = readBoolean(resolved.visible === undefined ? true : resolved.visible, 'visible')
   } catch (error) {
     failure ??= error
   }
 
   try {
     // 周期只在开启意愿为真时必需：省略读作 `null`（未开启合法，开启则按下面的分支拒绝）。
-    every = readEvery(options.every)
+    every = readEvery(resolved.every)
   } catch (error) {
     everyInvalid = true
     failure ??= error
@@ -107,7 +109,7 @@ function readConfiguration(
 function createConfigurationBinding(
   manager: ConfigurationHost,
   handle: Handle,
-  options: Pick<RefreshOptions, 'enabled' | 'every' | 'visible'>,
+  options: RefreshInput<RefreshOptions>,
   snapshot: { current: Input },
 ): () => void {
   let reported = false
@@ -133,7 +135,7 @@ function createConfigurationBinding(
 
 export function useRefresh<P extends object, T>(
   source: RefreshSource<P, T>,
-  options: RefreshOptions,
+  options: RefreshInput<RefreshOptions>,
 ): RefreshHandle<P, T> {
   if (!getCurrentInstance()) throw new Error('useRefresh must run synchronously in component setup')
   const binding = inject(managerKey)
@@ -151,7 +153,7 @@ export function useRefresh<P extends object, T>(
     source: runtime,
     readInput: () => snapshot.current,
     publish: value => { display.value = value as RefreshDisplay<P, T> },
-    onError: error => options.onError?.(error),
+    onError: error => toValue(options).onError?.(error),
     cleanup: null,
     operationId: 0,
     submission: null,

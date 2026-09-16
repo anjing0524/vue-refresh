@@ -113,11 +113,12 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 
 - Source 对象身份 ＋ `Parameters.key` 定位 Resource；`Resource.id` 区分同 key 的不同生存期。
 - `Handle.operationId` 区分声明代次；`Resource.issuedVersion` 分配共享任务版本（存的是**最后一个已分配**的版本，下一次分配取 +1）；
-  `Task.version` 与 `DeliveryBarrier.minVersion` 处于同一 Resource 版本域。
+  `Task.version` 与 `RefreshWaiter.minVersion` 处于同一 Resource 版本域。
 - 任务版本只在同一 Resource 内比较，跨 Resource 由 `id` 隔离；
   句柄声明代次不能替代任务版本，刷新要求与本页身份也不共用计数。
-- 序号域足够大，取值按安全整数上界假设：三个计数器同处一个量级（单页每毫秒一次提交也要约 28.5 万年才耗尽），
-  因此耗尽不是产品行为，不写进 §3；实现里它统一复用 `Manager.dispose`，不新增故障状态。
+- 序号域足够大，取值按安全整数上界假设：三个计数器同处一个量级（单页每毫秒一次提交也要约 28.5 万年才到达），
+  因此上界不是产品行为，不写进 §3；实现里到达上界后停在原地——不销毁 Manager、不写诊断，也不给调用方
+  第三种「拿不到序号」的结果（见 `ADR.md` ADR-23）。
 
 ### 3.3 持久字段与唯一所有者
 
@@ -135,7 +136,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | Task | `resource`、`version`、`controller` | `enqueueTask` 创建（同一资源同时至多一个当前任务）；`Scheduler` 的 `queue` / `running` 记录位置，finally 释放真实运行位置 |
 | StoreEntry | `version`、`data`、`updatedAt` | 当前有效后台成功时整条替换，时间取提交那一刻的墙钟；最后退订删除；Store 不放任务或取消对象。核心只经 `ResultStore` 端口（`entries` / `put` / `remove` / `dispose`）读写，不向核心暴露 Pinia 实现 |
 | Display | 初始 `null`，发布 `args` / `data` / `origin` / `updatedAt` | Vue `shallowRef` 整体替换；时间来自产生该结果的那次提交，不随后续交付改写；临时退出保留，组件卸载释放，Manager 不镜像保存 |
-| Manager | `handles` / `resources` 空集合；`issuedResourceId=0`（同样存最后一个已分配的序号）；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `cancelRefresh` / `reconcile` / `requestFlush` / `submit` / `refresh` / `readSnapshot` / `dispose`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
+| Manager | `handles` / `resources` 空集合；`issuedResourceId=0`（同样存最后一个已分配的序号）；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `reconcile` / `requestFlush` / `submit` / `refresh` / `readSnapshot` / `dispose`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
 | Scheduler | `queue` / `running` 空集合；`cancelTimer=null`；`flushPending=false`；构造时注入 Resource 注册表 | **全部 `private`**：对外只有 `add` / `cancel` / `release` / `requestFlush` / `inspect` / `dispose`；回到编排层只经 `ScheduleHost` 的 5 个回调（销毁、协调句柄、登记任务、任务身份、执行任务）。销毁事实由该端口的 `isDisposed()` 现读，不另存镜像字段 |
 | Clock | `now`（单调，调度）、`timestamp`（墙钟，交付时间）、`setTimer` 返回取消函数 | Vue 闭包拥有平台 Timer ID，Scheduler 只持有取消能力；两个时间域不互相替代 |
 | 配置快照与通知状态 | `snapshot.current`（配置快照，初值无效）、`reported`（`false`） | 字段名见 `vue.ts`；只在 Vue 适配闭包内，随组件作用域释放。`snapshot.current` 同时是 `Handle.readInput` 返回的唯一事实，核心不重新调用 getter。适配层不保存 `enabled` 的历史：边沿不参与任何决策 |
@@ -358,7 +359,7 @@ structuredClone → 在副本上检查 JSON 值域与循环并冻结 → fast-js
 
 - abort 本身不释放槽位；finally 只删除自身在 `Scheduler.running` 里的成员，不清新 Task。
 - 显式刷新与自动刷新共用 `queue` / `running` 与 `maxConcurrent`；满槽时排队，不绕过上限。
-- **框架上限（`LOAD_TIMEOUT_MS` = 10000 毫秒，数值由确认人给出）**：从任务真正开始执行起算，
+- **框架上限（`LOAD_TIMEOUT_MS` = 10000 毫秒，数值由确认人给出，见 `ADR.md` ADR-20）**：从任务真正开始执行起算，
   到期按共享请求失败结算并立即出册。出册后这次执行迟到的结束在 `currentTask` 处被判无效：
   不写 Store、不交付、不二次通知；资源按下一个周期重新取数。挂死的传输、忘了拒绝的适配器、
   把长连接当一次 `load` 的封装这三类输入因此都不能让槽位永久被占。
@@ -383,6 +384,9 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 ### 6.1 配置快照与边沿
 
 - watch 源只读 `enabled` / `every` / `visible`，各 getter 独立捕错；
+- 整个 `options` 也可以是值、Ref 或 getter（`RefreshInput<RefreshOptions>`）：给 Ref / getter 时 watch 会
+  跟踪外层对象，替换 `options.value` 即按新对象重新协调；给字面量对象时框架持有它本身，替换调用方
+  手里的变量不会传进来。
 - 核心只拿到电平快照，适配层不保留 `enabled` 的历史：`true→false` 与 `false→false` 无差别；
   它们必须同步、纯，并正确暴露响应式依赖。
 - watch 同步回调先替换局部 configuration 快照，再处理错误阶段、同步 Manager。
@@ -424,8 +428,11 @@ Display 发布之后、`onError` 之前（调用方可能在其中同步改 `ena
 - `onError` 同步执行，返回的 Promise 拒绝立即观察但不等待，不阻塞其他接收者。
 - 通知自身的同步或异步失败只进入固定 observer 诊断出口，不改变已结算结果、页面快照、
   开启意愿或调度；任务已被替换或 Manager 已销毁后的晚到失败同样只作诊断。
-- 诊断只输出固定说明（按效果类别区分：publish / onError / cleanup / Store，见 `EFFECT_FAILED`）
-  与框架生成的身份标识；不读取或序列化原始异常。
+- 诊断只输出固定说明（按效果类别区分：publish / onError / cleanup / Store，见 `EFFECT_FAILED`）、
+  异常的类别（`constructor.name`，原始值取 `typeof`）与框架生成的身份标识；不读取 message/stack/cause，
+  也不序列化原对象；类别读取本身抛错时整条诊断被吞掉。
+- 隔离面恰好是框架**调用**的四类回调。`load` 拿到的 `AbortSignal` 上的监听器由宿主在 `abort()` 时同步调用，
+  它们的抛错由宿主上报（`window.onerror` / `uncaughtException`），框架 catch 不到，因此不在隔离承诺内。
 - 后台失败保留需求与开启意愿，旧画面不变，下个周期继续重试。
 - 共享请求失败只结算并通知，不改写调用方 `enabled`；是否停止自动刷新由调用方在 `onError` 里决定。
   只要 `enabled` 仍为真，下个周期继续；暂停页仍可显式刷新一次。

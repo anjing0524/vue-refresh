@@ -592,7 +592,7 @@ test('C05: a throwing page delivery keeps the committed Store and the other subs
     assert.equal(f.entries['test:1']!.version, 1)
     assert.deepEqual(f.entries['test:1']!.data, { x: 'ok' })
     assert.equal(a.display, null); assert.deepEqual(b.display!.data, { x: 'ok' })
-    assert.deepEqual(logs, [['[vue-refresh]', { origin: 'observer', error: 'publish callback failed', resourceId: 'test:1', taskVersion: 1 }]])
+    assert.deepEqual(logs, [['[vue-refresh]', { origin: 'observer', reason: 'publish callback failed', errorKind: 'Error', resourceId: 'test:1', taskVersion: 1 }]])
     // 诊断出口本身也抛错时，必要清理与后续有效交付仍不受影响。
     await f.advance(100); assert.equal(f.calls.length, 2)
     console.error = () => { throw new Error('report failed') }
@@ -603,7 +603,7 @@ test('C05: a throwing page delivery keeps the committed Store and the other subs
   } finally { restore(); f.manager.dispose() }
 })
 
-test('B10: notifications are nonblocking and diagnostic projection never reads an exception', async () => {
+test('B10: notifications are nonblocking and diagnostic projection reads only the exception kind', async () => {
   const f = fixture(), a = f.page(), b = f.page()
   const { logs, restore } = captureConsoleError()
   let touched = 0
@@ -613,7 +613,13 @@ test('B10: notifications are nonblocking and diagnostic projection never reads a
     a.submit({ x: 1 }); b.submit({ x: 1 }); await tick()
     f.calls[0]!.reject(hostile); await tick()
     assert.equal(b.errors.length, 1); assert.equal(logs.length, 1); assert.equal(touched, 0)
-    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
+    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', reason: 'onError callback failed', errorKind: 'Object', resourceId: 'test:1', taskVersion: 1 }])
+    // 类别读取本身抛错：整条诊断被吞掉，不追加日志、不向调用方抛，必要清理与后续交付继续。
+    const unreadable = Object.defineProperty({}, 'constructor', { get() { throw 'kind secret' } })
+    Object.assign(a.handle, { onError() { return Promise.reject(unreadable) } })
+    await f.advance(100); assert.equal(f.calls.length, 2)
+    f.calls[1]!.reject('second'); await tick()
+    assert.equal(logs.length, 1); assert.equal(touched, 0)
     console.error = () => { throw hostile }
     a.submit(undefined); await tick()
   } finally { restore(); f.manager.dispose() }
@@ -641,7 +647,7 @@ test('B10.06: a rejection arriving after the notification was replaced or dispos
     late.reject('late'); await tick()
     // 身份是通知当时捕获的旧任务版本；画面、分区、开启意愿与调度时间都不变。
     assert.equal(logs.length, 1)
-    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
+    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', reason: 'onError callback failed', errorKind: 'string', resourceId: 'test:1', taskVersion: 1 }])
     assert.equal(a.display, display); assert.equal(a.errors.length, 1)
     assert.equal(f.entries['test:1']!.version, 2)
     assert.deepEqual([...f.timers.values()].map(timer => timer.at), timers)
@@ -654,7 +660,7 @@ test('B10.06: a rejection arriving after the notification was replaced or dispos
     g.manager.dispose()
     afterDispose.reject('late after dispose'); await tick()
     assert.equal(logs.length, 2)
-    assert.deepEqual(logs[1], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
+    assert.deepEqual(logs[1], ['[vue-refresh]', { origin: 'observer', reason: 'onError callback failed', errorKind: 'string', resourceId: 'test:1', taskVersion: 1 }])
     assert.deepEqual(g.manager.inspect().running, []); assert.deepEqual(g.manager.inspect().queued, [])
     assert.equal(g.manager.isDisposed(), true)
   } finally { restore(); f.manager.dispose(); g.manager.dispose() }
@@ -673,7 +679,7 @@ test('B10.08: an already rejected onError promise is observed once and a complet
     assert.equal(a.errors.length, 1); assert.equal(b.errors.length, 1)
     assert.equal(b.errors[0]!.error, failure); assert.equal(b.errors[0]!.origin, 'request')
     assert.equal(logs.length, 1)
-    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', error: 'onError callback failed', resourceId: 'test:1', taskVersion: 1 }])
+    assert.deepEqual(logs[0], ['[vue-refresh]', { origin: 'observer', reason: 'onError callback failed', errorKind: 'Error', resourceId: 'test:1', taskVersion: 1 }])
     await tick(); assert.equal(logs.length, 1)
 
     // 完成值：已 resolve 的 Promise 与普通返回值都只忽略完成值，不产生诊断。
@@ -741,7 +747,7 @@ test('B10.12: a throwing cleanup is reported once with the declaration identity 
 
     // 清理自身失败只写一条诊断，说明标出类别，身份是这次声明的代次而不是 0。
     assert.equal(cleaned, 1)
-    assert.deepEqual(logs, [['[vue-refresh]', { origin: 'observer', error: 'cleanup callback failed', operationId: 1 }]])
+    assert.deepEqual(logs, [['[vue-refresh]', { origin: 'observer', reason: 'cleanup callback failed', errorKind: 'Error', operationId: 1 }]])
     // 其余清理继续：刷新要求结算、订阅释放、资源与分区删除、句柄清空。
     assert.deepEqual(await pending, { status: 'cancelled', reason: 'disposed' })
     assert.equal(a.handle.subscription, null)
@@ -752,10 +758,11 @@ test('B10.12: a throwing cleanup is reported once with the declaration identity 
 })
 
 /**
- * 序号耗尽的注入：句柄声明代次与 Manager 资源号是两个独立计数器。
+ * 序号到上界的注入：句柄声明代次与 Manager 资源号是两个独立计数器。
  *
- * 耗尽不在产品行为里（约 2.8×10⁵ 年才会到达上界），但代码路径仍在，
- * 因此保留为回归网：这里用一次显式断言把计数推到上界。
+ * 上界不在产品行为里（约 2.8×10⁵ 年才会到达），但代码路径仍在，因此保留为回归网：
+ * 这里用一次显式断言把计数推到上界，验证它停在原地——不销毁 Manager、不写诊断、
+ * 也不产生「拿不到序号」这第二种结果。
  * 注入只出现在本函数，测试正文不再直接改写核心内部状态。
  */
 function exhaustSequence(manager: Manager, page: { handle: Handle }, which: 'operation' | 'resource'): void {
@@ -787,40 +794,53 @@ test('B04/F08: 同一同步栈内多次改频率不产生请求；随后关闭�
   } finally { f.manager.dispose() }
 })
 
-test('Q06/sequence exhaustion: all three counters dispose the manager once and cancel pending work', async () => {
+test('Q06/sequence exhaustion: counters saturate at the safe-integer bound and the manager keeps working', async () => {
   const { logs, restore } = captureConsoleError()
   try {
-    for (const which of ['operation', 'resource', 'task'] as const) {
-      const f = fixture(), a = f.page(), b = f.page({ ...active, enabled: false })
-      b.submit({ x: 2 })
-      const pending: Promise<RefreshResult> = b.refresh()      // 未结算的刷新要求
-      await tick()
-      assert.equal(f.calls.length, 1)
-      if (which === 'task') {
+    // 声明代次到上界：新声明照常接纳，代次停在原值，Manager 不销毁。
+    {
+      const f = fixture(), a = f.page()
+      exhaustSequence(f.manager, a, 'operation')
+      try {
+        assert.deepEqual(a.submit({ x: 1 }), { status: 'accepted' })
+        await tick()
+        assert.equal(a.handle.operationId, Number.MAX_SAFE_INTEGER)
+        assert.equal(f.manager.isDisposed(), false)
+        assert.equal(f.calls.length, 1)
+        f.calls[0]!.resolve(null); await tick()
+      } finally { f.manager.dispose() }
+    }
+    // Manager 资源号到上界：实例照常创建，id 停在原值。
+    {
+      const f = fixture(), a = f.page()
+      exhaustSequence(f.manager, a, 'resource')
+      try {
+        assert.deepEqual(a.submit({ x: 1 }), { status: 'accepted' })
+        await tick()
+        assert.equal(f.manager.isDisposed(), false)
+        assert.deepEqual(f.manager.inspect().resources.map(resource => resource.id), [`test:${Number.MAX_SAFE_INTEGER}`])
+        f.calls[0]!.resolve(null); await tick()
+      } finally { f.manager.dispose() }
+    }
+    // 任务版本到上界：刷新要求被同版本的任务满足，照常结算 success。
+    {
+      const f = fixture(), a = f.page()
+      try {
         a.submit({ x: 1 }); await tick()
         const subscription = a.handle.subscription
         assert.ok(subscription)
-        f.calls[1]!.resolve(null); await tick()                // a 的任务结束，没有当前任务
+        f.calls[0]!.resolve(null); await tick()
         subscription.resource.issuedVersion = Number.MAX_SAFE_INTEGER
-        const exhausted = a.refresh()                          // 需要登记新任务 → 序号耗尽
-        assert.deepEqual(await exhausted, { status: 'cancelled', reason: 'disposed' })
-      } else {
-        exhaustSequence(f.manager, a, which)
-        a.submit({ x: 1 })
-      }
-      await tick()
-      assert.ok(f.manager.isDisposed())
-      assert.deepEqual(await pending, { status: 'cancelled', reason: 'disposed' })
-      const view = f.manager.inspect()
-      assert.equal(view.resources.length, 0); assert.equal(view.queued.length, 0)
-      assert.equal(a.input.enabled, true)
-      assert.deepEqual(a.submit({}), { status: 'cancelled', reason: 'disposed' })
-      assert.equal(f.readSnapshot(undefined), undefined)
-      for (const call of f.calls) call.resolve(null)
-      await tick()
-      assert.equal(f.manager.inspect().running.length, 0)
+        const refreshed = a.refresh()
+        await tick()
+        assert.equal(f.calls.length, 2)
+        f.calls[1]!.resolve({ x: 'ok' }); await tick()
+        assert.deepEqual(await refreshed, { status: 'success' })
+        assert.equal(f.manager.isDisposed(), false)
+      } finally { f.manager.dispose() }
     }
-    assert.equal(logs.length, 3)
+    // 三条路径都不写诊断：上界不再是一个「恐慌式失败」。
+    assert.deepEqual(logs, [])
   } finally { restore() }
 })
 

@@ -10,6 +10,10 @@ import type { RefreshError } from './public-types.ts'
  * - 结果进入框架时建立独立所有权（原生复制），业务结构由请求适配器负责校验；
  * - 任何业务回调（publish / onError / cleanup / Store 通知）抛错或返回拒绝的
  *   Promise，都只进入固定的 observer 诊断出口，不改变已结算的结果。
+ *
+ * 隔离面恰好是框架**调用**的这四类回调。`load` 拿到的 `AbortSignal` 上的监听器由宿主在
+ * `abort()` 时同步调用，不是框架调用的回调；它们抛错时由宿主上报（`window.onerror` /
+ * `uncaughtException`），框架 catch 不到，因此不在隔离承诺内。
  */
 
 /** 结果边界：拒绝 undefined，其余用原生复制取得独立副本。 */
@@ -48,8 +52,8 @@ export const EFFECT_FAILED = {
 export function observe(effect: () => unknown, reason: string, identity: FrameworkIdentity = {}): void {
   try {
     observeRejection(effect(), reason, identity)
-  } catch {
-    reportObserverError(reason, identity)
+  } catch (error) {
+    reportObserverError(reason, error, identity)
   }
 }
 

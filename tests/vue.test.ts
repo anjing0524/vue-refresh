@@ -30,7 +30,7 @@ const renderer = createRenderer<Host, Host>({
 const tick = async () => { for (let i = 0; i < 12; i++) await nextTick() }
 interface Params { symbol: string }
 interface DTO { price: number }
-function fixture(customOptions?: (enabled: Ref<boolean>, errors: RefreshError[]) => RefreshOptions) {
+function fixture(customOptions?: (enabled: Ref<boolean>, errors: RefreshError[]) => RefreshInput<RefreshOptions>) {
   const enabled = ref(true), visible = ref(true), every = ref(100_000), shown = ref(true), errors: RefreshError[] = []
   const calls: Array<ReturnType<typeof deferred<DTO>> & { signal: AbortSignal }> = []
   const source = defineRefresh<Params, DTO>({ load(_, { signal }) {
@@ -169,6 +169,26 @@ test('A07/A05: every 省略——未开启合法且不通知，开启按配置�
     visible.value = false; await tick(); visible.value = true; await tick()
     assert.equal(f.errors.length, 1)                        // 连续非法期间不重复通知
     assert.equal(f.calls.length, 1)                         // 非法配置不产生请求
+  } finally { f.app.unmount() }
+})
+
+test('A05/P01: 整个 options 也可以是 Ref——换掉对象按新配置重新协调', async () => {
+  const options = ref<RefreshOptions>({ enabled: true, every: 100_000 })
+  const f = fixture(() => options)
+  try {
+    f.task.submit({ symbol: 'A' }); await tick()
+    assert.equal(f.calls.length, 1)
+    // 换掉整个对象：关闭意愿按资格退出订阅、在途失效；再开启重新接入并首查。
+    options.value = { enabled: false, every: 100_000 }; await tick()
+    assert.equal(f.core.inspect().resources.length, 0)
+    assert.ok(f.calls[0]!.signal.aborted)
+    // 被 abort 的执行仍占着物理槽，直到它真实结束；释放后才轮得到下一轮请求。
+    f.calls[0]!.reject(new Error('aborted')); await tick()
+    assert.equal(f.core.inspect().running.length, 0)
+    options.value = { enabled: true, every: 100_000 }; await tick()
+    assert.equal(f.calls.length, 2)
+    f.calls[1]!.resolve({ price: 7 }); await tick()
+    assert.equal(f.task.display.value!.data.price, 7)
   } finally { f.app.unmount() }
 })
 

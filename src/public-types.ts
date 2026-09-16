@@ -139,9 +139,12 @@ export interface RefreshDisplay<P extends object, T> {
 /**
  * 组件刷新需求配置。`P` 由 `useRefresh(source)` 推断，不在这里重复声明。
  *
- * 本对象是 setup 期参数：框架持有这个对象本身，运行期只重新读取它的字段。
- * 整体替换调用方手里的对象（例如把 `options.value` 换成新对象）不会传到这里，
- * 需要动态切换某项输入时让该字段本身是 Ref / getter，而不是换掉整个对象。
+ * 两道输入都可以是响应式的：
+ * - 字段：写成 Ref / getter，框架在运行期重新读取（`enabled` / `every` / `visible` 由 watch 跟踪，
+ *   `onError` 在每次通知时读取）；
+ * - 整个对象：把对象本身（或它的 Ref / getter）交给 `useRefresh` 的 `options` 参数，
+ *   它的类型是 `RefreshInput<RefreshOptions>`；替换 `options.value` 会按新对象重新协调。
+ *   直接传字面量对象时框架持有的是这个对象本身，替换调用方手里的变量不会传进来。
  */
 export interface RefreshOptions {
   /**
