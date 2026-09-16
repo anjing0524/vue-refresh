@@ -36,7 +36,7 @@ index.ts                  包入口（只导出三个正式函数与公共类型
 
 | 文件 | 职责 |
 |---|---|
-| `source.ts` | 固定定义、冻结快照与稳定键、只读定位 |
+| `source.ts` | 固定定义、冻结快照与稳定键、只读定位；公开的 `RefreshSource` 只带类型品牌，运行时擦除为内部端口 `SourceRuntime`（`load` ＋ 可选 `validate`） |
 | `delivery.ts` | 结果复制、通知异常隔离（诊断出口与返回值观察在 `diagnostics.ts`） |
 | `diagnostics.ts` | `FrameworkIdentity`、`reportObserverError`、`observeRejection`；零依赖 |
 | `vue.ts` | 配置快照读取以 `createConfigurationBinding` 为唯一入口（快照、通知去重、watcher 三件事在同处），加句柄建立、生命周期与 Display 绑定；配置绑定只经 `ConfigurationHost` 窄端口（2 项事实）访问编排层 |
@@ -133,7 +133,7 @@ Source 的生命周期是应用定义；Resource 的生命周期从首个有效�
 | RefreshWaiter | `owner`、`resource`、`minVersion`、`settle` | `refresh` 创建并同时挂到句柄与实例两侧；原生 Promise 首次结算生效，无 settled 镜像；结算或取消后从两侧移除 |
 | Resource | `id`、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`issuedVersion=0`、`task=null`、`lastSettledAt=null` | Manager 建立与修改；最后一个订阅与刷新要求都退出时移除注册及 Store；创建后参数不被新加入者改写 |
 | Task | `resource`、`version`、`controller` | `enqueueTask` 创建（同一资源同时至多一个当前任务）；`Scheduler` 的 `queue` / `running` 记录位置，finally 释放真实运行位置 |
-| StoreEntry | `version`、`data`、`updatedAt` | 当前有效后台成功时整条替换，时间取提交那一刻的墙钟；最后退订删除；Store 不放任务或取消对象 |
+| StoreEntry | `version`、`data`、`updatedAt` | 当前有效后台成功时整条替换，时间取提交那一刻的墙钟；最后退订删除；Store 不放任务或取消对象。核心只经 `ResultStore` 端口（`entries` / `put` / `remove` / `dispose`）读写，不向核心暴露 Pinia 实现 |
 | Display | 初始 `null`，发布 `args` / `data` / `origin` / `updatedAt` | Vue `shallowRef` 整体替换；时间来自产生该结果的那次提交，不随后续交付改写；临时退出保留，组件卸载释放，Manager 不镜像保存 |
 | Manager | `handles` / `resources` 空集合；`issuedResourceId=0`（同样存最后一个已分配的序号）；`cleanup=null`；`browserVisible=true`；`disposed=false`；持有 `scheduler` | **全部 `private`**：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setBrowserVisible` / `setCleanup` / `setHandleCleanup` / `cancelRefresh` / `reconcile` / `requestFlush` / `submit` / `refresh` / `readSnapshot` / `dispose`），读取走 `inspect()` 的只读投影与 `isDisposed()`。`dispose` 先失效再清理；排队的任务当场作废，已启动的 running 等真实结束 |
 | Scheduler | `queue` / `running` 空集合；`cancelTimer=null`；`flushPending=false`；构造时注入 Resource 注册表 | **全部 `private`**：对外只有 `add` / `cancel` / `release` / `requestFlush` / `inspect` / `dispose`；回到编排层只经 `ScheduleHost` 的 5 个回调（销毁、协调句柄、登记任务、任务身份、执行任务）。销毁事实由该端口的 `isDisposed()` 现读，不另存镜像字段 |
