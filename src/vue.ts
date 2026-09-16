@@ -10,7 +10,7 @@ import {
   watch,
 } from 'vue'
 import { managerKey } from './app.ts'
-import { notify } from './delivery.ts'
+import { declarationIdentity, notify } from './delivery.ts'
 import { prepareParameters, sourceRuntime } from './source.ts'
 import type { ConfigurationHost, Handle, Input } from './model.ts'
 import { ErrorOrigin } from './public-types.ts'
@@ -107,9 +107,7 @@ function createConfigurationBinding(
     } else if (!reported) {
       // 先标记再通知：同步重入不能重复报告同一错误阶段。
       reported = true
-      // 尚无任何页面操作时不带 operationId：诊断身份的「缺席」才表示不属于某次操作，0 不是有效操作号。
-      notify(handle, { origin: ErrorOrigin.Configuration, error: input.error },
-        operationId === 0 ? {} : { operationId })
+      notify(handle, { origin: ErrorOrigin.Configuration, error: input.error }, declarationIdentity(handle))
     }
 
     if (handle.operationId === operationId) manager.reconcile(handle)

@@ -37,7 +37,7 @@ index.ts                  包入口（只导出三个正式函数与公共类型
 | 文件 | 职责 |
 |---|---|
 | `source.ts` | 固定定义、冻结快照与稳定键、只读定位；公开的 `RefreshSource` 只带类型品牌，运行时擦除为内部端口 `SourceRuntime`（`load` ＋ 可选 `validate`） |
-| `delivery.ts` | 结果复制、通知异常隔离（诊断出口与返回值观察在 `diagnostics.ts`） |
+| `delivery.ts` | 结果复制、通知异常隔离、声明代次身份（`declarationIdentity`）；诊断出口与返回值观察在 `diagnostics.ts` |
 | `diagnostics.ts` | `FrameworkIdentity`、`reportObserverError`、`observeRejection`；零依赖 |
 | `vue.ts` | 配置快照读取以 `createConfigurationBinding` 为唯一入口（快照、通知去重、watcher 三件事在同处），加句柄建立、生命周期与 Display 绑定；配置绑定只经 `ConfigurationHost` 窄端口（2 项事实）访问编排层 |
 | `store.ts` | 分区替换、删除与私有 Store 释放 |

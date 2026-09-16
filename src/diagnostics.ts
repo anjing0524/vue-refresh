@@ -24,10 +24,10 @@ export interface FrameworkIdentity {
  *
  * 这条事件不属于 `RefreshError`：它只写日志，从不经 `onError` 投递，
  * 所以 `origin: 'observer'` 不参与错误来源的取值域。
- * `reason` 在 `identity` 之前：多数调用点只有一个固定说明，不需要写占位对象。
+ * `reason` 必填且在 `identity` 之前：每个调用点都有自己固定的那句说明，不写占位对象。
  */
 export function reportObserverError(
-  reason: string = OBSERVER_FAILED,
+  reason: string,
   identity: FrameworkIdentity = {},
 ): void {
   const event: Record<string, unknown> = { origin: 'observer', error: reason }
@@ -50,7 +50,7 @@ export function reportObserverError(
  */
 export function observeRejection(
   result: unknown,
-  reason: string = OBSERVER_FAILED,
+  reason: string,
   identity: FrameworkIdentity = {},
 ): void {
   if (result === undefined) return

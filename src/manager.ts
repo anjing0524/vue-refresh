@@ -1,4 +1,4 @@
-import { cloneSnapshot, copyResult, notify, observe } from './delivery.ts'
+import { cloneSnapshot, copyResult, declarationIdentity, notify, observe } from './delivery.ts'
 import { reportObserverError } from './diagnostics.ts'
 import { Scheduler } from './scheduler.ts'
 import type { Parameters, SourceRuntime } from './source.ts'
@@ -612,7 +612,7 @@ export class Manager {
     // 先取走再执行：回调可能重入并读到这个句柄。
     const cleanup = handle.cleanup
     handle.cleanup = null
-    if (cleanup) observe(cleanup)
+    if (cleanup) observe(cleanup, declarationIdentity(handle))
     this.settleRefreshes(handle, CancelReason.Disposed)
     if (previous) this.releaseSubscription(previous)
     this.requestFlush()

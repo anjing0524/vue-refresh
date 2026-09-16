@@ -41,6 +41,14 @@ export function observe(effect: () => unknown, identity: FrameworkIdentity = {})
 }
 
 /**
+ * 声明代次身份：`0` 不是有效操作号，那一条诊断就不带 `operationId`——
+ * 字段「缺席」才表示不属于某次页面操作（框架身份只用于日志关联，见 §2.4）。
+ */
+export function declarationIdentity(handle: Handle): FrameworkIdentity {
+  return handle.operationId === 0 ? {} : { operationId: handle.operationId }
+}
+
+/**
  * 通过句柄的 onError 通知页面；异常隔离规则与 {@link observe} 相同。
  * `identity` 只在本条通知自身失败、需要写诊断日志时使用，不进入 `RefreshError`。
  */
