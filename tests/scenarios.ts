@@ -89,6 +89,18 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(await d.price('乙') === String(100 + second.id), 'other paused page remains frozen')
     await d.enable('甲', false)
   } },
+  { name: '真实传输超时：客户端截止生效、槽位释放、页面收到失败', async run(d) {
+    await d.open('/?test&timeout=300&every=3000')
+    await until(async () => (await d.requests()).length === 1, 'first request in flight')
+    await until(async () => (await d.snapshot()).events.some(event => event.includes('后台请求失败')), 'page observes the timeout failure')
+    const state = await d.snapshot()
+    check(state.calls[0]!.finished, 'deadline ends the real request')
+    check((await d.requests())[0]!.status === 'aborted', 'transport saw the disconnect')
+    check(state.pages['甲'] === null, 'timed-out request delivers nothing')
+    check(state.running === 0 && state.queued === 0, 'deadline releases the physical slot')
+    await sleep(1_000)
+    check((await d.requests()).length === 1, 'next attempt waits for the interval, not a busy retry')
+  } },
   { name: '旧响应晚到：新资源不被覆盖或删除，页面副本独立', async run(d) {
     await d.open('/?mode=controlled')
     await until(async () => (await d.snapshot()).calls.length === 1, 'initial controlled load')

@@ -902,3 +902,161 @@ test('F12: a load synchronous prefix submits another resource; next flush makes 
     assert.equal(f.manager.inspect().running.length, 0)
   } finally { f.manager.dispose() }
 })
+
+test('B03: 保留 A 画面时声明 B，B 失败后展示参数仍标注 A', async () => {
+  const f = fixture(), a = f.page()
+  try {
+    a.submit({ x: 'A' }); await tick()
+    f.calls[0]!.resolve({ v: 'a-data' }); await tick()
+    assert.deepEqual(a.display!.args, { x: 'A' })
+    a.submit({ x: 'B' }); await tick()
+    assert.equal(f.calls.length, 2)
+    f.calls[1]!.reject(new Error('B failed')); await tick()
+    // 失败不发布：画面仍是 A 的参数与数据，不拿 B 的标注去配 A 的数据。
+    assert.deepEqual(a.display!.args, { x: 'A' })
+    assert.deepEqual(a.display!.data, { v: 'a-data' })
+    assert.equal(a.errors.length, 1)
+  } finally { f.manager.dispose() }
+})
+
+test('B07: 校验失败后改频率或隐藏再恢复都不恢复旧参数、不建立订阅', async () => {
+  const f = fixture(), a = f.page()
+  try {
+    a.submit({ x: 'A' }); await tick()
+    f.calls[0]!.resolve({ v: 'a' }); await tick()
+    assert.ok(a.handle.subscription)
+    // 新参数校验失败：清空声明并退出订阅（不保留旧参数）。
+    f.setValidate(() => false)
+    assert.equal(a.submit({ x: 'B' }).status, 'rejected')
+    await tick()
+    assert.equal(a.handle.submission, null)
+    assert.equal(a.handle.subscription, null)
+    assert.deepEqual(f.manager.inspect().resources, [])
+    // 校验失败后改频率：不恢复、不请求。
+    a.set({ ...active, every: 300 }); await tick()
+    assert.equal(f.calls.length, 1)
+    // 校验失败后隐藏再恢复：同样不恢复旧参数。
+    a.set({ ...active, visible: false }); await tick()
+    a.set(active); await tick()
+    assert.equal(f.calls.length, 1)
+    assert.equal(a.handle.submission, null)
+    assert.deepEqual(f.manager.inspect().resources, [])
+    // 只有新的有效声明才解除「无身份」事实。
+    f.setValidate(() => true)
+    a.submit({ x: 'C' }); await tick()
+    assert.equal(f.calls.length, 2)
+    assert.deepEqual(f.calls[1]!.args, { x: 'C' })
+  } finally { f.manager.dispose() }
+})
+
+test('B11: 交付回调里退订并新增订阅，遍历有界且新订阅走普通加入', async () => {
+  const f = fixture(), a = f.page(), b = f.page(), joined = f.page()
+  try {
+    a.submit({ x: 1 }); b.submit({ x: 1 }); await tick()
+    let published = 0, adjusted = false
+    const publish = a.handle.publish
+    Object.assign(a.handle, { publish(value: Display) {
+      published += 1
+      publish(value)
+      if (!adjusted) {
+        adjusted = true
+        b.set({ ...active, enabled: false })      // 回调里退订乙
+        joined.submit({ x: 1 })                   // 同时新增一个订阅
+      }
+    } })
+    f.calls[0]!.resolve({ v: 'first' }); await tick()
+    assert.deepEqual(a.display!.data, { v: 'first' })
+    assert.equal(published, 1)                    // 遍历有界：甲只交付一次
+    assert.equal(b.display, null)                 // 退订者不接收本次结果
+    // 新订阅不是本次遍历的一部分，而是按「普通加入」拿到已有结果。
+    assert.deepEqual(joined.display!.data, { v: 'first' })
+    assert.equal(f.calls.length, 1)               // 已有实例与结果：不重复请求
+    await f.advance(100)
+    f.calls[1]!.resolve({ v: 'second' }); await tick()
+    assert.deepEqual(joined.display!.data, { v: 'second' })
+    assert.deepEqual(a.display!.data, { v: 'second' })
+  } finally { f.manager.dispose() }
+})
+
+test('B14: 刷新要求绑定实例身份，旧实例的晚到结果不影响新实例', async () => {
+  const f = fixture(), a = f.page()
+  try {
+    a.submit({ x: 1 }); await tick()
+    const stale = a.refresh(); await tick()              // 任务在执行 → 本次刷新等后继
+    assert.equal(f.calls.length, 1)
+    f.manager.setBrowserVisible(false)                   // 隐藏：结算要求并销毁实例
+    assert.deepEqual(await stale, { status: 'cancelled', reason: 'unavailable' })
+    assert.deepEqual(f.manager.inspect().resources, [])
+    f.manager.setBrowserVisible(true); await tick()
+    assert.deepEqual(f.manager.inspect().resources.map(resource => resource.id), ['test:2'])
+    f.calls[1]!.resolve({ v: 'base' }); await tick()
+    const fresh = a.refresh(); await tick()
+    assert.equal(f.calls.length, 3)
+    f.calls[2]!.resolve({ v: 'new' }); await tick()
+    assert.deepEqual(await fresh, { status: 'success' })
+    f.calls[0]!.resolve({ v: 'stale' }); await tick()    // 旧实例的任务此刻才结束
+    assert.deepEqual(a.display!.data, { v: 'new' })
+    assert.deepEqual(f.entries['test:2']!.data, { v: 'new' })
+    assert.equal(f.entries['test:1'], undefined)
+  } finally { f.manager.dispose() }
+})
+
+test('B15: 同一来源下租户/权限条件不同的参数不错误共享', async () => {
+  const f = fixture(), a = f.page(), b = f.page()
+  try {
+    a.submit({ account: 'demo', tenant: 't1' }); b.submit({ account: 'demo', tenant: 't2' }); await tick()
+    assert.equal(f.calls.length, 2)
+    const view = f.manager.inspect()
+    assert.equal(view.resources.length, 2)
+    assert.notEqual(view.resources[0]!.id, view.resources[1]!.id)
+    f.calls[0]!.resolve({ v: 't1' }); f.calls[1]!.resolve({ v: 't2' }); await tick()
+    assert.deepEqual(a.display!.data, { v: 't1' })
+    assert.deepEqual(b.display!.data, { v: 't2' })
+  } finally { f.manager.dispose() }
+})
+
+test('P06: 甲声明 B 后退出 A，乙留在 A 且其请求不被取消', async () => {
+  const f = fixture(), a = f.page(), b = f.page()
+  try {
+    a.submit({ x: 'A' }); b.submit({ x: 'A' }); await tick()
+    assert.equal(f.calls.length, 1)
+    a.submit({ x: 'B' }); await tick()
+    const view = f.manager.inspect()
+    assert.equal(view.resources.length, 2)
+    assert.deepEqual(view.resources[0]!.parameters.args, { x: 'A' })
+    assert.equal(view.resources[0]!.subscribers.size, 1)   // 乙仍在 A
+    assert.deepEqual(view.resources[1]!.parameters.args, { x: 'B' })
+    assert.equal(f.calls[0]!.signal.aborted, false)        // 乙的在途请求不被取消
+    assert.deepEqual(f.calls[1]!.args, { x: 'B' })
+    f.calls[0]!.resolve({ v: 'a' }); f.calls[1]!.resolve({ v: 'b' }); await tick()
+    assert.deepEqual(b.display!.data, { v: 'a' })
+    assert.deepEqual(a.display!.data, { v: 'b' })
+  } finally { f.manager.dispose() }
+})
+
+test('T05: 失活、关闭与刷新期间改频率都只更新配置，不提前请求', async () => {
+  const f = fixture(), a = f.page()
+  try {
+    // 失活时改频率：既不发请求也不建立订阅。
+    f.manager.deactivate(a.handle)
+    a.submit({ x: 1 }); await tick()
+    a.set({ ...active, every: 50 }); await tick()
+    assert.equal(f.calls.length, 0)
+    assert.deepEqual(f.manager.inspect().resources, [])
+    // 关闭时改频率：关闭边沿已由 B04/F08 覆盖，这里补频率部分。
+    f.manager.activate(a.handle); await tick()
+    assert.equal(f.calls.length, 1)
+    f.calls[0]!.resolve(null); await tick()
+    a.set({ ...active, enabled: false })
+    a.set({ ...active, enabled: false, every: 20 }); await tick()
+    assert.equal(f.calls.length, 1)
+    // 刷新期间改频率：不取消未结算的刷新要求，也不追加请求。
+    const refreshing = a.refresh(); await tick()
+    assert.equal(f.calls.length, 2)
+    a.set({ ...active, enabled: false, every: 30 }); await tick()
+    assert.equal(f.calls[1]!.signal.aborted, false)
+    assert.equal(f.calls.length, 2)
+    f.calls[1]!.resolve({ v: 'fresh' }); await tick()
+    assert.deepEqual(await refreshing, { status: 'success' })
+  } finally { f.manager.dispose() }
+})

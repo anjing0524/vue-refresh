@@ -52,13 +52,14 @@ export interface ShellBridge {
 /**
  * 集成验证台。
  *
- * `tests/browser.html` 与 Playwright 的六条场景共用这一个视图，代码保持原样：它带
+ * `tests/browser.html` 与 Playwright 的七条场景共用这一个视图，代码保持原样：它带
  * `?mode=controlled` 的手动结算与只读测试桥，与三条代表页面不是同一类东西，因此不合并；
  * 它的请求函数也不能复用 `sources.ts` 的 `runQuote`——手动结算只在这里需要。
  */
 function mountHarness(): void {
   const controlled = params.get('mode') === 'controlled'
-  const every = controlled ? 60_000 : params.has('test') ? 120 : 2_000
+  const every = Number(params.get('every') ?? (controlled ? 60_000 : params.has('test') ? 120 : 2_000))
+  const timeout = Number(params.get('timeout') ?? 10_000)
   const calls: Array<{ id: number; signal: AbortSignal; finished: boolean; resolve: (value: Quote) => void }> = []
   const events: string[] = []
   const readQuote = async (args: DeepReadonly<QuoteParams>, { signal }: RefreshLoadContext): Promise<Quote> => {
@@ -73,7 +74,7 @@ function mountHarness(): void {
       if (deferred) return await deferred
       // Deadline includes response body consumption; no early Promise.race.
       const response = await fetch(`/api/quote?account=${args.account}&symbol=${args.symbol}`, {
-        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const data: unknown = await response.json()

@@ -454,3 +454,48 @@ test('S06: a late response from the previous session writes no store and deliver
     assert.equal(partitions.length, 1)                 // 只剩新会话的私有分区
   } finally { appB.unmount(); appA.unmount(); managerB.dispose(); managerA.dispose() }
 })
+
+test('T14: every 的完整数值域——只接受正安全整数，非法值明确拒绝且不忙循环', async () => {
+  // 非法值：全部按配置非法拒绝，既不请求也不建立订阅。
+  const every = ref<unknown>(NaN)
+  const rejected = fixture((enabled, errors) => ({ enabled, every: every as never, onError: e => { errors.push(e) } }))
+  try {
+    await tick()
+    assert.equal(rejected.errors.length, 1)                 // 初始非法值已报告一次
+    for (const value of [NaN, 0, -1, 0.5, Infinity, -Infinity, -0, Number.MAX_SAFE_INTEGER + 1, '500', null, undefined, true, 5n]) {
+      every.value = value
+      await tick()
+      // 连续非法状态只报一次（A07.05 的去重），但每个取值都必须被拒绝。
+      assert.equal(rejected.errors.length, 1, `every=${String(value)} 必须被拒绝且不重复通知`)
+      assert.equal(rejected.errors[0]!.origin, 'configuration')
+      assert.equal(rejected.calls.length, 0)
+      assert.deepEqual(rejected.core.inspect().resources, [])
+    }
+  } finally { rejected.app.unmount() }
+
+  // 合法值：1、500 与安全整数上界都被接受。
+  const accepted = ref<unknown>(1)
+  const ok = fixture((enabled, errors) => ({ enabled, every: accepted as never, onError: e => { errors.push(e) } }))
+  try {
+    ok.task.submit({ symbol: 'A' })
+    for (const value of [1, 500, Number.MAX_SAFE_INTEGER]) {
+      accepted.value = value
+      await tick()
+      assert.equal(ok.errors.length, 0, `every=${value} 必须被接受`)
+    }
+    assert.ok(ok.calls.length >= 1)
+  } finally { ok.app.unmount() }
+
+  // getter 形态解包后使用同一判定。
+  const viaGetter = ref<unknown>(0)
+  const getter = fixture((enabled, errors) => ({ enabled, every: (() => viaGetter.value) as never, onError: e => { errors.push(e) } }))
+  try {
+    getter.task.submit({ symbol: 'A' })
+    await tick()
+    assert.equal(getter.errors.length, 1)
+    viaGetter.value = 200
+    await tick()
+    assert.equal(getter.errors.length, 1)
+    assert.equal(getter.core.inspect().resources.length, 1)
+  } finally { getter.app.unmount() }
+})
