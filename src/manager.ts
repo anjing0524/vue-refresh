@@ -477,7 +477,7 @@ export class Manager {
   /** 交付一条结果；交付前复核订阅与刷新要求的身份，任何一条失效就跳过本次发布。 */
   private publishTo(publisher: Publisher, resource: Resource, entry: StoreEntry): void {
     if (publisher.subscription && !this.currentSubscription(publisher.subscription)) return
-    if (publisher.waiter && !resource.waiters.has(publisher.waiter)) return
+    if (publisher.waiter && !this.currentWaiter(publisher.waiter)) return
     const origin = publisher.waiter ? RequestOrigin.Refresh : RequestOrigin.Background
     this.deliver(resource, publisher.handle, entry, publisher.data, origin)
   }
@@ -604,6 +604,11 @@ export class Manager {
     return this.registered(subscription.resource)
       && handle.subscription === subscription
       && this.eligible(handle, handle.readInput())
+  }
+
+  /** 刷新要求仍挂在这个实例上；已被结算或取消的要求不算有效。 */
+  private currentWaiter(waiter: RefreshWaiter): boolean {
+    return waiter.resource.waiters.has(waiter)
   }
 
   /**
