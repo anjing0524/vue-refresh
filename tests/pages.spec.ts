@@ -107,18 +107,20 @@ test('查询列表：提交才发请求、分页排序复用已提交参数、�
   expect((await state(request)).length).toBe(afterQuery + 1)
 })
 
-test('行情面板：无查询按钮、一次提交、响应式频率、显示多旧、首查失败继续、失活冻结', async ({ page, request }) => {
-  await request.post('/__fixture/fail-next', { data: { count: 1 } })
+test('行情面板：无查询按钮、一次提交、响应式频率、显示多旧、连续失败继续、失活冻结', async ({ page, request }) => {
+  await request.post('/__fixture/fail-next', { data: { count: 3 } })
   await page.goto('/?page=quote-panel')
   await expect(page.getByTestId('page-quote-panel')).toBeVisible()
 
   // 无查询按钮：面板只有配置输入与失活开关。
   expect(await page.locator('[data-testid="qp-query"]').count()).toBe(0)
 
-  // 后台首查失败继续：失败不关闭需求，下个周期继续取数。
-  await expect(page.getByTestId('qp-failures')).toHaveText('后台失败次数：1')
+  // 连续失败继续：每一轮各通知一次、失败不关闭需求、页面不崩，下个周期继续取数。
+  await expect(page.getByTestId('qp-failures')).toHaveText('后台失败次数：3', { timeout: 15_000 })
   await expect(page.getByTestId('qp-note')).toContainText('保留开启意愿')
-  expect((await state(request))[0]!.status).toBe('failed')
+  const failed = (await state(request)).filter(row => row.status === 'failed')
+  expect(failed.length).toBe(3)
+  expect(failed.map(row => symbolOf(row))).toEqual(['DEMO', 'DEMO', 'DEMO'])
   const retry = await pendingId(request)
   await release(request, retry)
   await expect(page.getByTestId('qp-price')).toHaveText(`${100 + retry}.00`)

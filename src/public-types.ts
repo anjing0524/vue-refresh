@@ -115,7 +115,7 @@ export interface RefreshManager {
   /**
    * 按参数值定位共享结果并返回独立副本；不创建实例、不延长生存期，无结果返回 `undefined`。
    * 只有该 Source 仍有活跃实例（存在订阅或未结算的刷新要求）时才可能查到结果。
-   * @throws {TypeError} 参数含循环引用：稳定编码拒绝（其它值按 JSON 语义编码，框架不做合法性判断）
+   * 参数编码不出身份（循环引用等）同样返回 `undefined`：读取不抛错，坏参数由 `submit` 拒绝并通知。
    */
   readSnapshot<P extends object, T>(source: RefreshSource<P, T>, args: P): ReadonlySnapshot<T> | undefined
   dispose(): void

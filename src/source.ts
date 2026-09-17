@@ -10,7 +10,7 @@ import type { RefreshSource } from './public-types.ts'
  *
  * 框架**不判断参数值是否合法**——那是调用方的责任，编码沿用 JSON 语义：
  * `-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 与函数字段按省略，`Date` 按其 ISO 字符串；
- * 循环引用由该包抛 `TypeError`，复制不了的值（函数、Proxy）由 `structuredClone` 拒绝。
+ * 复制不了的值（函数、Proxy）由 `structuredClone` 拒绝，编码不出的值（循环引用）在下面表达成 `null`。
  */
 
 /** 一次已准备的请求参数。 */
@@ -34,25 +34,31 @@ function deepFreeze(value: unknown): void {
   for (const child of Object.values(value)) deepFreeze(child)
 }
 
-/** 只读定位：只编码，不复制、不冻结、不执行 `validate`。 */
-export function parameterKey(input: object): string {
+/**
+ * 稳定编码：不复制、不冻结、不执行 `validate`。
+ *
+ * 编码不出来（循环引用等）返回 `null`，而不是抛错：它是「这个参数没有身份」这个事实本身。
+ * 两个调用点各自决定怎么表达——读取点当成「查不到」，提交点当成非法参数拒绝。
+ * 这样坏参数只有一个出口会变成错误（`submit` 的 `rejected` ＋ 通知），读取永远不需要 `try/catch`。
+ */
+export function parameterKey(input: object): string | null {
   try {
     return stringify(input)
-  } catch (error) {
-    // 上游包抛的是英文 TypeError（循环引用等）；对外统一成中文，原错误挂在 `cause` 上。
-    throw new TypeError('参数无法稳定编码：存在循环引用或无法序列化的值', { cause: error })
+  } catch {
+    return null
   }
 }
 
 /**
  * 提交边界只执行一次：复制 → 编码身份键 → 冻结副本 → 可选业务校验。
- * `validate` 返回假值或抛错、复制失败（函数、Proxy）、循环引用都会让本次声明按非法参数拒绝，
+ * `validate` 返回假值或抛错、复制失败（函数、Proxy）、编码不出身份（循环引用）都会让本次声明按非法参数拒绝，
  * 不产生实例或后台任务。
  */
 export function prepareParameters(input: object, source?: RefreshSource<object, unknown>): Parameters {
   const args: object = structuredClone(input)
   // 编码只有这一处入口：`parameterKey` 与提交边界共用同一条规则。
   const key = parameterKey(args)
+  if (key === null) throw new TypeError('参数无法稳定编码：存在循环引用或无法序列化的值')
   deepFreeze(args)
   if (source?.validate) {
     const valid: unknown = source.validate(args)

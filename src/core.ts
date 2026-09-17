@@ -265,11 +265,16 @@ export class RefreshCore {
 
   // ══════════════════════════ 只读定位与观测面 ══════════════════════════
 
-  /** 只读定位：按参数键查实例并返回独立副本。不创建实例、不保活、不执行 `validate`。 */
+  /**
+   * 只读定位：按参数键查实例并返回独立副本。不创建实例、不保活、不执行 `validate`。
+   *
+   * 编码不出身份的参数没有对应实例，与「没有结果」一样返回 `undefined`：读取没有通知通道，
+   * 不该逼每个读取点写 `try/catch`；同一个参数对象交给 `submit` 会得到 `rejected` 与通知。
+   */
   readSnapshot(source: RefreshSource<object, unknown>, args: object): unknown {
     if (this.disposed) return undefined
-    // 先算键再查实例：参数非法时抛给读取者，且与「此刻有没有活跃实例」无关。
     const key = parameterKey(args)
+    if (key === null) return undefined
     const resource = this.buckets.get(source)?.get(key)
     return resource?.entry ? structuredClone(resource.entry.data) : undefined
   }

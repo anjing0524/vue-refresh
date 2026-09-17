@@ -548,7 +548,7 @@ test('A11 交付面：null 之外的任何结果都整体替换，且页面副�
   assert.equal(view.handle.parameters?.key, '{"id":1}')
 })
 
-test('A15 只读定位：无实例返回 undefined，读到的是副本，循环引用由调用者接住', async () => {
+test('A15 只读定位：无实例与编码不出的参数都返回 undefined，读到的是副本', async () => {
   const source = defineRefresh<{ id: number }, { rows: number[] }>({ load: async () => ({ rows: [1] }) })
   const quote = source
   const core = newCore(1)
@@ -558,10 +558,10 @@ test('A15 只读定位：无实例返回 undefined，读到的是副本，循环
   for (const other of [[1, 2], null, 7, 'x', new Date(0), { id: Number.NaN }]) {
     assert.equal(core.readSnapshot(quote, other as object), undefined, `根容器 ${String(other)} 不该抛`)
   }
-  // 只有循环引用会让递归耗尽调用栈，由读取者接住。
+  // 编码不出身份的参数按「没有这个身份」处理：读取点不需要 try/catch。
   const cyclic: Record<string, unknown> = {}
   cyclic.self = cyclic
-  assert.throws(() => { core.readSnapshot(quote, cyclic) }, TypeError)
+  assert.equal(core.readSnapshot(quote, cyclic), undefined)
 
   const view = page(core, quote)
   view.submit({ id: 1 })
@@ -689,7 +689,7 @@ test('A18 参数编码与序号上界：键按 JSON 语义稳定排序，序号�
   assert.equal(prepareParameters({ at: new Date(0) }).key,
     prepareParameters({ at: '1970-01-01T00:00:00.000Z' }).key, 'Date 按其 ISO 字符串')
 
-  // 循环引用让递归耗尽调用栈：按非法参数拒绝，且不改动任何状态。
+  // 循环引用编码不出身份：按非法参数拒绝，且不改动任何状态。
   const cyclic: Record<string, unknown> = {}
   cyclic.self = cyclic
   assert.equal(view.submit(cyclic).status, 'rejected')
@@ -701,4 +701,52 @@ test('A18 参数编码与序号上界：键按 JSON 语义稳定排序，序号�
   assert.equal(view.handle.operationId, Number.MAX_SAFE_INTEGER)
   await settle()
   assert.equal(view.last?.data, 1)
+})
+
+/**
+ * 这一条是「调用方不用写 try/catch」的总账：三条公开入口都只能给出返回值或 `onError`。
+ * 唯一会同步抛错的是装配误用（`useRefresh` 不在 setup、没有协调者、`maxConcurrent` 非法、安装冲突），
+ * 那些在 `vue.test.ts` 里各有一条，且都发生在第一次运行就能看见的固定位置。
+ */
+test('边界总账：运行期失败只走返回值或 onError，三类公开入口都不抛错', async () => {
+  // 取数侧：结果非法（`undefined`）与结果不可复制都只是后台失败，槽位当场交还。
+  for (const source of [
+    defineRefresh<{ id: number }, number>({ load: async () => undefined as unknown as number }),
+    defineRefresh<{ id: number }, object>({ load: async () => ({ f: () => 1 }) }),
+  ]) {
+    const core = newCore(1)
+    const view = page(core, source)
+    assert.doesNotThrow(() => { view.submit({ id: 1 }) })
+    await settle()
+    assert.equal(view.errors.at(-1)?.origin, 'request')
+    assert.equal(core.snapshot().running.length, 0)
+  }
+
+  // 参数侧：复制失败、编码不出、`validate` 拒绝，一律是 `rejected` ＋ `validation` 通知，不产生实例。
+  const source = defineRefresh<object, number>({
+    load: async () => 1,
+    validate: args => (args as { valid?: boolean }).valid !== false,
+  })
+  const core = newCore(1)
+  const view = page(core, source)
+  const cyclic: Record<string, unknown> = {}
+  cyclic.self = cyclic
+  for (const bad of [cyclic, { f: () => 1 }, { valid: false }]) {
+    let status = ''
+    assert.doesNotThrow(() => { status = view.submit(bad).status })
+    assert.equal(status, 'rejected')
+  }
+  for (const validate of [
+    (): never => { throw new Error('校验炸') },
+    (): never => Promise.resolve(true) as never,
+  ]) {
+    assert.equal(page(newCore(1), defineRefresh<object, number>({ load: async () => 1, validate })).submit({}).status, 'rejected')
+  }
+  assert.ok(view.errors.every(error => error.origin === 'validation'))
+  assert.equal(core.snapshot().resources.length, 0)
+
+  // 读取侧：编码不出的参数返回 `undefined`；显式刷新永不 reject。
+  assert.doesNotThrow(() => { core.readSnapshot(source, cyclic) })
+  assert.equal(core.readSnapshot(source, cyclic), undefined)
+  await assert.doesNotReject(async () => { await view.refresh() })
 })
