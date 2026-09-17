@@ -87,9 +87,17 @@ function deepFreeze(value: unknown): void {
   for (const child of Object.values(value)) deepFreeze(child)
 }
 
+/** 根容器必须是一个普通记录：数组、`null`、原始值都按非法参数拒绝（U15）。 */
+function requireRecord(input: object): Record<string, unknown> {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new TypeError('Parameters must be a JSON record')
+  }
+  return input as Record<string, unknown>
+}
+
 /** 只读定位：只编码，不复制、不冻结、不执行 `validate`。 */
 export function parameterKey(input: object): string {
-  return canonical(input, 1)
+  return canonical(requireRecord(input), 1)
 }
 
 /**
@@ -97,7 +105,7 @@ export function parameterKey(input: object): string {
  * 任何一步失败都按非法参数拒绝，不产生实例或后台任务。
  */
 export function prepareParameters(input: object, validate?: (args: object) => boolean): Parameters {
-  const args: object = structuredClone(input)
+  const args: object = structuredClone(requireRecord(input))
   const key = canonical(args, 1)
   deepFreeze(args)
   if (validate) {

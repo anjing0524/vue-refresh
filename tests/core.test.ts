@@ -518,6 +518,10 @@ test('A15 只读定位：无实例返回 undefined，参数非法抛给调用者
   assert.equal(core.readSnapshot(quote, { id: 1 }), undefined)
   assert.throws(() => { core.readSnapshot(quote, { id: Number.NaN }) }, TypeError)
   assert.throws(() => { core.readSnapshot(quote, { id: -0 }) }, TypeError)
+  // 根容器必须是普通记录：数组、null、原始值都拒绝，且与此刻有没有活跃实例无关。
+  for (const illegal of [[1, 2], null, 7, 'x', new Date(0)]) {
+    assert.throws(() => { core.readSnapshot(quote, illegal as object) }, TypeError, `根容器 ${String(illegal)} 应被拒`)
+  }
 
   const view = page(core, quote)
   view.submit({ id: 1 })
@@ -635,7 +639,10 @@ test('A18 参数守卫与序号上界：非 JSON 值与病态嵌套被拒，序�
   const core = newCore(1)
   const view = page(core, sourceRuntime(source))
 
-  // 非 JSON 值、循环与病态嵌套都在提交边界被拒，且不产生任何状态改动。
+  // 非 JSON 值、非法根容器、循环与病态嵌套都在提交边界被拒，且不产生任何状态改动。
+  for (const illegal of [[1, 2], null, 7, 'x', new Date(0)]) {
+    assert.equal(view.submit(illegal as object).status, 'rejected', `根容器 ${String(illegal)} 应被拒`)
+  }
   assert.equal(view.submit({ id: -0 }).status, 'rejected')
   const cyclic: Record<string, unknown> = {}
   cyclic.self = cyclic
