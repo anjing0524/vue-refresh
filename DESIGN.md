@@ -181,7 +181,7 @@ flowchart LR
 | 错误来源 | `request` / `validation` / `configuration` | `RefreshError.origin`；交付面不交付「由谁触发」，这是唯一的来源域（ADR-34） |
 | 刷新失败来源 | `request` / `configuration` | `RefreshResult` 的 error 分支 |
 | 取消原因 | `superseded` / `unavailable` / `disposed` | `RefreshResult` 的 cancelled 分支 |
-| submit 取消原因 | 可达子集：`superseded` / `disposed` | `SubmitResult` 的 cancelled 分支 |
+| submit 取消原因 | 可达子集只有一个成员：`disposed` | `SubmitResult` 的 cancelled 分支 |
 | 刷新要求 | 无 / 待满足（版本下限 `min`） | `Resource.waiters` |
 | 当前订阅 | 实例 ＋ 间隔 / `null` | `Handle.subscription` |
 | 配置快照 | 有效 / 非法（`null`） | 适配闭包 → `Handle.config` |

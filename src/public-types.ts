@@ -61,12 +61,13 @@ export interface RefreshError {
 
 /**
  * `submit` 的同步结果。`accepted` 只表示身份已被记录，不代表请求成功。
- * 取消原因收窄为可达的两种：声明不检查可见性与开启意愿，因此不会被 `unavailable` 取消。
+ * 取消原因是可达成员的联合，只有一个成员 `disposed`：声明不检查可见性与开启意愿（不会被 `unavailable` 取消），
+ * 声明新身份也不取消自己（`superseded` 只结算本页已发出的刷新要求，走 `refresh` 的返回值）。
  */
 export type SubmitResult =
   | { readonly status: 'accepted' }
   | { readonly status: 'rejected'; readonly error: unknown }
-  | { readonly status: 'cancelled'; readonly reason: typeof CancelReason.Superseded | typeof CancelReason.Disposed }
+  | { readonly status: 'cancelled'; readonly reason: typeof CancelReason.Disposed }
 
 /**
  * `refresh` 的结算结果。取消立即结算，不等底层请求真正结束。

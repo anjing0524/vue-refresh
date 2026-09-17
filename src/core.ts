@@ -282,10 +282,10 @@ export class RefreshCore {
   /**
    * 只读计数投影：给演示面板与集成测试看状态。**不属于包契约**，也不提供改状态的入口；
    * 集合是副本，元素仍是核心对象（比较身份是这些断言的要点），因此它是观察面而不是安全边界。
+   *
+   * 只放有消费者的字段：存活已有 `isDisposed()` 这个唯一出口，可见性只有写入口（ADR-39）。
    */
   snapshot(): {
-    disposed: boolean
-    visible: boolean
     handles: readonly Handle[]
     resources: readonly Resource[]
     queued: readonly Task[]
@@ -303,8 +303,6 @@ export class RefreshCore {
       }
     }
     return {
-      disposed: this.disposed,
-      visible: this.visible,
       handles: [...this.handles],
       resources,
       queued: [...this.queue],
