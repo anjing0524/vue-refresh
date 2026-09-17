@@ -100,7 +100,7 @@ flowchart LR
 
 - Source 对象身份 ＋ `Parameters.key` 定位实例；实例的生存期由订阅与刷新要求共同决定。
 - `Handle.operationId` 是声明代次，只用于错误的归属；`Resource.issued` 是**最后一个已分配**的任务版本，
-  `Task.version` 与 `Waiter.min` 处于同一实例的版本域。
+  `Task.version` 与 `Entry.version` 处于同一实例的版本域；刷新要求不记版本（§3.6）。
 - 任务版本只在同一实例内比较；声明代次不能替代任务版本，刷新要求与页面身份也不共用计数。
 - 序号域足够大（安全整数上界，单页每毫秒一次提交也要约 28.5 万年才到达）：到达上界后停在原地，
   不销毁协调者、不抛错，也不给调用方第三种结果（ADR-23 的结论在 `nextSequence` 上保留）。
@@ -116,7 +116,7 @@ flowchart LR
 | Handle | `operationId=0`、`parameters=null`、`subscription=null`、`cleanup=null`、`active=false`、`disposed=false` | 全部写入都在 `core.ts` 内：声明与关系由核心写，生命周期走 `activate` / `deactivate`，`cleanup` 走句柄字段；适配层只读它们。`source` / `config` / `publish` / `onError` 是固定端口；`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
 | Resource | 类：`core`（只用它三个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`entry=null`、`settledAt=null`、`issued=0`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值且已冻结，`deliverTo` 与 `load` 也只用这一份）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `settleWaiter` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `issued` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
 | Task | `resource`、`version`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
-| Waiter | `handle`、`min`、`settle` | `refresh` 创建并挂到实例的 `waiters` 上；原生 Promise 首次结算生效；`min` 取当时的 `issued`（也就是当前请求的版本），因此由当前请求的结果结算；失败/失去存在/销毁时结算 |
+| Waiter | `handle`、`settle` | `refresh` 创建并挂到实例的 `waiters` 上；原生 Promise 首次结算生效；由当前那个请求的结果结算（没有请求时由本次要求当场登记的任务结算）；失败/失去存在/销毁时结算 |
 | Entry | `version`、`data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
 | RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `readSnapshot` / `snapshot` / `isDisposed` / `dispose`），**另加三个给实例用的入口** `enqueue` / `registered` / `releaseIfUnused`（public，但不在包契约内，见 ADR-42），其余内部转换全部 `private`；`dispose` 先失效再清理 |
 | 配置快照与通知状态 | `snapshot`（初值非法）、`reported` | 名字见 `vue.ts`；只在适配闭包内，随组件作用域释放。快照同时是 `Handle.config` 返回的唯一事实，核心不重新调用 getter |
@@ -132,7 +132,7 @@ flowchart LR
 | 配置变化 | 适配层先写快照，核心按资格接入或退订 | `onError` / abort 可能重入；资格判断本身无副作用 |
 | 隐藏 / 失活 | 结算本页未完成的刷新要求为 `unavailable`，退订 | 取消立即结算，不等底层结束 |
 | `refresh` 接纳 | 登记刷新要求，并在没有当前请求时登记一次任务 | 有请求就直接用它的结果；与自动刷新同一条路径；不复制第二份 DTO |
-| 后台成功 | 记结算时刻与结果、逐页独立副本、结算满足门槛的要求 | 每次外部写入后复核任务归属；结算在交付之后 |
+| 后台成功 | 记结算时刻与结果、逐页独立副本、结算这一批未结算的要求 | 每次外部写入后复核任务归属；结算在交付之后 |
 | 后台失败 | 记结算时刻、通知仍有效的订阅者、结算全部未完成要求 | 保留画面与需求，下个周期继续 |
 | 上限到期 | 先撤销在册身份再 abort 与结算 | 迟到的结束因身份已失效被完全忽略 |
 | 最后退出 | 删除注册、结果、排队项并 abort 在途 | 真实结束的任务在自己的 `finally` 里释放槽位 |
@@ -156,14 +156,15 @@ flowchart LR
 
 ### 3.6 刷新要求的唯一更新表
 
-`Waiter` 是 `{handle, min, settle}`，只代表一次显式刷新尚未满足；它不是句柄的第二个状态，也不是订阅的一部分。
-`min` 只比较客户端任务版本，不承诺服务端数据强一致；它取登记时的 `issued`，也就是**该实例当前那个请求的版本**
-（`enqueue` 每次都把 `issued` 写成新任务的版本，因此有任务时两者相等），没有任务时由本次要求当场登记的任务满足。
+`Waiter` 是 `{handle, settle}`，只代表一次显式刷新尚未满足；它不是句柄的第二个状态，也不是订阅的一部分。
+它不记版本下限：`refresh` 登记时请求若有就是当前那个（`enqueue` 只在不忙时登记），若没有就当场登记一个，
+因此结算它的结果一定不早于登记，「结果的版本不低于门槛」这层判断恒真——ADR-40 删掉 `floor` 之后就没人读它了，
+ADR-43 把它一并删掉。
 
 | 事件 / 当前值 | 刷新要求更新 | 结果与交付规则 |
 |---|---|---|
-| `refresh`（无论实例有没有当前请求） | 新建要求，`min = issued` | 有请求就直接用它的结果（排队或已在执行都一样）；没有请求就当场登记一次。不 abort、不追发第二次 |
-| 同一实例多个未满足要求 | 各自保留，`min` 都不高于当前请求的版本 | 同一结果把它们一起结算为 `success` |
+| `refresh`（无论实例有没有当前请求） | 新建要求 | 有请求就直接用它的结果（排队或已在执行都一样）；没有请求就当场登记一次。不 abort、不追发第二次 |
+| 同一实例多个未满足要求 | 各自保留 | 同一结果把它们一起结算为 `success` |
 | 任务成功 | 未结算的要求结算 `success` 并移除 | 先交付（含仅由刷新要求产生的接收者），再结算 |
 | 任务失败或上限到期 | 该实例**全部**未结算要求结算 `error` / `request` 并移除 | 旧画面保留，订阅与开启意愿保留，下个周期继续 |
 | 失去存在 / 卸载 / 销毁 | 该句柄的要求结算 `cancelled`；`enabled` 边沿不结算 | 取消立即结算 |
@@ -171,10 +172,10 @@ flowchart LR
 
 一次失败的含义是「这次刷新没拿到新结果」：它按同一失败结算该实例**全部**未结算要求，因此不会变成自动重试，
 与「失败保留画面、下个周期继续」一致（确认人 2026-09-17 裁决「有请求就直接使用，没启动就直接启动」，见 ADR-40）。
-`success` 的门槛判断（`min ≤ 本次版本`）保留为防御：按上式 `min` 不可能高于当前请求的版本，因此它恒成立。
+`success` 没有门槛判断：接收者是「有效订阅 ∪ 这一批未结算的要求」，而这一批在交付之前取快照（ADR-43）。
 
 **唯一的不变量。** 上表可以由一条不变量表达：**存在未满足刷新要求的实例，必有当前请求，或由本次要求当场登记的那个请求**，
-由它的结果结算。唯一的例外是交付回调里重入登记的要求：`Resource.publish` 先算好这一批要结算的要求再交付，交付期间新登记的
+由它的结果结算。唯一的例外是交付回调里重入登记的要求：`Resource.publish` 先取这一批要结算的要求的快照再交付，交付期间新登记的
 不在那一批里，只能由 `Resource.refill` 补的后继请求结算（§3.9 第一条）。
 
 ### 3.7 派生值：不重复保存
@@ -182,7 +183,6 @@ flowchart LR
 - 任务的执行阶段由 `queue` / `running` 的归属决定，不存字段。
 - 下次到期时刻由 `settledAt ＋ 当前最短 every` 现算，因此改频率立刻生效；`settledAt` 本身是事实（最近一次正常结束）。
 - 有效最短间隔由各订阅的 `every` 现算，不缓存。
-- 刷新要求的下限就是 `issued`（该实例最后一个已分配的版本），不另存副本：有请求时它等于那个请求的版本。
 - 资格由存活、已声明身份、生命周期与可见性、配置快照四组事实决定，不镜像 `enabled`。
 - 不交付「正在刷新」这类实时状态：交付面只给结果与它的产生时间。
 
@@ -199,7 +199,7 @@ flowchart LR
 | 刷新失败来源 | `request` / `configuration` | `RefreshResult` 的 error 分支 |
 | 取消原因 | `superseded` / `unavailable` / `disposed` | `RefreshResult` 的 cancelled 分支 |
 | submit 取消原因 | 可达子集只有一个成员：`disposed` | `SubmitResult` 的 cancelled 分支 |
-| 刷新要求 | 无 / 待满足（版本下限 `min`） | `Resource.waiters` |
+| 刷新要求 | 无 / 待满足 | `Resource.waiters` |
 | 当前订阅 | 实例 ＋ 间隔 / `null` | `Handle.subscription` |
 | 配置快照 | 有效 / 非法（`null`） | 适配闭包 → `Handle.config` |
 | 组件激活、句柄已释放、浏览器可见、协调者已销毁 | true / false | `Handle.active` / `Handle.disposed` / `RefreshCore.visible` / `RefreshCore.disposed` |
@@ -216,7 +216,7 @@ flowchart LR
 本节刻意不写行号，行号会随编辑失效。
 
 **一、交付期间的重入（`Resource.refill` 为什么存在）**
-`Resource.publish` **先**算好这一批要结算的要求（`min ≤ 本次版本`），**再**逐个交付。交付会同步调用页面的
+`Resource.publish` **先**取这一批要结算的要求的快照，**再**逐个交付。交付会同步调用页面的
 `publish` 回调，回调里可能立刻 `submit`、`refresh`、退订或卸载，因此：
 
 - 每交付一个接收者之前重新复核它还在不在 `subscribers` 里——前一个回调可能已经让它退订；

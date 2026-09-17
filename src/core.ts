@@ -58,12 +58,12 @@ export interface Task {
 }
 
 /**
- * 一次显式刷新尚未满足的要求：由版本不低于 `min` 的那个请求结算。
- * `min` 取登记时的 `issued`——也就是当前请求（排队或已在执行）的版本，因此刷新直接用它的结果。
+ * 一次显式刷新尚未满足的要求：由「本实例当前那个请求」的结果结算，只结算一次。
+ * 它不记版本下限：`refresh` 登记时请求若有就是当前那个（`enqueue` 只在不忙时登记），若没有就当场登记一个，
+ * 因此结算它的结果一定不早于登记——「谁的版本号不低于谁」这层门槛恒真，不需要存（ADR-43）。
  */
 export interface Waiter {
   readonly handle: Handle
-  readonly min: number
   readonly settle: (result: RefreshResult) => void
 }
 
@@ -126,18 +126,14 @@ export class Resource {
     if (this.entry) this.deliverTo(handle, this.entry)
   }
 
-  /** 后台成功：收货方一次收齐（有效订阅 ∪ 满足版本门槛的刷新要求），同一句柄只交付一次。 */
+  /** 后台成功：收货方一次收齐（有效订阅 ∪ 未结算的刷新要求），同一句柄只交付一次。 */
   publish(entry: Entry): void {
     // 结算时刻先于交付：交付回调里看到的调度状态已经是「这一次已经结束」。
     this.settledAt = Date.now()
     this.entry = entry
-    const satisfied: Waiter[] = []
-    const refreshing = new Set<Handle>()
-    for (const waiter of [...this.waiters]) {
-      if (waiter.min > entry.version) continue
-      satisfied.push(waiter)
-      refreshing.add(waiter.handle)
-    }
+    // 这一批要结算的要求先定下来再交付：交付回调里重入登记的要求不在这一批里，只能由 `refill` 的后继请求结算。
+    const satisfied = [...this.waiters]
+    const refreshing = new Set(satisfied.map(waiter => waiter.handle))
     const delivered = new Set<Handle>()
     for (const handle of [...this.subscribers]) {
       // 前一个接收者的回调可能已经改身份或退订，因此每个交付点重新复核归属。
@@ -361,8 +357,9 @@ export class RefreshCore {
     const resource = this.resourceFor(handle.source, parameters)
     let settle!: (result: RefreshResult) => void
     const result = new Promise<RefreshResult>(resolve => { settle = resolve })
-    // 有请求就直接用：`issued` 就是当前请求（排队或已在执行）的版本；没有请求时由本次登记的任务满足。
-    resource.waiters.add({ handle, min: resource.issued, settle })
+    // 有请求就直接用：`enqueue` 的三个调用点都先确认没有当前任务，因此有 `task` 时它就是本实例唯一的请求；
+    // 没有请求时由本次登记的任务满足。
+    resource.waiters.add({ handle, settle })
     if (!resource.task) this.enqueue(resource)
     this.flushSoon()
     return result
