@@ -167,10 +167,10 @@ export class Resource {
     this.core.enqueue(this)
   }
 
-  /** 交付一份独立副本。 */
+  /** 交付一份独立副本：数据与参数同口径，两者都各复制一份（ADR-52）。 */
   private deliverTo(handle: Handle, entry: Entry): void {
     isolate(() => handle.publish({
-      args: this.parameters.args,
+      args: structuredClone(this.parameters.args),
       data: structuredClone(entry.data),
       updatedAt: entry.updatedAt,
     }))
@@ -403,7 +403,8 @@ export class RefreshCore {
     // 已订阅：改频率不需要重建连接（间隔现算），在途请求也保留，下一次调度按新间隔重算到期。
     if (subscribed) return
     const resource = this.resourceFor(handle.source, parameters)
-    // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值，且已冻结）。
+    // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值）。这份是框架私有权威副本，
+    // 外发给每个消费者（`validate`／每轮 `load`／每个接收者的 `display`）时各复制一份（ADR-52）。
     handle.parameters = resource.parameters
     handle.subscription = resource
     resource.subscribers.add(handle)
@@ -474,7 +475,8 @@ export class RefreshCore {
     // 上限从真正开始执行起算（排队不计入）：一个永不结束的 load 不能永久占住并发槽。
     const timer = setTimeout(() => { this.expire(task) }, LOAD_TIMEOUT_MS)
     try {
-      const raw = await resource.source.load(resource.parameters.args, { signal: task.controller.signal })
+      // 每一轮都交出一份副本：`load` 是页面代码，改自己的入参不能污染身份键描述的那份值（ADR-52）。
+      const raw = await resource.source.load(structuredClone(resource.parameters.args), { signal: task.controller.signal })
       if (resource.task !== task) return
       const entry: Entry = { data: copyResult(raw), updatedAt: Date.now() }
       if (resource.task !== task) return

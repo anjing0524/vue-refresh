@@ -40,4 +40,10 @@ function contract() {
 }
 // @ts-expect-error load DTO must match the declared result
 defineRefresh<Params, Quote>({ async load() { return { price: 'bad' } } })
+// 参数值域（ADR-52）：对象型只能是普通对象或数组。这两条是**反向探针**——`JsonParameters` 的写法
+// 换个形状（例如加 `readonly` 修饰符）会静默失效，那时这两条 `@ts-expect-error` 会变成「未使用的指令」而报错。
+// @ts-expect-error Date 的内容对编码不可见，请传 ISO 字符串
+defineRefresh<{ account: string; from: Date }, Quote>({ async load() { return { price: 1 } } })
+// @ts-expect-error Map 的内容对编码不可见
+defineRefresh<{ account: string; box: Map<string, number> }, Quote>({ async load() { return { price: 1 } } })
 void contract

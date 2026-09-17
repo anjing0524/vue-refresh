@@ -36,7 +36,7 @@ index.ts                   包入口（三个函数与 6 个公共类型；没�
 | 文件 | 职责 |
 |---|---|
 | `public-types.ts` | 公共契约类型（判别联合，没有常量对象）与 `RefreshSource`（成员是方法，靠双变进入框架的擦除视图） |
-| `source.ts` | `defineRefresh`、`Parameters`、`prepareParameters`（复制 → 稳定编码 → 深冻结 → 执行来源的 `validate`）、只读定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
+| `source.ts` | `defineRefresh`（声明点用 `JsonParameters` 约束参数值域）、`Parameters`、`assertJsonValue`（值域检查：对象型限普通对象或数组）、`prepareParameters`（复制 → 值域检查 → 稳定编码 → 执行来源的 `validate`，消费者各拿副本）、定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
 | `core.ts` | `RefreshCore`：跨实例的协调者——实例注册表、句柄名册、唯一 Timer 与 FIFO 队列、并发槽、只读计数投影；`Resource`：一个身份自己的状态与操作（订阅、刷新要求、到期、当前任务、交付与失败、结算与回收），越过实例边界只调核心的两个入口（`enqueue` / `releaseIfUnused`） |
 | `vue.ts` | `useRefresh`（配置快照、句柄、Display、生命周期）、`createRefreshManager`（安装、可见性监听、只读入口、销毁）、注入槽位 |
 | `index.ts` | 包导出：三个函数、逐个列出的 6 个公共类型（不用 `export type *`）；工具型别名不导出 |
@@ -108,9 +108,9 @@ flowchart LR
 | 所有者 | 字段、初值 | 写入与释放 |
 |---|---|---|
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
-| Parameters | `args`、`key`；准备成功后只读 | 提交边界复制/冻结/编码；需求与实例释放后回收 |
+| Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给每个消费者（`validate`／每轮 `load`／每个接收者的 `display`）时各复制一份；需求与实例释放后回收 |
 | Handle | `parameters=null`、`subscription=null`、`cleanup=null`、`active=false`、`disposed=false` | 全部写入都在 `core.ts` 内：声明与关系由核心写，生命周期走 `activate` / `deactivate`，`cleanup` 走句柄字段；适配层只读它们。`source` / `config` / `publish` / `onError` 是固定端口；`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
-| Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值且已冻结，`deliverTo` 与 `load` 也只用这一份）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `clearRequest` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
+| Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `clearRequest` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
 | Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
 | Entry | `data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
 | RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `snapshot` / `isDisposed` / `dispose`），**另加两个给实例用的入口** `enqueue` / `releaseIfUnused`（public，但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理 |
@@ -231,14 +231,14 @@ flowchart LR
 
 ### 4.1 参数准备与键
 
-固定 Source 绑定 `P`、`T`、`load` 及可选同步 `validate`。输入按普通 JSON 记录使用；框架**不判断值是否合法**——那是调用方的责任，编码交给 `fast-json-stable-stringify`，沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 与函数字段按省略，`Date` 按其 ISO 字符串。传函数、Proxy 这类复制不了的值由 `structuredClone` 拒绝（`caller`），循环引用由编码包抛 `TypeError`。
+固定 Source 绑定 `P`、`T`、`load` 及可选同步 `validate`。`P` 的值域在声明点由 `defineRefresh` 约束为 JSON 值（对象型只能是普通对象或数组，ADR-52），提交边界再由 `assertJsonValue` 运行期兜底：`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 等容器的内容对编码不可见，两个内容不同的参数会塌成同一个身份，故一律拒绝（`Date` 请传 ISO 字符串）。业务字段的合法性仍不归框架——那是调用方与 `validate` 的责任。编码交给 `fast-json-stable-stringify`，标量沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 字段按省略；函数与 Proxy 这类复制不了的值由 `structuredClone` 拒绝，循环引用让编码交不出身份。
 
-提交边界**一次**执行；两件事各由一个函数负责，副作用只出现在其中一处：
+提交边界**一次**执行；四步各由一个函数负责，没有共享、也没有需要冻结的副作用：
 
 ```text
-structuredClone → stringify（`fast-json-stable-stringify`：键排序 ＋ 数组保序）
-                → deepFreeze（唯一副作用：冻结这份副本）
-                → 可选 Source.validate 一次 → Parameters
+structuredClone → assertJsonValue（值域：对象型限普通对象或数组）
+                → stringify（`fast-json-stable-stringify`：键排序 ＋ 数组保序）
+                → 可选 Source.validate 一次（拿到自己的副本）→ Parameters
 ```
 
 对象按键排序编码，数组保持原顺序，因此字段顺序不影响身份、数组顺序影响身份。
@@ -263,15 +263,16 @@ structuredClone → stringify（`fast-json-stable-stringify`：键排序 ＋ 数
 - 原生支持的 `Date` / `Map` / 循环等可被复制，**不表示**框架验证了业务合法性；不支持的值由原生复制抛错，
   沿用共享请求失败处理；`null` 是有效结果。
 - 结果 → 每个接收者各复制一份（`display` 是唯一出口）；不冻结业务原对象，不用 JSON 来回 `parse`。
-- **参数与结果的所有权不同**：结果每个接收者复制一份（`structuredClone`），参数按**引用**交付——`Resource.deliverTo` 把
-  `resource.parameters.args` 直接交给每个页面，它同时是每一轮 `load` 的实参。因此参数在提交边界被 `deepFreeze`
-  冻结：不冻结的话，一个页面写自己的 `display.args` 就会同时改掉别人的画面、下一轮请求的参数与身份键所描述的值。
-  这也是它必须**深**冻结（`Object.freeze` 是浅的）而结果只需逐份复制的原因。
+- **参数与结果的所有权相同**：两者都是每个消费者各复制一份（`structuredClone`，ADR-52）。参数在提交边界复制一份
+  作为框架私有权威副本，`Resource.deliverTo` 交付前再复制一份、每一轮 `load` 也各拿一份，因此页面写自己的
+  `display.args` 改不到别人的画面、下一轮请求的参数或身份键所描述的值。**隔离不靠冻结**：`Object.freeze` 冻的是
+  属性描述符，而 `Map.set` / `Set.add` / `Date.setTime` 写的是内部槽，规范上冻不住——既然私有副本不外发，
+  就不需要「冻得住」这个假设。
 - 退订冻结依靠独立数据快照，不能直接绑定共享结果对象，也不能只复制最外层对象。
 
 ### 4.4 复杂度
 
-- 参数提交：复制一次、结构遍历两次（编码一次、冻结一次）、可选业务校验一次。按值展开参数规模记 K，成本 `O(K)`。
+- 参数提交：复制一次、值域遍历一次、编码遍历一次、可选业务校验一次（另复制一份给 `validate`）。按值展开参数规模记 K，成本 `O(K)`；每份交付再复制一次参数，k 页即 `O(kK)`。
 - DTO 入站复制 `O(D)`，k 页交付 `O(kD)`；结果是整条替换，不维护增量结构。
 - 调度按实例与订阅扫描；FIFO 出队按任务数。
 - 规模结论见[统一文档](./统一刷新管理.md) §5 G04。

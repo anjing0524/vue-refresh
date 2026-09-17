@@ -700,22 +700,28 @@ test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => 
   assert.equal(view.errors.length, 0, '页面自己知道还没有身份，不重复通知')
 })
 
-test('A18 参数编码与守卫：键按 JSON 语义稳定排序，坏参数一律拒绝且不改动状态', async () => {
+test('A18 参数编码与值域：键按 JSON 语义稳定排序，坏参数一律拒绝且不改动状态', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(1)
   const view = page(core, source)
 
-  // 编码沿用 JSON 语义、不做合法性判断（那是调用方的责任）：键就是按键排序后的 JSON 文本。
+  // 标量沿用 JSON 语义，不做业务合法性判断（那是调用方的责任）：键就是按键排序后的 JSON 文本。
   assert.equal(prepareParameters({ b: 1, a: 2 }).key, '{"a":2,"b":1}', '对象键排序')
   assert.equal(prepareParameters({ tags: ['a', 'b'] }).key, prepareParameters({ tags: ['a', 'b'] }).key)
   assert.notEqual(prepareParameters({ tags: ['a', 'b'] }).key, prepareParameters({ tags: ['b', 'a'] }).key, '数组顺序影响身份')
   assert.equal(prepareParameters({ id: -0 }).key, prepareParameters({ id: 0 }).key, '-0 与 0 是同一个数')
   assert.equal(prepareParameters({ id: Number.NaN }).key, prepareParameters({ id: null }).key, 'NaN 按 JSON 语义读作 null')
   assert.equal(prepareParameters({ id: undefined }).key, prepareParameters({}).key, 'undefined 字段按 JSON 语义省略')
-  assert.equal(prepareParameters({ at: new Date(0) }).key,
-    prepareParameters({ at: '1970-01-01T00:00:00.000Z' }).key, 'Date 按其 ISO 字符串')
 
-  // 循环引用编码不出身份：按非法参数拒绝，且不改动任何状态。
+  // 严格线（ADR-52）：对象型参数只能是普通对象或数组。这些容器的内容对编码不可见（全部编码成 `{}`），
+  // 不同内容会塌成同一个身份、共享另一条查询的数据，故一律拒绝。
+  for (const box of [new Date(0), new Map([['k', 1]]), new Set([1]), /x/g, new ArrayBuffer(2)]) {
+    assert.throws(() => prepareParameters({ box }), /参数只能是普通对象、数组与 JSON 标量/, `${box.constructor.name} 被拒绝`)
+    assert.equal(view.submit({ box }).status, 'rejected', `${box.constructor.name} 的提交被拒绝`)
+  }
+  assert.equal(view.handle.parameters, null, '值域不合格的参数不改动任何状态')
+
+  // 循环引用编码不出身份：同样按非法参数拒绝，且不改动任何状态。
   const cyclic: Record<string, unknown> = {}
   cyclic.self = cyclic
   assert.equal(view.submit(cyclic).status, 'rejected')
@@ -725,6 +731,43 @@ test('A18 参数编码与守卫：键按 JSON 语义稳定排序，坏参数一�
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
   await settle()
   assert.equal(view.last?.data, 1)
+})
+
+/**
+ * 参数的隔离靠**每个消费者各一份副本**，不靠冻结（ADR-52）：`Object.freeze` 冻的是属性描述符，
+ * 而 `Map.set` / `Set.add` / `Date.setTime` 写的是内部槽，规范上冻不住；框架私有那份既然不外发，
+ * 就不需要任何「冻得住」的假设。
+ */
+test('A19 参数副本：validate、每轮 load 与每个接收者各拿一份副本，改自己的不影响别人', async () => {
+  const seen: { id: number; tags: string[] }[] = []
+  const source = defineRefresh<{ id: number; tags: string[] }, number>({
+    validate: args => { (args as unknown as { tags: string[] }).tags.push('validate 改的'); return true },
+    load: async args => {
+      const box = args as unknown as { id: number; tags: string[] }
+      seen.push(box)
+      box.tags.push('load 改的')
+      return box.id
+    },
+  })
+  const core = newCore(2)
+  const a = page(core, source)
+  const b = page(core, source)
+
+  assert.equal(a.submit({ id: 1, tags: [] }).status, 'accepted')
+  await settle()
+  assert.deepEqual(seen[0]?.tags, ['load 改的'], 'load 改的是交给自己那份')
+  assert.deepEqual(a.last?.args, { id: 1, tags: [] }, 'validate 与 load 的改写都没有进到身份里')
+
+  a.refresh()
+  await settle()
+  assert.deepEqual(seen[1]?.tags, ['load 改的'], '上一轮 load 的改写没有留到下一轮')
+
+  assert.equal(b.submit({ id: 1, tags: [] }).status, 'accepted')
+  await settle()
+  const argsOfA = a.last?.args as unknown as { tags: string[] }
+  argsOfA.tags.push('A 页改的')
+  assert.deepEqual(a.last?.args, { id: 1, tags: ['A 页改的'] }, 'A 页改的是自己那份')
+  assert.deepEqual(b.last?.args, { id: 1, tags: [] }, 'A 页改自己的参数影响不到 B 页')
 })
 
 /**

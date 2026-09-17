@@ -7,7 +7,7 @@ import type { App, Ref, ShallowRef } from 'vue'
  * `erasableSyntaxOnly` 与 Node 的类型擦除都不接受该语法。
  */
 
-/** 递归只读视图：编译期约束。框架交付的是独立副本，因此拿到只读视图不等于共享对象不可写。 */
+/** 递归只读视图：编译期约束。框架交付的每个值都是独立副本，因此只读视图不承诺运行期不可写。 */
 export type ReadonlySnapshot<T> =
   T extends (...args: never[]) => unknown ? T :
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
@@ -18,6 +18,9 @@ export type ReadonlySnapshot<T> =
  * 两个成员都写成**方法**：方法参数按双变比较，因此具体 Source 可以直接进入框架的擦除视图
  * （`RefreshSource<object, unknown>`）与异步注册表槽位，接收点不必保留类型断言。
  * 代价是「拿一个擦除后的 Source 当具体 Source 用」不再被编译器拦住——与 ADR-24 对 `publish` 的取舍一致。
+ *
+ * `P` 的值域在声明点由 `defineRefresh` 约束为 JSON 值：**对象型只能是普通对象或数组**（ADR-52）——
+ * 其余对象型值的内容对身份编码不可见，会让两个不同查询塌成同一个身份。
  */
 export interface RefreshSource<P extends object, T> {
   load(args: ReadonlySnapshot<P>, context: { readonly signal: AbortSignal }): Promise<T>
@@ -34,7 +37,7 @@ export type SubmitResult =
   | { readonly status: 'rejected'; readonly error: unknown }
   | { readonly status: 'cancelled' }
 
-/** 交付面：参数、数据与结果产生时间同次整体发布。 */
+/** 交付面：参数、数据与结果产生时间同次整体发布。**两者都是本页独立副本**（ADR-52）。 */
 export interface RefreshDisplay<P extends object, T> {
   readonly args: ReadonlySnapshot<P>
   readonly data: ReadonlySnapshot<T>

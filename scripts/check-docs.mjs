@@ -447,6 +447,23 @@ for (const [kind, head] of [['函数', '| 函数 |'], ['状态常量对象', '| 
   }
 }
 
+// 17) Retired vocabulary must not come back into the normative documents. ADR-46 removed the read
+//     entry, ADR-48 `CancelReason`, ADR-51 `RefreshError` / `ErrorOrigin` and the caller-side
+//     notification — yet two `caller` mentions survived inside the very rules that describe the
+//     parameter boundary (U15 still promised "`rejected` ＋ 一次 `caller` 通知" for two commits).
+//     #15 only sees backticked PascalCase symbols, so a lowercase retired name was invisible; that
+//     is how an external review came to cite a notification channel that no longer exists.
+//     §5 is excluded on purpose: it keeps delivery records that legitimately quote what past ADRs
+//     removed, and ADR.md is not scanned at all for the same reason.
+const RETIRED = ['caller', 'ErrorOrigin', 'CancelReason', 'RefreshError', 'readSnapshot', 'reported', 'INVALID_CONFIG_MESSAGE']
+for (const [file, text] of [['/README.md', read('/README.md')], ['/DESIGN.md', designText],
+  ['/统一刷新管理.md', design.slice(0, catalogueEnd)]]) {
+  for (const term of RETIRED) {
+    check(!text.includes(`\`${term}\``), file,
+      `retired name \`${term}\` is back in the normative text (it no longer exists in src/; the history is in ADR.md)`)
+  }
+}
+
 if (problems.length) {
   for (const problem of problems) console.error('[docs]', problem)
   process.exit(1)
@@ -456,6 +473,7 @@ if (problems.length) {
 console.log(execFileSync(process.execPath, [`${root}/scripts/trace-leaves.mjs`], { cwd: root, encoding: 'utf8' }).trimEnd())
 console.log(`[docs] consistent: ${modules.length} modules, contract mirror, README metrics, `
   + `README artifact size, export-surface counts and API list, test totals, documented symbols, `
+  + `retired names, `
   + `${declared.size} trigger anchors, capability blocks, `
   + `dependency direction, published entry, core sections, ${TOPIC_CITATIONS.length} topic citations, `
   + `${vocabularyRows.length} vocabulary rows, ${leaves.size} layered leaves, `
