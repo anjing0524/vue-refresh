@@ -1,8 +1,9 @@
 // Documentation/code consistency gate. Read-only: it never rewrites a file.
 // Checks what actually drifted before: the module manifest, the dependency direction,
 // the public-contract mirror in the unified document, the README metrics row, the recorded
-// built-artifact size, the code symbols both normative documents promise, the unified
-// document's own section numbering, the §0 vocabulary table's forms, and the core section banners.
+// built-artifact size, the export-surface counts and API list, the test totals, the code symbols
+// both normative documents promise, the unified document's own section numbering, the §0 vocabulary
+// table's forms, and the core section banners.
 // The unified document lives in this repository root, so the check is self-contained.
 // Usage: pnpm check:docs
 import { execFileSync } from 'node:child_process'
@@ -355,7 +356,7 @@ if (existsSync(`${root}/dist/index.js`)) {
 //     (a) every backticked PascalCase token must occur somewhere in `src/` — acceptance ids
 //         (`U13`, `B10`) and the trace-report labels are exempt, nothing else is;
 //     (b) the Manager row in DESIGN §3.3 is the public-surface promise, so every method it names
-//         must exist in `src/manager.ts`.
+//         must exist in `src/core.ts`.
 //     ADR.md is excluded on purpose: it quotes historical names ("`OBSERVER_FAILED` 已不存在").
 const DOC_SYMBOL_EXEMPT = new Set(['EVIDENCE', 'STATIC', 'PARTIAL', 'UNVERIFIED'])
 const sourceText = modules.map(file => read(`/src/${file}`)).join('\n')
@@ -381,6 +382,66 @@ if (coreRow) {
   }
 }
 
+// 16) The export surface and the test totals are prose in three documents, and nothing measured them:
+//     when the surface shrank from 8 public types to 7 and from two constant objects to one, four
+//     numbers stayed wrong through five green deliveries — "8 个公共类型" in §7, "三个状态常量对象"
+//     twice in DESIGN (contradicting its own §3.8), and README's "37 个用例（core 30）".
+//     Nothing below is curated: counts and names come from `src/index.ts` and from the test files.
+//     (a) every count stated in a document must equal the live number — surface sentences read the
+//         entry, `N 个用例` and `` `tests/x.test.ts` N `` read the test files;
+//     (b) every list that names the surface — §2's three rows and any `N 个X（…）` parenthesis — must
+//         name exactly the exported symbols.
+//     §4.1's "一个函数" is deliberately outside (a): only lines stating the public-type or
+//     constant-object count are treated as surface sentences.
+const identifier = token => /^[A-Za-z_$][\w$]*$/.test(token)
+const valueExports = [...entry.matchAll(/^export \{([^}]*)\} from/gm)]
+  .flatMap(match => match[1].split(',')).map(name => name.trim()).filter(Boolean)
+const exported = {
+  '函数': valueExports.filter(name => /^[a-z]/.test(name)),
+  '状态常量对象': valueExports.filter(name => /^[A-Z]/.test(name)),
+  '公共类型': [...entry.matchAll(/^export type \{([^}]*)\} from/gm)]
+    .flatMap(match => match[1].split(',')).map(name => name.trim()).filter(Boolean),
+}
+const testCounts = new Map(readdirSync(`${root}/tests`).filter(name => name.endsWith('.test.ts'))
+  .map(name => [name, (read(`/tests/${name}`).match(/^test\(/gm) ?? []).length]))
+const testTotal = [...testCounts.values()].reduce((sum, value) => sum + value, 0)
+const liveCount = kind => kind === '用例' ? testTotal : exported[kind].length
+const CN_DIGITS = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 }
+const stated = raw => CN_DIGITS[raw] ?? Number(raw)
+const sameNames = (left, right) => left.slice().sort().join(' ') === right.slice().sort().join(' ')
+for (const [file, text] of [['/README.md', read('/README.md')], ['/DESIGN.md', designText], ['/统一刷新管理.md', design]]) {
+  for (const line of text.split('\n')) {
+    if (!/个公共类型|个状态常量对象/.test(line)) continue
+    for (const [, raw, kind] of line.matchAll(/(\d+|[一二两三四五六七八九十])\s*个(正式函数|函数|状态常量对象|公共类型)/g)) {
+      const label = kind === '正式函数' ? '函数' : kind
+      check(stated(raw) === liveCount(label), file,
+        `states "${raw} 个${kind}", but the entry exports ${liveCount(label)}`)
+    }
+  }
+  for (const [, raw] of text.matchAll(/(\d+|[一二两三四五六七八九十])\s*个用例/g)) {
+    check(stated(raw) === testTotal, file, `states "${raw} 个用例", but the test files declare ${testTotal}`)
+  }
+  for (const [, name, recorded] of text.matchAll(/`tests\/([\w.]+\.test\.ts)` (\d+)/g)) {
+    check(testCounts.get(name) === Number(recorded), file,
+      `states ${recorded} cases in ${name}, but it declares ${testCounts.get(name)}`)
+  }
+  for (const [, kind, inside] of text.matchAll(/[一二两三四五六七八九十\d]+\s*个(状态常量对象|公共类型|函数)（([^）]*)）/g)) {
+    const named = [...inside.matchAll(/`([^`]+)`/g)].map(match => match[1]).filter(identifier)
+    if (named.length) check(sameNames(named, exported[kind]), file,
+      `the list after "个${kind}" is not the exported ${kind}\n    documented: ${named.join(' / ')}\n    exported:   ${exported[kind].join(' / ')}`)
+  }
+}
+const apiRows = design.slice(design.indexOf('## 2. 公共 API 契约'), design.indexOf('### 2.1')).split('\n')
+for (const [kind, head] of [['函数', '| 函数 |'], ['状态常量对象', '| 状态常量'], ['公共类型', '| 类型 |']]) {
+  const row = apiRows.find(value => value.startsWith(head))
+  check(Boolean(row), '统一刷新管理.md §2', `missing the ${kind} row of the API list`)
+  if (row) {
+    const named = [...row.matchAll(/`([^`]+)`/g)].map(match => match[1]).filter(identifier)
+    check(sameNames(named, exported[kind]), '统一刷新管理.md §2',
+      `the ${kind} row is not the exported ${kind}\n    documented: ${named.join(' / ')}\n    exported:   ${exported[kind].join(' / ')}`)
+  }
+}
+
 if (problems.length) {
   for (const problem of problems) console.error('[docs]', problem)
   process.exit(1)
@@ -389,7 +450,8 @@ if (problems.length) {
 // test title is a review aid, not a defect, so it must not fail this gate.
 console.log(execFileSync(process.execPath, [`${root}/scripts/trace-leaves.mjs`], { cwd: root, encoding: 'utf8' }).trimEnd())
 console.log(`[docs] consistent: ${modules.length} modules, contract mirror, README metrics, `
-  + `README artifact size, documented symbols, ${declared.size} trigger anchors, capability blocks, `
+  + `README artifact size, export-surface counts and API list, test totals, documented symbols, `
+  + `${declared.size} trigger anchors, capability blocks, `
   + `dependency direction, published entry, core sections, ${TOPIC_CITATIONS.length} topic citations, `
   + `${vocabularyRows.length} vocabulary rows, ${leaves.size} layered leaves, `
   + `${peerTypeEdges} peer type edges, ${backTypeEdges} type-only back edges`)
