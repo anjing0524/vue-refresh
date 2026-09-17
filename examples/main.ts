@@ -1,8 +1,8 @@
-import { createApp, defineComponent, h, inject, KeepAlive, onMounted, ref } from 'vue'
+import { createApp, defineComponent, h, KeepAlive, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { defineRefresh } from '../src/source'
 import type { RefreshHandle, RefreshResult } from '../src/public-types'
-import { createRefreshManager, managerKey, useRefresh } from '../src/vue'
+import { createRefreshManager, currentCore, useRefresh } from '../src/vue'
 import type { RefreshCore } from '../src/core'
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
@@ -58,7 +58,7 @@ export interface ShellBridge {
  */
 function mountHarness(): void {
   const controlled = params.get('mode') === 'controlled'
-  const every = Number(params.get('every') ?? (controlled ? 60_000 : params.has('test') ? 120 : 2_000))
+  const every = ref(Number(params.get('every') ?? (controlled ? 60_000 : params.has('test') ? 120 : 2_000)))
   const timeout = Number(params.get('timeout') ?? 10_000)
   const calls: Array<{ id: number; signal: AbortSignal; finished: boolean; resolve: (value: Quote) => void }> = []
   const events: string[] = []
@@ -105,7 +105,7 @@ function mountHarness(): void {
   const Widget = defineComponent({
     props: { label: { type: String, required: true } },
     setup(props) {
-      core = inject(managerKey)!.core
+      core = currentCore()!
       const enabled = ref(true)
       const draftSymbol = ref('DEMO')
       const task = useRefresh(source, { enabled, every, onError: () => { events.push('后台请求失败，等待下一周期') } })
@@ -248,7 +248,7 @@ function mountShell(): void {
 
   const Shell = defineComponent({
     setup() {
-      core = inject(managerKey)!.core
+      core = currentCore()!
       return () => h('main', [
         h('p', { class: 'eyebrow' }, '真实 Vue · HTTP · 三个代表页面'),
         h('h1', '统一刷新管理：代表页面'),

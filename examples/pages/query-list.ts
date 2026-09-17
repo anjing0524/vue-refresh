@@ -39,7 +39,7 @@ export const QueryListPage = defineComponent({
 
     const task = useRefresh(listSource, {
       enabled,
-      every: 1_500,
+      every: ref(1_500),
       onError: error => {
         // 框架只通知、从不写 enabled；「失败关闭」是页面在 onError 里自己做的决定。
         if (error.origin === 'request') {

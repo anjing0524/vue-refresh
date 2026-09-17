@@ -12,9 +12,6 @@ export type ReadonlySnapshot<T> =
   T extends (...args: never[]) => unknown ? T :
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
 
-/** 可以是值、只读 Ref 或 getter；Vue 适配层统一解包。 */
-export type RefreshInput<T> = T | Readonly<Ref<T>> | (() => T)
-
 /**
  * 错误的来源：**哪一步失败了**。
  * - `request`：共享请求失败（含框架上限到期）；
@@ -88,21 +85,15 @@ export interface RefreshDisplay<P extends object, T> {
 }
 
 /**
- * 组件刷新需求配置。两道输入都可以是响应式的：
- * - 字段：写成 Ref / getter，框架在运行期重新读取；
- * - 整个对象：把对象本身（或它的 Ref / getter）交给 `useRefresh` 的 `options`，类型是
- *   `RefreshInput<RefreshOptions>`；替换 `options.value` 会按新对象重新协调。
+ * 组件刷新需求配置。**两项都是 `Ref`，且都必需**：格式固定，框架只读 `.value`，不猜、不转换。
+ * 改 `enabled.value` 或 `every.value` 都会按新配置重新协调（暂停页仍可刷新一次；改频率立刻生效）。
+ * 浏览器可见性由框架自己监听，调用方不需要也不应该再声明一层。
  */
 export interface RefreshOptions {
   /** 唯一开启意愿。框架只读取它，**从不写入**。 */
-  readonly enabled: RefreshInput<boolean>
-  /**
-   * 刷新间隔（毫秒）；只接受正安全整数，不自动转换或取整。
-   * 只在开启意愿为真时必需：`enabled` 为假时可以省略；省略而开启意愿为真按配置非法拒绝。
-   */
-  readonly every?: RefreshInput<number>
-  /** 额外可见条件（如自定义页签）；缺省视为可见。 */
-  readonly visible?: RefreshInput<boolean>
+  readonly enabled: Ref<boolean>
+  /** 刷新间隔（毫秒）；只接受正安全整数，不自动转换或取整。 */
+  readonly every: Ref<number>
   /** 错误通知；框架立即观察其异步拒绝，但不等待完成。每次通知都重新读取本字段。 */
   readonly onError?: (error: RefreshError) => void | Promise<void>
 }

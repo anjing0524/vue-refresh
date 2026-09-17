@@ -67,10 +67,9 @@ app.use(refresh)
 if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
 ```
 
-每个组件在同步 setup 中调用 `useRefresh`；`enabled` / `every` / `visible` 都支持值、Ref 或 getter，
-整个 `options` 同样支持（`RefreshInput<RefreshOptions>`，传 Ref 时替换 `options.value` 即按新对象重新协调），
-框架只读它们、从不写入。只监听这三项配置，不监听参数或表单。
-`every` 只在 `enabled` 为真时必需：只手动刷新的页面可以整个省略它，开启而省略按配置非法拒绝。
+每个组件在同步 setup 中调用 `useRefresh`，第二个参数格式固定：`enabled` 与 `every` **都是 `Ref`，且都必需**。
+框架只读它们的 `.value`、从不写入；改任一项就按新配置重新协调（`computed` 也是 `Ref`，所以响应式组合不受影响）。
+只监听这两项配置，不监听参数或表单。浏览器可见性由框架自己监听，调用方不再声明第二层可见条件。
 
 `submit` 同步声明身份（同参重复声明幂等，参数被拒时不改动任何状态）；`refresh` 返回 success / error / cancelled，
 取消立即结算且不携带 DTO。关闭 `enabled` 只退订、**不结算**已发起的刷新要求，因此暂停页仍能刷新一次。
@@ -123,13 +122,13 @@ pnpm dev
 |---|---|
 | pnpm typecheck | 通过，0 错误。`tests/types.ts` 的 `@ts-expect-error` 反例（缺字段/字段类型/旧元组调用/Source 不变性/DTO/readonly/refresh 不接受参数且结算不含 DTO）一并被校验 |
 | pnpm test | 通过：36 个用例全绿（`tests/core.test.ts` 29、`tests/vue.test.ts` 7），覆盖 A01–A18。核心用例直接驱动 `RefreshCore` 并提供配置快照；Vue 用例用无 DOM 的自定义渲染器 ＋ 真实 KeepAlive，安装路径用最小 `document` 替身，不冒充真实可见性测试 |
-| pnpm build | 通过。生成 `dist/index.js`（12.49 kB，12487 字节）与 5 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态） |
+| pnpm build | 通过。生成 `dist/index.js`（12.00 kB，11999 字节）与 5 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态） |
 | pnpm build:demo | 通过。生成 `dist-demo/` 演示页面（四个视图：查询列表、行情面板、双组件共享、B09 组合） |
 | pnpm test:browser | 通过：真实 Chrome 12 条场景全绿——三条代表页面交互（`tests/pages.spec.ts`）＋ 八条受控场景（`tests/refresh.spec.ts`：暂停后显式刷新、满槽排队、真实 HTTP 共享与恢复、真实传输超时、旧响应晚到、真实结束放槽、卸载清理、祖先 KeepAlive 失活与受控 `visibilitychange`）。这些场景在根契约重写后**未改一行**仍然通过 |
-| pnpm complexity | 5 个源文件、980 行、104 个结构分支、最大函数圈复杂度 11 |
+| pnpm complexity | 5 个源文件、959 行、99 个结构分支、最大函数圈复杂度 11 |
 | node scripts/benchmark.mjs | 24 订阅 / 8 身份 / every=25ms / maxConcurrent=4，3 次 × 2s：load 中位 635 次（收敛比 0.99；按订阅计的反事实 1920 次）、在途峰值 4（框架 `running` 投影峰值同为 4，未超上限）、结束瞬间 8 个共享实例 / 24 个句柄、**释放后残留全 0**；事件循环延迟 mean 1.08ms / p99 1.47ms / max 5.11ms。规模可用 `--subscriptions/--identities/--duration/--every/--runs` 改；**不设性能阈值**，只在真实在途超过 `maxConcurrent` 或释放后有残留时以非零码退出 |
-| 阶段 15 交付产物 | `pnpm build` ＋ `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：9 个条目 = `dist/` 7 个（`index.js` 12.49 kB，12487 字节、sourcemap、5 个 `.d.ts`）＋ `package.json` ＋ README。最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行，不写在这里——README 由 npm 强制打进包内，把包自身哈希写进包内文件没有解 |
-| 包级导入（干净消费方） | 仓库外消费工程只安装 tarball 与 `vue@3.5.42`（不再需要状态库）：SSR 渲染成功且 0 次 `load`、`dispose` 后 `readSnapshot` 返回 `undefined`；最小浏览器环境（`document.hidden=false`）下挂载 ＋ `submit` 交付 `price=3`、`readSnapshot` 可读。**换包必删消费方的 `package-lock.json`**：`file:` 依赖的完整性写在锁文件里，不删会复用上一版解包内容而给出假通过 |
+| 阶段 15 交付产物 | `pnpm build` ＋ `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：9 个条目 = `dist/` 7 个（`index.js` 12.00 kB，11999 字节、sourcemap、5 个 `.d.ts`）＋ `package.json` ＋ README。最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行，不写在这里——README 由 npm 强制打进包内，把包自身哈希写进包内文件没有解 |
+| 包级导入（干净消费方） | 仓库外消费工程只安装 tarball 与 `vue@3.5.42`（不再需要状态库）：最小浏览器环境（`document.hidden=false`）下挂载 ＋ `submit` 交付 `price=3`、`readSnapshot` 可读。**换包必删消费方的 `package-lock.json`**：`file:` 依赖的完整性写在锁文件里，不删会复用上一版解包内容而给出假通过 |
 | TS 4.9 类型消费（G03 阻断节点） | 实测：`typescript@4.9.5` ＋ `module/moduleResolution: Node16` ＋ `strict` ＋ `skipLibCheck` 下 `tsc --noEmit` **本包 5 个声明文件零错误**（含 `@ts-expect-error` 反例：缺字段、Source 不变性、`refresh` 不接受参数）；不再需要状态库，因此没有需要跳过的 peer 校验。Vue 3.5.42 自身的 `.d.ts` 要求 TS ≥5.4，故 `skipLibCheck: true` 是前置条件。确认人 2026-09-16 裁决：声明只限定到本包自身的类型（自 TS 4.9 起可用，已实测） |
 | pnpm check:docs | 通过。一致性门禁清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准；还会打印叶子→测试标题的追溯报告 |
 

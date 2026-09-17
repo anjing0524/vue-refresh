@@ -1,43 +1,42 @@
 import {
-  getCurrentInstance, inject, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, toValue, watch,
+  getCurrentInstance, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, watch,
 } from 'vue'
-import type { App, InjectionKey } from 'vue'
+import type { App } from 'vue'
 import { RefreshCore, report } from './core.ts'
 import type { Config, Handle } from './core.ts'
 import { prepareParameters } from './source.ts'
 import { ErrorOrigin } from './public-types.ts'
 import type {
-  ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshInput, RefreshManager,
-  RefreshOptions, RefreshSource,
+  ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions, RefreshSource,
 } from './public-types.ts'
 
 /**
  * Vue 适配层：把响应式配置与组件生命周期翻译成框架需求，并独立持有本页快照。
  *
- * 只跟踪 `enabled` / `every` / `visible` 三项配置，不跟踪参数、表单草稿或结果；
+ * 只跟踪 `enabled` 与 `every` 两项配置（都是 `Ref`），不跟踪参数、表单草稿或结果；
  * 参数只在 `submit` 时准备一次。核心只读适配层交出的配置快照，不重新调用业务 getter。
+ * 本库是 SPA 单例：当前协调者放在模块级变量里，组件适配不经过 `provide` / `inject`（ADR-37）。
  */
 
-/** 注入槽位；槽位对象稳定，同一 App 重建协调者时原地替换内容。 */
-export const managerKey: InjectionKey<{ core: RefreshCore }> = Symbol('refresh-manager')
+/** 当前生效的协调者；`install` 写入，已销毁时可被下一个实例替换（HMR、会话切换）。 */
+let current: RefreshCore | null = null
 
-/** 每个 App 只 `provide` 一次。 */
-const slots = new WeakMap<App, { core: RefreshCore }>()
+/** 读当前生效的协调者；给演示面板与基准脚本用，不在包导出面里。 */
+export function currentCore(): RefreshCore | null {
+  return current
+}
 
 /**
  * 读三项配置。任一项读不出或值非法都按「配置非法」处理（返回 `null`）：页面可以用 `computed`
  * 表达暂态条件，框架下一轮再读，绝不把读不到的开关猜成关闭。
  */
-function readConfig(options: RefreshInput<RefreshOptions>): Config | null {
+function readConfig(options: RefreshOptions): Config | null {
   try {
-    const resolved = toValue(options)
-    const enabled: unknown = toValue(resolved.enabled)
-    const visible: unknown = resolved.visible === undefined ? true : toValue(resolved.visible)
-    const every: unknown = resolved.every === undefined ? null : toValue(resolved.every)
-    if (typeof enabled !== 'boolean' || typeof visible !== 'boolean') return null
-    if (every !== null && (typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1)) return null
-    if (enabled && every === null) return null
-    return { enabled, every, visible }
+    const enabled: unknown = options.enabled.value
+    const every: unknown = options.every.value
+    if (typeof enabled !== 'boolean') return null
+    if (typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) return null
+    return { enabled, every }
   } catch {
     return null
   }
@@ -45,12 +44,11 @@ function readConfig(options: RefreshInput<RefreshOptions>): Config | null {
 
 export function useRefresh<P extends object, T>(
   source: RefreshSource<P, T>,
-  options: RefreshInput<RefreshOptions>,
+  options: RefreshOptions,
 ): RefreshHandle<P, T> {
   if (!getCurrentInstance()) throw new Error('useRefresh must run synchronously in component setup')
-  const binding = inject(managerKey)
-  if (!binding || binding.core.isDisposed()) throw new Error('A live refresh coordinator must be installed')
-  const core = binding.core
+  if (!current || current.isDisposed()) throw new Error('A live refresh coordinator must be installed')
+  const core = current
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
 
   let snapshot: Config | null = null
@@ -62,7 +60,7 @@ export function useRefresh<P extends object, T>(
     source,
     config: () => snapshot,
     publish: value => { display.value = value },
-    onError: error => toValue(options).onError?.(error),
+    onError: error => options.onError?.(error),
     cleanup: null,
     operationId: 0,
     parameters: null,
@@ -115,26 +113,18 @@ export function createRefreshManager(options: { readonly maxConcurrent: number }
         throw new Error('Refresh coordinator installation conflict')
       }
       if (installed === app) return // 同实例同 App 重复安装无副作用。
-      const slot = slots.get(app)
-      if (slot) {
-        // 上一个实例已销毁则原地接管（HMR、会话切换）；仍活跃则拒绝，被拒的安装不改动已有绑定。
-        if (!slot.core.isDisposed()) throw new Error('Refresh coordinator installation conflict')
-        slot.core = core
-      } else {
-        const created = { core }
-        slots.set(app, created)
-        app.provide(managerKey, created)
+      // 单例：现有协调者还活着就拒绝；已销毁（HMR、会话切换）就直接替换。
+      if (current !== null && !current.isDisposed() && current !== core) {
+        throw new Error('Refresh coordinator installation conflict')
       }
+      current = core
       installed = app
 
-      if (typeof document === 'undefined') {
-        core.setVisible(false) // SSR：不可见，因此不发请求，也不注册监听。
-      } else {
-        const onVisibilityChange = (): void => core.setVisible(!document.hidden)
-        document.addEventListener('visibilitychange', onVisibilityChange)
-        core.setCleanup(() => document.removeEventListener('visibilitychange', onVisibilityChange))
-        core.setVisible(!document.hidden)
-      }
+      // 浏览器可见性由框架自己监听；本库是 SPA，不再有 SSR 分支。
+      const onVisibilityChange = (): void => core.setVisible(!document.hidden)
+      document.addEventListener('visibilitychange', onVisibilityChange)
+      core.setCleanup(() => document.removeEventListener('visibilitychange', onVisibilityChange))
+      core.setVisible(!document.hidden)
       app.onUnmount(() => core.dispose())
     },
 

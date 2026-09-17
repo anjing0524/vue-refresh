@@ -33,7 +33,7 @@ interface Page {
 function page(
   core: RefreshCore,
   source: RefreshSource<object, unknown>,
-  config: Config | null = { enabled: true, every: 100_000, visible: true },
+  config: Config | null = { enabled: true, every: 100_000 },
   hooks: { publish?: (value: RefreshDisplay<object, unknown>) => void; onError?: (error: RefreshError) => unknown } = {},
 ): Page {
   let current = config
@@ -238,13 +238,13 @@ test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
   const core = newCore(2)
-  const view = page(core, source, { enabled: true, every: 15, visible: true })
+  const view = page(core, source, { enabled: true, every: 15 })
 
   view.submit({ id: 1 })
   await settle()
   assert.equal(calls, 1)
 
-  view.set({ enabled: false, every: null, visible: true })
+  view.set({ enabled: false, every: 100_000 })
   await settle()
   await sleep(40)
   assert.equal(calls, 1, '暂停后不再有周期请求')
@@ -336,7 +336,7 @@ test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', asyn
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
   const core = newCore(2)
-  const view = page(core, source, { enabled: true, every: 30, visible: true })
+  const view = page(core, source, { enabled: true, every: 30 })
 
   view.submit({ id: 1 })
   await settle()
@@ -364,7 +364,7 @@ test('A05 暂停只退订：已发起的刷新要求继续等结果，实例不�
   const refreshing = view.refresh()
   await settle()
 
-  view.set({ enabled: false, every: null, visible: true })
+  view.set({ enabled: false, every: 100_000 })
   await settle()
   assert.equal(view.handle.subscription, null, '暂停即退订')
   assert.equal(core.snapshot().resources.length, 1, '刷新要求还没结算，实例不释放、在途不取消')
@@ -388,7 +388,7 @@ test('A13 共享请求失败：保留旧画面、通知页面、下个周期继�
     load: async () => { calls++; if (fail) throw new Error('boom'); return 5 },
   })
   const core = newCore(2)
-  const view = page(core, source, { enabled: true, every: 20, visible: true })
+  const view = page(core, source, { enabled: true, every: 20 })
 
   view.submit({ id: 1 })
   await settle()
@@ -451,7 +451,7 @@ test('A08 轮询不重叠：上一轮没有结束时不再发起', async () => {
     load: () => { calls++; return new Promise<number>(resolve => resolvers.push(resolve)) },
   })
   const core = newCore(2)
-  const view = page(core, source, { enabled: true, every: 5, visible: true })
+  const view = page(core, source, { enabled: true, every: 5 })
 
   view.submit({ id: 1 })
   await settle()
@@ -493,8 +493,8 @@ test('A07 有效间隔取所有订阅的最小值', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
   const quote = source
   const core = newCore(2)
-  const slow = page(core, quote, { enabled: true, every: 100_000, visible: true })
-  const fast = page(core, quote, { enabled: true, every: 10, visible: true })
+  const slow = page(core, quote, { enabled: true, every: 100_000 })
+  const fast = page(core, quote, { enabled: true, every: 10 })
 
   slow.submit({ id: 1 })
   await settle()
@@ -593,7 +593,7 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   const source = defineRefresh<{ id: number }, number>({ load: async () => 3 })
   const quote = source
   const core = newCore(2)
-  const hostile = page(core, quote, { enabled: true, every: 100_000, visible: true }, {
+  const hostile = page(core, quote, { enabled: true, every: 100_000 }, {
     publish: () => { throw new Error('render failed') },
   })
   const normal = page(core, quote)
@@ -608,7 +608,7 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   // 失败通知里的 onError 抛错同样被隔离，订阅与开启意愿都不受影响。
   let notified = 0
   const failing = defineRefresh<{ id: number }, number>({ load: async () => { throw new Error('down') } })
-  const victim = page(core, failing, { enabled: true, every: 100_000, visible: true }, {
+  const victim = page(core, failing, { enabled: true, every: 100_000 }, {
     onError: () => { notified++; throw new Error('handler failed') },
   })
   victim.submit({ id: 1 })

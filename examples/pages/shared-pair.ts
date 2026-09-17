@@ -2,10 +2,10 @@
  * 代表页面 3 · 双组件共享（附「无启停按钮」的 B09 组合，单独成视图）。
  *
  * 展示：1s/5s 同参共享、切换品种、单页暂停、全部退订、重新进入、Store 快照隔离。
- * 「暂停本页」演示整个 options 可以是 Ref（换对象，而不是改字段）。
+ * 「暂停本页」演示改 "enabled.value"：两项配置都是 Ref，改值即改配置。
  * 页面不判断共享：两份快照显示同一个请求号，就是框架把一次 load 交付给了两个订阅。
  */
-import { defineComponent, h, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
+import { computed, defineComponent, h, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRefresh } from '../../src/vue'
 import { ageLine, quoteSource, readShared } from '../sources'
 import type { QuoteParams, QuoteResult } from '../sources'
@@ -26,12 +26,12 @@ const PairCard = defineComponent({
   },
   setup(props, { emit }) {
     const failures = ref(0)
-    // 整个 options 也可以是 Ref：下面的「暂停/恢复」换掉整个对象，框架按新对象重新协调。
-    const options = ref<RefreshOptions>({
-      enabled: true,
-      every: props.every,
+    // 两项配置都是 Ref：改 .value 就是改配置。
+    const options: RefreshOptions = {
+      enabled: ref(true),
+      every: computed(() => props.every),
       onError: error => { if (error.origin === 'request') failures.value += 1 },
-    })
+    }
     const task = useRefresh(quoteSource, options)
     const params = (symbol: string): QuoteParams => ({ account: 'demo', symbol })
     onMounted(() => task.submit(params(props.symbol)))
@@ -51,8 +51,8 @@ const PairCard = defineComponent({
         h('p', { 'data-testid': `sp-failures-${props.label}` }, `后台失败：${failures.value} 次`),
         h('button', {
           'data-testid': `sp-toggle-${props.label}`,
-          onClick: () => { options.value = { ...options.value, enabled: !options.value.enabled } },
-        }, options.value.enabled ? '暂停本页' : '恢复本页'),
+          onClick: () => { options.enabled.value = !options.enabled.value },
+        }, options.enabled.value ? '暂停本页' : '恢复本页'),
       ])
     }
   },
@@ -139,7 +139,7 @@ export const B09View = defineComponent({
     const failures = ref(0)
     const task = useRefresh(quoteSource, {
       enabled,
-      every: 5_000,
+      every: ref(5_000),
       onError: error => {
         if (error.origin !== 'request') return
         failures.value += 1

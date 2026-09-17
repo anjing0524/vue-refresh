@@ -4,6 +4,7 @@ import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose
 import { createRefreshManager, useRefresh } from '../src/vue.ts'
 import { defineRefresh } from '../src/source.ts'
 import type { RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
+import type { Ref } from 'vue'
 
 /** 这几个用例验证浏览器路径：`install` 靠 `typeof document` 区分 SSR，因此先提供最小替身。 */
 Object.defineProperty(globalThis, 'document', {
@@ -51,7 +52,7 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled, every: 100_000 })
+      api = useRefresh(quote, { enabled, every: ref(100_000) })
       onScopeDispose(() => { released++ })
       return () => h('div')
     },
@@ -88,7 +89,7 @@ test('A04/A05 配置非法：只报告一次并停止订阅，修正后按当前
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: true, every, onError: error => { errors.push(error) } })
+      api = useRefresh(quote, { enabled: ref(true), every, onError: error => { errors.push(error) } })
       return () => h('div')
     },
   }))
@@ -112,16 +113,17 @@ test('A04/A05 配置非法：只报告一次并停止订阅，修正后按当前
   app.unmount()
 })
 
-test('A05/A06 整个 options 也可以是 Ref：换掉对象按新配置重新协调', async () => {
+test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接入', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>({ load: async () => { loads++; return 7 } })
   const manager = newManager({ maxConcurrent: 1 })
-  const options = ref<RefreshOptions>({ enabled: true, every: 100_000 })
+  const enabled = ref(true)
+  const every = ref(100_000)
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, options)
+      api = useRefresh(quote, { enabled, every })
       return () => h('div')
     },
   }))
@@ -132,12 +134,12 @@ test('A05/A06 整个 options 也可以是 Ref：换掉对象按新配置重新�
   await tick()
   assert.equal(loads, 1)
 
-  options.value = { enabled: false, every: 100_000 }
+  enabled.value = false
   await tick()
   assert.equal(api.display.value?.data, 7, '暂停保留画面')
   assert.equal(manager.readSnapshot(quote, { symbol: 'A' }), undefined, '失去最后一个需求即清实例')
 
-  options.value = { enabled: true, every: 100_000 }
+  enabled.value = true
   await tick()
   assert.equal(loads, 2, '重新开启恢复订阅并首查')
   app.unmount()
@@ -152,7 +154,7 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
 
   const Inner = defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: true, every: 100_000 })
+      api = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
       return () => h('div')
     },
   })
@@ -180,16 +182,17 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
   app.unmount()
 })
 
-test('A04 visible 为假时不订阅；改回真时接入', async () => {
+test('A04 运行期读到非布尔时按配置非法处理：不订阅、只通知一次、修正后恢复', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>({ load: async () => { loads++; return 1 } })
   const manager = newManager({ maxConcurrent: 1 })
-  const visible = ref(false)
+  const enabled = ref<boolean>(true)
+  const errors: Array<{ origin: string }> = []
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: true, every: 100_000, visible })
+      api = useRefresh(quote, { enabled, every: ref(100_000), onError: error => { errors.push(error) } })
       return () => h('div')
     },
   }))
@@ -198,11 +201,21 @@ test('A04 visible 为假时不订阅；改回真时接入', async () => {
   await tick()
   api.submit({ symbol: 'A' })
   await tick()
-  assert.equal(loads, 0, '不满足可见条件就不订阅')
-
-  visible.value = true
-  await tick()
   assert.equal(loads, 1)
+
+  // 类型说谎的现场：store 未 hydrate 时字段声明是 boolean，运行期读到 undefined。
+  ;(enabled as Ref<unknown>).value = undefined
+  await tick()
+  await tick()
+  assert.equal(errors.length, 1, '连续非法只通知一次')
+  assert.equal(errors[0]?.origin, 'configuration')
+  api.submit({ symbol: 'B' })
+  await tick()
+  assert.equal(loads, 1, '配置非法时不订阅')
+
+  enabled.value = true
+  await tick()
+  assert.equal(loads, 2, '修正后按当前资格恢复')
   app.unmount()
 })
 
@@ -226,7 +239,7 @@ test('A17 未安装协调者时 useRefresh 直接抛错', () => {
   const quote = defineRefresh<{ symbol: string }, number>({ load: async () => 1 })
   const app = renderer.createApp(defineComponent({
     setup() {
-      assert.throws(() => { useRefresh(quote, { enabled: true, every: 1000 }) }, /installed/)
+      assert.throws(() => { useRefresh(quote, { enabled: ref(true), every: ref(1000) }) }, /installed/)
       return () => h('div')
     },
   }))

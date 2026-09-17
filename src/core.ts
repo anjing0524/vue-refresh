@@ -26,8 +26,7 @@ import type { Parameters } from './source.ts'
 /** 配置快照；读不出（getter 抛错或值非法）时为 `null`，此时既不订阅也不自动刷新。 */
 export interface Config {
   readonly enabled: boolean
-  readonly every: number | null
-  readonly visible: boolean
+  readonly every: number
 }
 
 /** 组件需求句柄：本页声明的身份、当前订阅与交付出口。字段都由本文件写，适配层只读。 */
@@ -249,7 +248,7 @@ export class RefreshCore {
     if (config === null) {
       return immediate({ status: 'error', origin: ErrorOrigin.Configuration, error: new TypeError('Invalid refresh configuration') })
     }
-    if (!(handle.active && this.visible && config.visible)) {
+    if (!(handle.active && this.visible)) {
       return immediate({ status: 'cancelled', reason: CancelReason.Unavailable })
     }
     const parameters = handle.parameters
@@ -339,21 +338,20 @@ export class RefreshCore {
 
     const config = handle.config()
     const parameters = handle.parameters
-    const every = config?.every ?? null
     const subscribed = handle.subscription
-    if (!present || !config?.enabled || !config.visible || every === null || parameters === null) {
+    if (!present || !config?.enabled || parameters === null) {
       if (subscribed) this.unsubscribe(handle)
       return
     }
     if (subscribed) {
       // 改频率只更新间隔：保留在途请求，由下一次调度按新间隔重算到期。
-      subscribed.every = every
+      subscribed.every = config.every
       return
     }
     const resource = this.resourceFor(handle.source, parameters)
     // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值，且已冻结）。
     handle.parameters = resource.parameters
-    handle.subscription = { resource, every }
+    handle.subscription = { resource, every: config.every }
     resource.subscribers.add(handle)
     // 已有结果立即交付（恢复时拿历史结果，不重复取数）；没有结果时交给这一轮 flush 的到期遍历首查。
     if (resource.entry) this.deliverTo(handle, resource, resource.entry)

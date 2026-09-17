@@ -23,7 +23,7 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 类型回边只报告（运行期被擦除）。本版没有需要登记的例外边。
 
 `core.ts` 按职责分成七个分段：状态观测与生命周期、页面操作、只读定位与观测面、需求关系、后台执行、刷新要求、调度。
-全部可变状态都在 `core.ts`；`vue.ts` 只用公开入口与注入槽位，`source.ts` 是无状态函数的边界。
+全部可变状态都在 `core.ts`；`vue.ts` 只读公开入口与模块级单例（当前协调者），`source.ts` 是无状态函数的边界。
 
 ## 2. 模块职责
 
@@ -276,8 +276,7 @@ structuredClone → stringify（`fast-json-stable-stringify`：键排序 ＋ 数
 
 ### 6.1 配置快照
 
-- watch 源只读 `enabled` / `every` / `visible`；整个 `options` 也可以是值、Ref 或 getter，
-  替换 `options.value` 会按新对象重新协调。
+- watch 源只读 `options.enabled.value` 与 `options.every.value`；两项都是必填的 `Ref`，改值即改配置。
 - 任一项读不出或值非法时快照为 `null`：不订阅、不自动刷新、连续非法只通知一次，修正后按当前资格恢复。
 - 读不到的开关绝不推断成 `false`：页面可以用 `computed` 表达暂态条件（例如
   `enabled: computed(() => store.ready && store.on)`），框架下一轮再读。
@@ -297,13 +296,13 @@ structuredClone → stringify（`fast-json-stable-stringify`：键排序 ＋ 数
 - 重新显示时：实例仍在则交付已有结果并按间隔调度；已销毁则重建并首查。
 - 自定义页签由调用方提供响应式可见条件；初始隐藏时不请求。
 
-### 6.3 安装与 SSR
+### 6.3 安装与单例
 
 - 安装顺序固定为「先检查后修改」：被拒的安装不破坏已有合法绑定，也不新增监听或请求。
-- 每个协调者只注册一个 `visibilitychange` 监听；无 `document` 时固定为不可见。
-- 每个 App 只 `provide` 一次槽位对象；同 App 重建协调者时，旧实例已销毁则原地替换内容，仍活跃则拒绝。
+- 每个协调者只注册一个 `visibilitychange` 监听。
+- 当前协调者放在模块级变量里：安装时若现有实例还活着就拒绝，已销毁则直接替换（HMR、会话切换），
+  组件适配不经过 `provide` / `inject`。
 - `dispose` 先失效再清理自身监听与资源；卸载钩子调用 `dispose`。
-- SSR 不创建监听、Timer 或请求。
 
 ### 6.4 通知隔离
 

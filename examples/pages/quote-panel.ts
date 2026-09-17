@@ -5,7 +5,7 @@
  * 后台首查失败继续、失活冻结（KeepAlive 切走切回）。
  * 面板没有启停入口：开启意愿对组件是常量，框架从不改写它。
  */
-import { KeepAlive, defineComponent, h, onMounted, ref, watch } from 'vue'
+import { KeepAlive, computed, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { useRefresh } from '../../src/vue'
 import { ageLine, quoteSource } from '../sources'
 import type { QuoteParams } from '../sources'
@@ -22,9 +22,9 @@ const QuoteCard = defineComponent({
     let submits = 0
     const failures = ref(0)
     const task = useRefresh(quoteSource, {
-      enabled: true,
+      enabled: ref(true),
       // 频率是响应式输入：改动它就走配置变化路径，由框架替换当前任务。
-      every: () => props.every,
+      every: computed(() => props.every),
       onError: error => {
         if (error.origin !== 'request') return
         failures.value += 1

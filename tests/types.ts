@@ -6,7 +6,7 @@ interface Quote { price: number }
 const source = defineRefresh<Params, Quote>({ validate: p => p.account.length > 0, async load(args) { return { price: args.symbol.length } } })
 // Compile-only function: never executed outside component setup.
 function contract() {
-  const task = useRefresh(source, { enabled: ref(true), every: 1000 })
+  const task = useRefresh(source, { enabled: ref(true), every: ref(1000) })
   // @ts-expect-error validation belongs to the fixed source definition
   useRefresh(source, { enabled: ref(true), every: 1000, validate: () => true })
   task.submit({ account: 'demo', symbol: 'A', filter: { page: 1 } })

@@ -12,8 +12,8 @@
 // 用法：node scripts/benchmark.mjs [--duration 2000] [--subscriptions 24] [--identities 8]
 //                                [--every 25] [--runs 3]
 import { monitorEventLoopDelay } from 'node:perf_hooks'
-import { createRenderer, defineComponent, h, inject, onMounted } from 'vue'
-import { createRefreshManager, managerKey } from '../src/vue.ts'
+import { createRenderer, defineComponent, h, onMounted } from 'vue'
+import { createRefreshManager, currentCore } from '../src/vue.ts'
 import { defineRefresh } from '../src/source.ts'
 import { useRefresh } from '../src/vue.ts'
 
@@ -76,7 +76,7 @@ async function measure() {
   const Card = defineComponent({
     props: { identity: { type: Number, required: true } },
     setup(props) {
-      core = inject(managerKey).core
+      core = currentCore()
       // Node 没有 `document`，安装时会按 SSR 处理为不可见；这里显式声明可见，
       // 与 tests/vue.test.ts 的做法一致（自定义渲染器不冒充浏览器可见性测试）。
       core.setVisible(true)
