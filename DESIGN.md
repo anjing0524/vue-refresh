@@ -226,6 +226,10 @@ structuredClone → stringify（`fast-json-stable-stringify`：键排序 ＋ 数
 - 原生支持的 `Date` / `Map` / 循环等可被复制，**不表示**框架验证了业务合法性；不支持的值由原生复制抛错，
   沿用共享请求失败处理；`null` 是有效结果。
 - 结果 → 每页与 `readSnapshot` 分别复制；不冻结业务原对象，不用 JSON 来回 `parse`。
+- **参数与结果的所有权不同**：结果每个接收者复制一份（`structuredClone`），参数按**引用**交付——`deliverTo` 把
+  `resource.parameters.args` 直接交给每个页面，它同时是每一轮 `load` 的实参。因此参数在提交边界被 `deepFreeze`
+  冻结：不冻结的话，一个页面写自己的 `display.args` 就会同时改掉别人的画面、下一轮请求的参数与身份键所描述的值。
+  这也是它必须**深**冻结（`Object.freeze` 是浅的）而结果只需逐份复制的原因。
 - 退订冻结依靠独立数据快照，不能直接绑定共享结果对象，也不能只复制最外层对象。
 
 ### 4.4 复杂度
