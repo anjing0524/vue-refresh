@@ -350,6 +350,8 @@ export class RefreshCore {
       return
     }
     const resource = this.resourceFor(handle.source, parameters)
+    // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值，且已冻结）。
+    handle.parameters = resource.parameters
     handle.subscription = { resource, every }
     resource.subscribers.add(handle)
     // 已有结果立即交付（恢复时拿历史结果，不重复取数）；没有结果时交给这一轮 flush 的到期遍历首查。

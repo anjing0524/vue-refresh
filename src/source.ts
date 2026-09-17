@@ -36,25 +36,20 @@ export function sourceRuntime(source: object): SourceRuntime {
   return source as SourceRuntime
 }
 
-/** 只为阻断循环与病态嵌套，**不是业务上限**（G01 已关闭：不因键大而拒绝合法查询）。 */
-const MAX_PARAMETER_DEPTH = 1_000
-
 /**
- * 稳定编码：对象键排序、数组保序；值域与深度非法即抛。**纯函数**，不改动输入。
+ * 稳定编码：对象键排序、数组保序；值域非法即抛。**纯函数**，不改动输入。
  *
- * `JSON.stringify` 无法重排对象键，所以排序只能自己走一遍；守卫与深度检查顺路做完，
- * 因此这一趟同时承担「值域守卫 ＋ 循环/病态嵌套守卫 ＋ 稳定编码」。
+ * `JSON.stringify` 无法重排对象键，所以排序只能自己走一遍；值域守卫顺路做完，
+ * 因此这一趟同时承担「值域守卫 ＋ 稳定编码」。不设深度上限：循环引用会让递归耗尽调用栈，
+ * 引擎抛出的 `RangeError` 与其它非法参数一样处理。
  */
-function canonical(value: unknown, depth: number): string {
+function canonical(value: unknown): string {
   if (value === null) return 'null'
   if (typeof value === 'string') return JSON.stringify(value)
   if (typeof value === 'boolean') return value ? 'true' : 'false'
   if (typeof value === 'number') return canonicalNumber(value)
   if (typeof value !== 'object') throw new TypeError('Parameters require JSON data')
-  if (depth > MAX_PARAMETER_DEPTH) throw new RangeError('Parameters must be acyclic JSON data')
-  return Array.isArray(value)
-    ? canonicalArray(value, depth)
-    : canonicalRecord(value as Record<string, unknown>, depth)
+  return Array.isArray(value) ? canonicalArray(value) : canonicalRecord(value as Record<string, unknown>)
 }
 
 function canonicalNumber(value: number): string {
@@ -62,20 +57,20 @@ function canonicalNumber(value: number): string {
   return String(value)
 }
 
-function canonicalArray(value: unknown[], depth: number): string {
+function canonicalArray(value: unknown[]): string {
   const items: string[] = []
-  for (const item of value) items.push(canonical(item, depth + 1))
+  for (const item of value) items.push(canonical(item))
   return `[${items.join(',')}]`
 }
 
-function canonicalRecord(value: Record<string, unknown>, depth: number): string {
+function canonicalRecord(value: Record<string, unknown>): string {
   const prototype = Object.getPrototypeOf(value)
   if (prototype !== Object.prototype && prototype !== null) {
     throw new TypeError('Parameters require JSON records or arrays')
   }
   const entries: string[] = []
   for (const key of Object.keys(value).sort()) {
-    entries.push(`${JSON.stringify(key)}:${canonical(value[key], depth + 1)}`)
+    entries.push(`${JSON.stringify(key)}:${canonical(value[key])}`)
   }
   return `{${entries.join(',')}}`
 }
@@ -97,16 +92,16 @@ function requireRecord(input: object): Record<string, unknown> {
 
 /** 只读定位：只编码，不复制、不冻结、不执行 `validate`。 */
 export function parameterKey(input: object): string {
-  return canonical(requireRecord(input), 1)
+  return canonical(requireRecord(input))
 }
 
 /**
- * 提交边界只执行一次：复制 → 稳定编码（顺路守卫值域、循环与深度）→ 冻结副本 → 可选业务校验。
+ * 提交边界只执行一次：复制 → 稳定编码（顺路守卫值域）→ 冻结副本 → 可选业务校验。
  * 任何一步失败都按非法参数拒绝，不产生实例或后台任务。
  */
 export function prepareParameters(input: object, validate?: (args: object) => boolean): Parameters {
   const args: object = structuredClone(requireRecord(input))
-  const key = canonical(args, 1)
+  const key = canonical(args)
   deepFreeze(args)
   if (validate) {
     const valid: unknown = validate(args)

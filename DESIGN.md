@@ -101,7 +101,7 @@ flowchart LR
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；准备成功后只读 | 提交边界复制/冻结/编码；需求与实例释放后回收 |
 | Handle | `operationId=0`、`parameters=null`、`subscription=null`、`cleanup=null`、`active=false`、`disposed=false` | 全部写入都在 `core.ts` 内：声明与关系由核心写，生命周期走 `activate` / `deactivate`，`cleanup` 走句柄字段；适配层只读它们。`source` / `config` / `publish` / `onError` 是固定端口；`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
-| Resource | `source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`entry=null`、`settledAt=null`、`issued=0`、`task=null` | 首次接入或刷新要求创建；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写 |
+| Resource | `source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`entry=null`、`settledAt=null`、`issued=0`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值且已冻结，`deliverTo` 与 `load` 也只用这一份）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写 |
 | Task | `resource`、`version`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
 | Waiter | `handle`、`min`、`settle` | `refresh` 创建并挂到实例的 `waiters` 上；原生 Promise 首次结算生效；成功后按门槛结算，失败/失去存在/销毁时结算 |
 | Entry | `version`、`data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
@@ -205,13 +205,13 @@ flowchart LR
 提交边界**一次**执行；两件事各由一个函数负责，副作用只出现在其中一处：
 
 ```text
-structuredClone → canonical（纯编码：值域守卫 ＋ 深度守卫 ＋ 键排序/数组保序）
+structuredClone → canonical（纯编码：值域守卫 ＋ 键排序/数组保序）
                 → deepFreeze（唯一副作用：冻结这份副本）
                 → 可选 Source.validate 一次 → Parameters
 ```
 
 对象按键排序编码，数组保持原顺序，因此字段顺序不影响身份、数组顺序影响身份。
-深度守卫（1000 层，根容器记 1）只为阻断循环与病态嵌套，不是可配置的产品承诺（`U15`）。
+**不设内部深度上限**：循环引用会让编码递归耗尽调用栈，引擎抛出的 `RangeError` 按非法参数处理（`U15`）。
 `validate` 每次接纳提交执行一次；轮询、恢复与 `readSnapshot` 都不执行。
 `validate` 返回 Promise 属于契约违约：同步抛错是给调用方的主信号，那个 Promise 也被观察掉，不产生未处理拒绝。
 
