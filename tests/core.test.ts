@@ -2,10 +2,10 @@ import assert from 'node:assert/strict'
 import { afterEach, mock, test } from 'node:test'
 import { RefreshCore } from '../src/core.ts'
 import type { Config, Handle } from '../src/core.ts'
-import { defineRefresh, prepareParameters, sourceRuntime } from '../src/source.ts'
-import type { Parameters, SourceRuntime } from '../src/source.ts'
+import { defineRefresh, prepareParameters } from '../src/source.ts'
+import type { Parameters } from '../src/source.ts'
 import { CancelReason, ErrorOrigin } from '../src/public-types.ts'
-import type { RefreshDisplay, RefreshError, RefreshResult, SubmitResult } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshError, RefreshResult, RefreshSource, SubmitResult } from '../src/public-types.ts'
 
 /** 每个用例结束时销毁核心：周期调度会留下唯一的唤醒 Timer，不销毁的话进程不会退出。 */
 const cores: RefreshCore[] = []
@@ -32,7 +32,7 @@ interface Page {
 
 function page(
   core: RefreshCore,
-  source: SourceRuntime,
+  source: RefreshSource<object, unknown>,
   config: Config | null = { enabled: true, every: 100_000, visible: true },
   hooks: { publish?: (value: RefreshDisplay<object, unknown>) => void; onError?: (error: RefreshError) => unknown } = {},
 ): Page {
@@ -57,7 +57,7 @@ function page(
     handle,
     published,
     errors,
-    submit: args => core.submit(handle, (): Parameters => prepareParameters(args, source.validate)),
+    submit: args => core.submit(handle, (): Parameters => prepareParameters(args, source)),
     refresh: () => core.refresh(handle),
     set(next) { current = next; core.reconcile(handle) },
     get last() { return published.at(-1) },
@@ -79,7 +79,7 @@ const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout
 test('A01/A11 首次订阅立即取一次，并按整体发布交付参数、数据、来源与时间', async () => {
   const core = newCore(2)
   const source = defineRefresh<{ symbol: string }, number>({ load: async () => 7 })
-  const quote = sourceRuntime(source)
+  const quote = source
   const view = page(core, quote)
 
   assert.equal(view.submit({ symbol: 'A' }).status, 'accepted')
@@ -97,7 +97,7 @@ test('A11/A02 同参数的两个组件共享同一次请求，各自拿到独立
   const source = defineRefresh<{ id: number }, { list: number[] }>({
     load: async () => { calls++; return { list: [1, 2] } },
   })
-  const quote = sourceRuntime(source)
+  const quote = source
   const core = newCore(2)
   const first = page(core, quote)
   const second = page(core, quote)
@@ -120,7 +120,7 @@ test('A11/A02 同参数的两个组件共享同一次请求，各自拿到独立
 test('A02 身份是「Source 身份 ＋ 完整参数值」：字段顺序无关，数组顺序有关，不同参数各取一次', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number; tags: string[] }, number>({ load: async () => { calls++; return calls } })
-  const quote = sourceRuntime(source)
+  const quote = source
   const core = newCore(4)
   const first = page(core, quote)
   const second = page(core, quote)
@@ -140,7 +140,7 @@ test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', a
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
@@ -156,7 +156,7 @@ test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', a
 test('A03 参数被拒时返回 rejected，保留已有身份，并按 validation 通知（带声明代次）', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1, validate: args => args.id > 0 })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
@@ -179,7 +179,7 @@ test('A12/A14 在途任务不满足本次刷新：它结束后补一次后继请
     load: () => { calls++; return new Promise<number>(resolve => resolvers.push(resolve)) },
   })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
@@ -204,8 +204,8 @@ test('A14 排队未启动的任务已经算「动作之后启动」，直接满�
     load: () => { calls++; return new Promise<number>(resolve => resolvers.push(resolve)) },
   })
   const core = newCore(1)
-  const blocker = page(core, sourceRuntime(source))
-  const view = page(core, sourceRuntime(source))
+  const blocker = page(core, source)
+  const view = page(core, source)
 
   blocker.submit({ id: 1 })
   await settle()
@@ -228,7 +228,7 @@ test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source), { enabled: true, every: 15, visible: true })
+  const view = page(core, source, { enabled: true, every: 15, visible: true })
 
   view.submit({ id: 1 })
   await settle()
@@ -249,7 +249,7 @@ test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷
 test('A04/A06 浏览器隐藏与组件失活都会当场结算未完成的刷新要求', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: () => new Promise<number>(() => {}) })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
@@ -265,7 +265,7 @@ test('A04/A06 浏览器隐藏与组件失活都会当场结算未完成的刷新
 test('A06 组件失活取消本页未完成的刷新要求，但不改变被暂停页的显式刷新能力', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: () => new Promise<number>(() => {}) })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
@@ -281,7 +281,7 @@ test('A06 最后一个需求退出：在途请求被 abort，实例与结果一�
   const source = defineRefresh<{ id: number }, number>({
     load: (_args, context) => { signal = context.signal; return new Promise<number>(() => {}) },
   })
-  const quote = sourceRuntime(source)
+  const quote = source
   const core = newCore(2)
   const view = page(core, quote)
 
@@ -298,7 +298,7 @@ test('A06 最后一个需求退出：在途请求被 abort，实例与结果一�
 test('A06/A11 恢复：实例还在就立即交付历史结果，不重复取数；最后一个需求退出则连实例一起销毁', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
-  const quote = sourceRuntime(source)
+  const quote = source
   const core = newCore(2)
   const view = page(core, quote)
   const other = page(core, quote)
@@ -326,7 +326,7 @@ test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', asyn
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source), { enabled: true, every: 30, visible: true })
+  const view = page(core, source, { enabled: true, every: 30, visible: true })
 
   view.submit({ id: 1 })
   await settle()
@@ -347,7 +347,7 @@ test('A05 暂停只退订：已发起的刷新要求继续等结果，实例不�
     load: () => new Promise<number>(resolve => resolvers.push(resolve)),
   })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
@@ -378,7 +378,7 @@ test('A13 共享请求失败：保留旧画面、通知页面、下个周期继�
     load: async () => { calls++; if (fail) throw new Error('boom'); return 5 },
   })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source), { enabled: true, every: 20, visible: true })
+  const view = page(core, source, { enabled: true, every: 20, visible: true })
 
   view.submit({ id: 1 })
   await settle()
@@ -399,7 +399,7 @@ test('A13/A14 失败结算该实例全部未完成的刷新要求（不为更高
     load: () => new Promise<number>((resolve, reject) => { resolvers.push(resolve); rejecters.push(reject) }),
   })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
@@ -421,14 +421,14 @@ test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结�
     load: async () => (mode === 'empty' ? (undefined as unknown as number) : null),
   })
   const core = newCore(2)
-  const empty = page(core, sourceRuntime(source))
+  const empty = page(core, source)
   empty.submit({ id: 1 })
   await settle()
   assert.equal(empty.errors.at(-1)?.origin, 'request')
   assert.equal(empty.last, undefined, '空结果不交付')
 
   mode = 'null'
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
   view.submit({ id: 2 })
   await settle()
   assert.equal(view.last?.data, null)
@@ -441,7 +441,7 @@ test('A08 轮询不重叠：上一轮没有结束时不再发起', async () => {
     load: () => { calls++; return new Promise<number>(resolve => resolvers.push(resolve)) },
   })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source), { enabled: true, every: 5, visible: true })
+  const view = page(core, source, { enabled: true, every: 5, visible: true })
 
   view.submit({ id: 1 })
   await settle()
@@ -459,8 +459,8 @@ test('A09 并发上限约束真实在途请求：满槽排队，不自旋', asyn
     load: () => new Promise<number>(resolve => resolvers.push(resolve)),
   })
   const core = newCore(1)
-  const one = page(core, sourceRuntime(source))
-  const two = page(core, sourceRuntime(source))
+  const one = page(core, source)
+  const two = page(core, source)
 
   one.submit({ id: 1 })
   two.submit({ id: 2 })
@@ -481,7 +481,7 @@ test('A09 并发上限约束真实在途请求：满槽排队，不自旋', asyn
 test('A07 有效间隔取所有订阅的最小值', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
-  const quote = sourceRuntime(source)
+  const quote = source
   const core = newCore(2)
   const slow = page(core, quote, { enabled: true, every: 100_000, visible: true })
   const fast = page(core, quote, { enabled: true, every: 10, visible: true })
@@ -502,7 +502,7 @@ test('A10 上限到期：挂死的 load 出册并交还槽位，迟到的结束�
     load: () => new Promise<number>(resolve => resolvers.push(resolve)),
   })
   const core = newCore(1)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   view.submit({ id: 1 })
   await micro()
@@ -524,7 +524,7 @@ test('A10 上限到期：挂死的 load 出册并交还槽位，迟到的结束�
 
 test('A11 交付面：null 之外的任何结果都整体替换，且页面副本与共享副本互不影响', async () => {
   const source = defineRefresh<{ id: number }, { rows: number[] }>({ load: async () => ({ rows: [1] }) })
-  const quote = sourceRuntime(source)
+  const quote = source
   const core = newCore(2)
   const view = page(core, quote)
 
@@ -540,7 +540,7 @@ test('A11 交付面：null 之外的任何结果都整体替换，且页面副�
 
 test('A15 只读定位：无实例返回 undefined，读到的是副本，循环引用由调用者接住', async () => {
   const source = defineRefresh<{ id: number }, { rows: number[] }>({ load: async () => ({ rows: [1] }) })
-  const quote = sourceRuntime(source)
+  const quote = source
   const core = newCore(1)
 
   assert.equal(core.readSnapshot(quote, { id: 1 }), undefined)
@@ -564,7 +564,7 @@ test('A15 只读定位：无实例返回 undefined，读到的是副本，循环
 test('A04/A17 两个协调者互不共享：同 Source 同参数各自取数', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
-  const quote = sourceRuntime(source)
+  const quote = source
   const first = newCore(1)
   const second = newCore(1)
   const left = page(first, quote)
@@ -581,7 +581,7 @@ test('A04/A17 两个协调者互不共享：同 Source 同参数各自取数', a
 
 test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态与其他接收者', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 3 })
-  const quote = sourceRuntime(source)
+  const quote = source
   const core = newCore(2)
   const hostile = page(core, quote, { enabled: true, every: 100_000, visible: true }, {
     publish: () => { throw new Error('render failed') },
@@ -598,7 +598,7 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   // 失败通知里的 onError 抛错同样被隔离，订阅与开启意愿都不受影响。
   let notified = 0
   const failing = defineRefresh<{ id: number }, number>({ load: async () => { throw new Error('down') } })
-  const victim = page(core, sourceRuntime(failing), { enabled: true, every: 100_000, visible: true }, {
+  const victim = page(core, failing, { enabled: true, every: 100_000, visible: true }, {
     onError: () => { notified++; throw new Error('handler failed') },
   })
   victim.submit({ id: 1 })
@@ -613,7 +613,7 @@ test('A15/A17 销毁：幂等，之后所有入口都返回 cancelled/disposed�
     load: () => new Promise<number>(resolve => resolvers.push(resolve)),
   })
   const core = newCore(1)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
   let cleaned = 0
   view.handle.cleanup = () => { cleaned++ }
 
@@ -642,7 +642,7 @@ test('A15/A17 销毁：幂等，之后所有入口都返回 cancelled/disposed�
 test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 configuration 结算', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source), null)
+  const view = page(core, source, null)
 
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
   await settle()
@@ -658,7 +658,7 @@ test('A05/A14 未声明身份时刷新结算 unavailable，不产生请求', asy
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return 1 } })
   const core = newCore(2)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   assert.deepEqual(await view.refresh(), { status: 'cancelled', reason: 'unavailable' })
   assert.equal(calls, 0)
@@ -667,7 +667,7 @@ test('A05/A14 未声明身份时刷新结算 unavailable，不产生请求', asy
 test('A18 参数编码与序号上界：键按 JSON 语义稳定排序，序号到达上界后停在原地', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(1)
-  const view = page(core, sourceRuntime(source))
+  const view = page(core, source)
 
   // 编码沿用 JSON 语义、不做合法性判断（那是调用方的责任）：键就是按键排序后的 JSON 文本。
   assert.equal(prepareParameters({ b: 1, a: 2 }).key, '{"a":2,"b":1}', '对象键排序')

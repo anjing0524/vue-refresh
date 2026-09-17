@@ -1,7 +1,7 @@
 import { CancelReason, ErrorOrigin } from './public-types.ts'
-import type { RefreshDisplay, RefreshError, RefreshResult, SubmitResult } from './public-types.ts'
+import type { RefreshDisplay, RefreshError, RefreshResult, RefreshSource, SubmitResult } from './public-types.ts'
 import { parameterKey } from './source.ts'
-import type { Parameters, SourceRuntime } from './source.ts'
+import type { Parameters } from './source.ts'
 
 /**
  * 共享取数与调度核心。**全部运行时状态都在本文件**，只有三件事：
@@ -32,7 +32,8 @@ export interface Config {
 
 /** 组件需求句柄：本页声明的身份、当前订阅与交付出口。字段都由本文件写，适配层只读。 */
 export interface Handle<P extends object = object, T = unknown> {
-  readonly source: SourceRuntime
+  /** 擦除后的固定定义：具体 Source 靠方法双变进入这里。 */
+  readonly source: RefreshSource<object, unknown>
   /** 最近一次配置快照。 */
   readonly config: () => Config | null
   /**
@@ -76,7 +77,7 @@ export interface Entry {
 
 /** 一个「Source ＋ 参数值」的共享实例。 */
 export interface Resource {
-  readonly source: SourceRuntime
+  readonly source: RefreshSource<object, unknown>
   readonly parameters: Parameters
   /** 按周期订阅本实例的句柄；各自的间隔在它们自己的 `subscription` 上。 */
   readonly subscribers: Set<Handle>
@@ -130,7 +131,7 @@ function copyResult(input: unknown): unknown {
 export class RefreshCore {
   private readonly maxConcurrent: number
   /** Source → 参数键 → 实例。 */
-  private readonly buckets = new Map<SourceRuntime, Map<string, Resource>>()
+  private readonly buckets = new Map<RefreshSource<object, unknown>, Map<string, Resource>>()
   /** 全部页面句柄；可见性变化时按它们重新协调。 */
   private readonly handles = new Set<Handle>()
   /** FIFO 待执行任务。 */
@@ -266,7 +267,7 @@ export class RefreshCore {
   // ══════════════════════════ 只读定位与观测面 ══════════════════════════
 
   /** 只读定位：按参数键查实例并返回独立副本。不创建实例、不保活、不执行 `validate`。 */
-  readSnapshot(source: SourceRuntime, args: object): unknown {
+  readSnapshot(source: RefreshSource<object, unknown>, args: object): unknown {
     if (this.disposed) return undefined
     // 先算键再查实例：参数非法时抛给读取者，且与「此刻有没有活跃实例」无关。
     const key = parameterKey(args)
@@ -359,7 +360,7 @@ export class RefreshCore {
   }
 
   /** 按「Source 身份 ＋ 完整参数值稳定键」查找，没有就建立实例。 */
-  private resourceFor(source: SourceRuntime, parameters: Parameters): Resource {
+  private resourceFor(source: RefreshSource<object, unknown>, parameters: Parameters): Resource {
     let bucket = this.buckets.get(source)
     if (!bucket) {
       bucket = new Map()

@@ -29,8 +29,8 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 
 | 文件 | 职责 |
 |---|---|
-| `public-types.ts` | 公共契约类型、两个状态取值常量对象（`ErrorOrigin` / `CancelReason`）与品牌化的 `RefreshSource` |
-| `source.ts` | `defineRefresh`、`Parameters` 与 `SourceRuntime`、`prepareParameters`（复制 → 稳定编码 → 深冻结 → 可选校验）、只读定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
+| `public-types.ts` | 公共契约类型、两个状态取值常量对象（`ErrorOrigin` / `CancelReason`）与 `RefreshSource`（成员是方法，靠双变进入框架的擦除视图） |
+| `source.ts` | `defineRefresh`、`Parameters`、`prepareParameters`（复制 → 稳定编码 → 深冻结 → 执行来源的 `validate`）、只读定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
 | `core.ts` | `RefreshCore`：实例注册表、句柄关系、刷新要求、唯一 Timer 与 FIFO 队列、并发槽、交付与失败、只读计数投影 |
 | `vue.ts` | `useRefresh`（配置快照、句柄、Display、生命周期）、`createRefreshManager`（安装、可见性监听、只读入口、销毁）、注入槽位 |
 | `index.ts` | 包导出：三个函数、三个状态常量对象、逐个列出的 8 个公共类型（不用 `export type *`）；工具型别名不导出 |

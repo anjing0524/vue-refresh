@@ -4,7 +4,7 @@ import {
 import type { App, InjectionKey } from 'vue'
 import { RefreshCore, report } from './core.ts'
 import type { Config, Handle } from './core.ts'
-import { prepareParameters, sourceRuntime } from './source.ts'
+import { prepareParameters } from './source.ts'
 import { ErrorOrigin } from './public-types.ts'
 import type {
   ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshInput, RefreshManager, RefreshManagerOptions,
@@ -51,7 +51,6 @@ export function useRefresh<P extends object, T>(
   const binding = inject(managerKey)
   if (!binding || binding.core.isDisposed()) throw new Error('A live refresh coordinator must be installed')
   const core = binding.core
-  const runtime = sourceRuntime(source)
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
 
   let snapshot: Config | null = null
@@ -60,7 +59,7 @@ export function useRefresh<P extends object, T>(
   // Manager 保存异构 Source。P/T 只在这个适配边界还原：本句柄的 Source 不变，
   // 且 DTO 在发布前已经由框架建立了独立所有权。
   const handle: Handle<P, T> = {
-    source: runtime,
+    source,
     config: () => snapshot,
     publish: value => { display.value = value },
     onError: error => toValue(options).onError?.(error),
@@ -96,7 +95,7 @@ export function useRefresh<P extends object, T>(
 
   return {
     display,
-    submit: args => core.submit(handle, () => prepareParameters(args, runtime.validate)),
+    submit: args => core.submit(handle, () => prepareParameters(args, source)),
     refresh: () => core.refresh(handle),
   }
 }
@@ -140,7 +139,7 @@ export function createRefreshManager(options: RefreshManagerOptions): RefreshMan
 
     readSnapshot(source, args) {
       // 只计算参数键并直读实例；不准备参数、不校验、不创建实例。
-      return core.readSnapshot(sourceRuntime(source), args) as ReadonlySnapshot<never> | undefined
+      return core.readSnapshot(source, args) as ReadonlySnapshot<never> | undefined
     },
 
     dispose: () => core.dispose(),

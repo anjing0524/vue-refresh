@@ -39,11 +39,16 @@ export const CancelReason = {
 } as const
 export type CancelReason = (typeof CancelReason)[keyof typeof CancelReason]
 
-declare const sourceBrand: unique symbol
-
-/** 固定资源定义：`P` 与 `T` 必须与定义时一致，因此不能用更宽的泛型绕过参数或结果类型检查。 */
+/**
+ * 固定资源定义：`P` 与 `T` 与 `load` 绑定。
+ *
+ * 两个成员都写成**方法**：方法参数按双变比较，因此具体 Source 可以直接进入框架的擦除视图
+ * （`RefreshSource<object, unknown>`）与异步注册表槽位，接收点不必保留类型断言。
+ * 代价是「拿一个擦除后的 Source 当具体 Source 用」不再被编译器拦住——与 ADR-24 对 `publish` 的取舍一致。
+ */
 export interface RefreshSource<P extends object, T> {
-  readonly [sourceBrand]: { readonly args: (value: P) => P; readonly data: (value: T) => T }
+  load(args: ReadonlySnapshot<P>, context: RefreshLoadContext): Promise<T>
+  validate?(args: ReadonlySnapshot<P>): boolean
 }
 
 /** 框架请求（`load`）收到的上下文。 */

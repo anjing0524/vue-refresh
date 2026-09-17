@@ -1,5 +1,5 @@
 import stringify from 'fast-json-stable-stringify'
-import type { ReadonlySnapshot, RefreshLoadContext, RefreshSource } from './public-types.ts'
+import type { RefreshSource } from './public-types.ts'
 
 /**
  * 参数边界：固定资源定义与提交边界的一次准备。
@@ -21,24 +21,10 @@ export interface Parameters {
   readonly key: string
 }
 
-/** 内部擦除类型：公开的 `RefreshSource` 只带类型品牌，运行时只剩框架需要的两个回调。 */
-export interface SourceRuntime {
-  readonly load: (args: object, context: RefreshLoadContext) => Promise<unknown>
-  readonly validate?: (args: object) => boolean
-}
-
 /** 声明一种固定业务资源。`definition` 必须是应用级常量；在渲染或提交中重建会得到新的共享身份。 */
-export function defineRefresh<P extends object, T>(definition: {
-  readonly load: (args: ReadonlySnapshot<P>, context: RefreshLoadContext) => Promise<T>
-  readonly validate?: (args: ReadonlySnapshot<P>) => boolean
-}): RefreshSource<P, T> {
+export function defineRefresh<P extends object, T>(definition: RefreshSource<P, T>): RefreshSource<P, T> {
   // 不冻结调用方对象，只冻结框架自己持有的这一份。
-  return Object.freeze({ load: definition.load, validate: definition.validate }) as unknown as RefreshSource<P, T>
-}
-
-/** 品牌字段只在类型层存在；运行时是一次可解释的擦除。 */
-export function sourceRuntime(source: object): SourceRuntime {
-  return source as SourceRuntime
+  return Object.freeze({ load: definition.load, validate: definition.validate })
 }
 
 /** 冻结框架自己持有的副本（`structuredClone` 的产物，只有普通对象与数组）；调用方原对象不冻结。 */
@@ -58,13 +44,13 @@ export function parameterKey(input: object): string {
  * `validate` 返回假值或抛错、复制失败（函数、Proxy）、循环引用都会让本次声明按非法参数拒绝，
  * 不产生实例或后台任务。
  */
-export function prepareParameters(input: object, validate?: (args: object) => boolean): Parameters {
+export function prepareParameters(input: object, source?: RefreshSource<object, unknown>): Parameters {
   const args: object = structuredClone(input)
   // 编码只有这一处入口：`parameterKey` 与提交边界共用同一条规则。
   const key = parameterKey(args)
   deepFreeze(args)
-  if (validate) {
-    const valid: unknown = validate(args)
+  if (source?.validate) {
+    const valid: unknown = source.validate(args)
     if (typeof valid !== 'boolean') {
       // 返回 Promise 属于契约违约：同步抛错是给调用方的主信号，那个 Promise 也要观察掉，避免未处理拒绝。
       void Promise.resolve(valid).catch(() => {})

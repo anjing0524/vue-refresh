@@ -29,11 +29,14 @@ function contract() {
   task.display.value = null
   // @ts-expect-error nested display data is read only
   task.display.value!.data.price = 2
-  // @ts-expect-error invariant source parameter type
-  const wider: RefreshSource<object, Quote> = source
-  // @ts-expect-error invariant source DTO type
-  const widerDTO: RefreshSource<Params, object> = source
-  void wider; void widerDTO
+  // Source 的成员是方法，按双变比较：具体 Source 可以直接进入框架的擦除视图
+  // （`RefreshSource<object, unknown>`），因此异构注册表不必在接收点保留类型断言。
+  const erased: RefreshSource<object, unknown> = source
+  void erased
+  // 反向不成立：擦除视图不能当具体 Source 用（结果类型 `unknown` 收不窄）。
+  // @ts-expect-error the erased view cannot be used as a concrete source
+  const concrete: RefreshSource<Params, Quote> = erased
+  void concrete
 }
 // @ts-expect-error load DTO must match the declared result
 defineRefresh<Params, Quote>({ async load() { return { price: 'bad' } } })
