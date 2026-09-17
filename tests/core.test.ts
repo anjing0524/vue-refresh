@@ -553,7 +553,7 @@ test('A15 只读定位：无实例返回 undefined，读到的是副本，循环
   // 只有循环引用会让递归耗尽调用栈，由读取者接住。
   const cyclic: Record<string, unknown> = {}
   cyclic.self = cyclic
-  assert.throws(() => { core.readSnapshot(quote, cyclic) }, RangeError)
+  assert.throws(() => { core.readSnapshot(quote, cyclic) }, TypeError)
 
   const view = page(core, quote)
   view.submit({ id: 1 })
@@ -666,19 +666,20 @@ test('A05/A14 未声明身份时刷新结算 unavailable，不产生请求', asy
   assert.equal(calls, 0)
 })
 
-test('A18 参数编码与序号上界：不同值不同键、相同值同键，序号到达上界后停在原地', async () => {
+test('A18 参数编码与序号上界：键按 JSON 语义稳定排序，序号到达上界后停在原地', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(1)
   const view = page(core, sourceRuntime(source))
 
-  // 编码不做合法性判断（那是调用方的责任），只保证不同的值不会得到同一个键。
-  assert.equal(prepareParameters({ id: -0 }).key, prepareParameters({ id: 0 }).key, '-0 与 0 是同一个数')
-  assert.equal(prepareParameters({ b: 1, a: 2 }).key, prepareParameters({ a: 2, b: 1 }).key, '字段顺序不影响身份')
-  assert.notEqual(prepareParameters({ id: Number.NaN }).key, prepareParameters({ id: null }).key, 'NaN 不与 null 合并')
-  assert.notEqual(prepareParameters({ id: Infinity }).key, prepareParameters({ id: null }).key, 'Infinity 不与 null 合并')
-  assert.notEqual(prepareParameters({ id: undefined }).key, prepareParameters({}).key, '显式 undefined 不与缺字段合并')
-  assert.notEqual(prepareParameters({ at: new Date(0) }).key, prepareParameters({}).key, '非普通记录不与空记录合并')
+  // 编码沿用 JSON 语义、不做合法性判断（那是调用方的责任）：键就是按键排序后的 JSON 文本。
+  assert.equal(prepareParameters({ b: 1, a: 2 }).key, '{"a":2,"b":1}', '对象键排序')
+  assert.equal(prepareParameters({ tags: ['a', 'b'] }).key, prepareParameters({ tags: ['a', 'b'] }).key)
   assert.notEqual(prepareParameters({ tags: ['a', 'b'] }).key, prepareParameters({ tags: ['b', 'a'] }).key, '数组顺序影响身份')
+  assert.equal(prepareParameters({ id: -0 }).key, prepareParameters({ id: 0 }).key, '-0 与 0 是同一个数')
+  assert.equal(prepareParameters({ id: Number.NaN }).key, prepareParameters({ id: null }).key, 'NaN 按 JSON 语义读作 null')
+  assert.equal(prepareParameters({ id: undefined }).key, prepareParameters({}).key, 'undefined 字段按 JSON 语义省略')
+  assert.equal(prepareParameters({ at: new Date(0) }).key,
+    prepareParameters({ at: '1970-01-01T00:00:00.000Z' }).key, 'Date 按其 ISO 字符串')
 
   // 循环引用让递归耗尽调用栈：按非法参数拒绝，且不改动任何状态。
   const cyclic: Record<string, unknown> = {}

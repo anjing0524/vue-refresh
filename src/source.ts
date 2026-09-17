@@ -1,15 +1,16 @@
+import stringify from 'fast-json-stable-stringify'
 import type { ReadonlySnapshot, RefreshLoadContext, RefreshSource } from './public-types.ts'
 
 /**
  * 参数边界：固定资源定义与提交边界的一次准备。
  *
  * 根需求只有两条：**身份稳定**（同样参数值共享同一次请求）与**快照隔离**（页面改草稿不影响已提交的身份）。
- * 因此这里只有两个各做一件事的函数：`canonical` 是纯编码，`deepFreeze` 是唯一一处副作用。
+ * 因此这里只有三件事：复制一份、把副本编码成身份键、把副本深冻结。
+ * 编码交给 `fast-json-stable-stringify`（`JSON.stringify` 的确定性版本：对象键排序、数组保序）。
  *
- * 编码**不判断值合法不合法**——那是调用方的责任。它只保证不同的值不会得到同一个键：
- * `-0` 与 `0` 是同一个数（同一个键）；`NaN` / `Infinity` / `undefined` / 函数 / `BigInt` 各自成键；
- * 非普通记录对象（`Date` / `Map` / 类实例）带上构造器名，不与空记录合并。
- * 循环引用让递归耗尽调用栈，引擎抛出的 `RangeError` 由调用方处理。
+ * 框架**不判断参数值是否合法**——那是调用方的责任，编码沿用 JSON 语义：
+ * `-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 与函数字段按省略，`Date` 按其 ISO 字符串；
+ * 循环引用由该包抛 `TypeError`，复制不了的值（函数、Proxy）由 `structuredClone` 拒绝。
  */
 
 /** 一次已准备的请求参数。 */
@@ -40,38 +41,6 @@ export function sourceRuntime(source: object): SourceRuntime {
   return source as SourceRuntime
 }
 
-/**
- * 稳定编码：对象键排序、数组保序。**纯函数**，不改动输入。
- *
- * `JSON.stringify` 无法重排对象键，所以排序只能自己走一遍——这就是它存在的全部理由。
- * 超出 JSON 值域的输入也各自得到自己的键（见文件头），因此不需要任何合法性判断。
- */
-function canonical(value: unknown): string {
-  if (value === null) return 'null'
-  if (typeof value === 'string') return JSON.stringify(value)
-  if (typeof value === 'boolean') return value ? 'true' : 'false'
-  if (typeof value === 'number') return String(value)
-  if (typeof value !== 'object') return `${typeof value}:${String(value)}`
-  return Array.isArray(value) ? canonicalArray(value) : canonicalRecord(value as Record<string, unknown>)
-}
-
-function canonicalArray(value: unknown[]): string {
-  const items: string[] = []
-  for (const item of value) items.push(canonical(item))
-  return `[${items.join(',')}]`
-}
-
-/** 非普通记录对象带上构造器名：不拒绝（那是调用方的事），也不与空记录静默合并。 */
-function canonicalRecord(value: Record<string, unknown>): string {
-  const prototype = Object.getPrototypeOf(value) as { constructor?: { name?: string } } | null
-  const tag = prototype === null || prototype === Object.prototype ? '' : `${prototype.constructor?.name ?? 'Object'}:`
-  const entries: string[] = []
-  for (const key of Object.keys(value).sort()) {
-    entries.push(`${JSON.stringify(key)}:${canonical(value[key])}`)
-  }
-  return `${tag}{${entries.join(',')}}`
-}
-
 /** 冻结框架自己持有的副本（`structuredClone` 的产物，只有普通对象与数组）；调用方原对象不冻结。 */
 function deepFreeze(value: unknown): void {
   if (value === null || typeof value !== 'object') return
@@ -81,17 +50,17 @@ function deepFreeze(value: unknown): void {
 
 /** 只读定位：只编码，不复制、不冻结、不执行 `validate`。 */
 export function parameterKey(input: object): string {
-  return canonical(input)
+  return stringify(input)
 }
 
 /**
- * 提交边界只执行一次：复制 → 稳定编码 → 冻结副本 → 可选业务校验。
- * `validate` 返回假值或抛错、复制失败（例如传了 Proxy）、循环引用都会让本次声明按非法参数拒绝，
+ * 提交边界只执行一次：复制 → 编码身份键 → 冻结副本 → 可选业务校验。
+ * `validate` 返回假值或抛错、复制失败（函数、Proxy）、循环引用都会让本次声明按非法参数拒绝，
  * 不产生实例或后台任务。
  */
 export function prepareParameters(input: object, validate?: (args: object) => boolean): Parameters {
   const args: object = structuredClone(input)
-  const key = canonical(args)
+  const key = stringify(args)
   deepFreeze(args)
   if (validate) {
     const valid: unknown = validate(args)

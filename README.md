@@ -1,7 +1,7 @@
 # Vue SPA 统一刷新管理
 
 已实现 5 个运行时模块，以及正式包入口、类型声明和可运行示例。源码共用同一套参数准备、任务身份、取消与结果复制规则；
-没有占位成功路径，也没有第三方运行时依赖——框架不依赖应用的状态库。
+没有占位成功路径。运行期只有一个零依赖的小依赖（参数键的稳定编码），框架不依赖应用的状态库。
 实现完成不等于验收目录（[统一文档](./统一刷新管理.md) §4 的 A01–A18）的所有分支、业务接入或发布基线已经完成。
 
 ## 从总体到局部
@@ -21,7 +21,7 @@ src/index.ts          包入口（三个函数、三个状态常量对象与 8 �
 - 核心不依赖 Vue 或 HTTP。`core.ts` 按职责分成七个分段：状态观测与生命周期、页面操作、只读定位与观测面、需求关系、后台执行、刷新要求、调度。
 - 全部可变状态都在 `core.ts`：`buckets`（身份 → 共享实例）、每个实例的订阅与刷新要求、当前任务与队列。
   订阅只写在句柄上、实例侧持有同一批句柄，刷新要求只写在实例上——没有镜像字段，也没有第二套描述同一关系的对象。
-- 参数稳定键由 `source.ts` 自己编码（键排序、数组保序、值域与根容器守卫），因此没有第三方运行时依赖；不设深度上限，循环引用由引擎递归耗尽调用栈报 `RangeError`。
+- 参数稳定键交给 `fast-json-stable-stringify`（`JSON.stringify` 的确定性版本：对象键排序、数组保序），是运行期唯一的依赖；框架不设深度上限，也不判断值是否合法。
 
 先读[统一文档](./统一刷新管理.md)的「名词解释」「目标与范围」「公共 API 契约」「行为规则」四节；
 设计与实现在 [DESIGN.md](./DESIGN.md)，验收目录在统一文档 §4。
@@ -55,7 +55,7 @@ await task.refresh()
   这类值按 `validation` 拒绝且不产生请求；需要时传 `toRaw(…)` 或自己新构造的普通对象。
 - Source 身份及全部参数字段值决定共享：对象字段顺序不影响共享，数组顺序影响共享；不提供另一个业务 key 回调。
 - 参数复制后深冻结，调用方原对象不冻结；轮询、恢复与 `readSnapshot` 复用已准备参数，`validate` 只在提交时执行一次。
-- 框架**不判断参数值是否合法**（那是调用方的责任）：只做稳定编码，保证不同的值不会得到同一个键——`-0` 与 `0` 同键，`NaN`／`Infinity`／`undefined`／函数各自成键，`Date` 等非普通记录不与空记录合并。传函数、Proxy 这类复制不了的值会被平台的原生复制拒绝；循环引用由引擎递归耗尽调用栈报 `RangeError`。
+- 框架**不判断参数值是否合法**（那是调用方的责任）：只做稳定编码，沿用 JSON 语义——`-0` 与 `0` 同键，`NaN`／`Infinity` 按 `null`，`undefined` 与函数字段按省略，`Date` 按其 ISO 字符串。传函数、Proxy 这类复制不了的值由 `structuredClone` 拒绝；循环引用由编码包抛 `TypeError`。两者都按 `validation` 回报调用方。
 - DTO 业务结构由 HTTP 适配器校验；框架只拒绝 `undefined` 并使用原生复制建立所有权，各页面与 `readSnapshot` 各得副本。
 - `readSnapshot` 只算参数键并读副本，不复制冻结参数、不执行 `validate`、不创建实例；参数非法时抛给读取者。
 
@@ -124,12 +124,12 @@ pnpm dev
 |---|---|
 | pnpm typecheck | 通过，0 错误。`tests/types.ts` 的 `@ts-expect-error` 反例（缺字段/字段类型/旧元组调用/Source 不变性/DTO/readonly/refresh 不接受参数且结算不含 DTO）一并被校验 |
 | pnpm test | 通过：35 个用例全绿（`tests/core.test.ts` 28、`tests/vue.test.ts` 7），覆盖 A01–A18。核心用例直接驱动 `RefreshCore` 并提供配置快照；Vue 用例用无 DOM 的自定义渲染器 ＋ 真实 KeepAlive，安装路径用最小 `document` 替身，不冒充真实可见性测试 |
-| pnpm build | 通过。生成 `dist/index.js`（13.28 kB，13279 字节）与 5 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态） |
+| pnpm build | 通过。生成 `dist/index.js`（12.71 kB，12714 字节）与 5 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态） |
 | pnpm build:demo | 通过。生成 `dist-demo/` 演示页面（四个视图：查询列表、行情面板、双组件共享、B09 组合） |
 | pnpm test:browser | 通过：真实 Chrome 12 条场景全绿——三条代表页面交互（`tests/pages.spec.ts`）＋ 八条受控场景（`tests/refresh.spec.ts`：暂停后显式刷新、满槽排队、真实 HTTP 共享与恢复、真实传输超时、旧响应晚到、真实结束放槽、卸载清理、祖先 KeepAlive 失活与受控 `visibilitychange`）。这些场景在根契约重写后**未改一行**仍然通过 |
-| pnpm complexity | 5 个源文件、1038 行、115 个结构分支、最大函数圈复杂度 11 |
+| pnpm complexity | 5 个源文件、1007 行、105 个结构分支、最大函数圈复杂度 11 |
 | node scripts/benchmark.mjs | 24 订阅 / 8 身份 / every=25ms / maxConcurrent=4，3 次 × 2s：load 中位 635 次（收敛比 0.99；按订阅计的反事实 1920 次）、在途峰值 4（框架 `running` 投影峰值同为 4，未超上限）、结束瞬间 8 个共享实例 / 24 个句柄、**释放后残留全 0**；事件循环延迟 mean 1.08ms / p99 1.47ms / max 5.11ms。规模可用 `--subscriptions/--identities/--duration/--every/--runs` 改；**不设性能阈值**，只在真实在途超过 `maxConcurrent` 或释放后有残留时以非零码退出 |
-| 阶段 15 交付产物 | `pnpm build` ＋ `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：9 个条目 = `dist/` 7 个（`index.js` 13.28 kB，13279 字节、sourcemap、5 个 `.d.ts`）＋ `package.json` ＋ README。最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行，不写在这里——README 由 npm 强制打进包内，把包自身哈希写进包内文件没有解 |
+| 阶段 15 交付产物 | `pnpm build` ＋ `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：9 个条目 = `dist/` 7 个（`index.js` 12.71 kB，12714 字节、sourcemap、5 个 `.d.ts`）＋ `package.json` ＋ README。最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行，不写在这里——README 由 npm 强制打进包内，把包自身哈希写进包内文件没有解 |
 | 包级导入（干净消费方） | 仓库外消费工程只安装 tarball 与 `vue@3.5.42`（不再需要状态库）：SSR 渲染成功且 0 次 `load`、`dispose` 后 `readSnapshot` 返回 `undefined`；最小浏览器环境（`document.hidden=false`）下挂载 ＋ `submit` 交付 `price=3`、`origin=background`、`readSnapshot` 可读。**换包必删消费方的 `package-lock.json`**：`file:` 依赖的完整性写在锁文件里，不删会复用上一版解包内容而给出假通过 |
 | TS 4.9 类型消费（G03 阻断节点） | 实测：`typescript@4.9.5` ＋ `module/moduleResolution: Node16` ＋ `strict` ＋ `skipLibCheck` 下 `tsc --noEmit` **本包 5 个声明文件零错误**（含 `@ts-expect-error` 反例：缺字段、Source 不变性、`refresh` 不接受参数）；不再需要状态库，因此没有需要跳过的 peer 校验。Vue 3.5.42 自身的 `.d.ts` 要求 TS ≥5.4，故 `skipLibCheck: true` 是前置条件。确认人 2026-09-16 裁决：声明只限定到本包自身的类型（自 TS 4.9 起可用，已实测） |
 | pnpm check:docs | 通过。一致性门禁清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准；还会打印叶子→测试标题的追溯报告 |

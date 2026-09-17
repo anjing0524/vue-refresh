@@ -35,5 +35,8 @@
   ],
   "peerDependencies": {
     "vue": "3.5.42"
+  },
+  "dependencies": {
+    "fast-json-stable-stringify": "2.1.0"
   }
 }

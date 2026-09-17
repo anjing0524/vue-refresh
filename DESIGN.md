@@ -18,7 +18,7 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 ```
 
 依赖方向单向：`public-types` ← `source` ← `core` ← `vue` ← `index`。
-核心不依赖 Vue 或任何状态库，也没有第三方运行时依赖。这条方向由 `pnpm check:docs` 校验：
+核心不依赖 Vue 或任何状态库；运行期只依赖 `fast-json-stable-stringify`（零依赖，参数键的确定性编码）。这条方向由 `pnpm check:docs` 校验：
 **运行期边必须严格向下**，同层或向上的运行期边必须同时在 `check-docs.mjs` 与本节登记，否则直接失败；
 类型回边只报告（运行期被擦除）。本版没有需要登记的例外边。
 
@@ -30,7 +30,7 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 | 文件 | 职责 |
 |---|---|
 | `public-types.ts` | 公共契约类型、三个状态取值常量对象（`RequestOrigin` / `ErrorOrigin` / `CancelReason`）与品牌化的 `RefreshSource` |
-| `source.ts` | `defineRefresh`、`Parameters` 与 `SourceRuntime`、`prepareParameters`（复制 → 守卫/冻结/稳定编码 → 可选校验）、只读定位 `parameterKey` |
+| `source.ts` | `defineRefresh`、`Parameters` 与 `SourceRuntime`、`prepareParameters`（复制 → 稳定编码 → 深冻结 → 可选校验）、只读定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
 | `core.ts` | `RefreshCore`：实例注册表、句柄关系、刷新要求、唯一 Timer 与 FIFO 队列、并发槽、交付与失败、只读计数投影 |
 | `vue.ts` | `useRefresh`（配置快照、句柄、Display、生命周期）、`createRefreshManager`（安装、可见性监听、只读入口、销毁）、注入槽位 |
 | `index.ts` | 包导出：三个函数、三个状态常量对象、逐个列出的 8 个公共类型（不用 `export type *`）；工具型别名不导出 |
@@ -198,25 +198,25 @@ flowchart LR
 
 ### 4.1 参数准备与键
 
-固定 Source 绑定 `P`、`T`、`load` 及可选同步 `validate`。输入按普通 JSON 记录使用，根与嵌套值都按结构遍历；框架**不判断值是否合法**——那是调用方的责任，编码只保证不同的值不会得到同一个键：`-0` 与 `0` 同键，`NaN` / `Infinity` / `undefined` / 函数各自成键，`Date` 等非普通记录带构造器名、不与空记录合并。传函数、Proxy 这类复制不了的值由平台的原生复制拒绝（`validation`）。
+固定 Source 绑定 `P`、`T`、`load` 及可选同步 `validate`。输入按普通 JSON 记录使用；框架**不判断值是否合法**——那是调用方的责任，编码交给 `fast-json-stable-stringify`，沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 与函数字段按省略，`Date` 按其 ISO 字符串。传函数、Proxy 这类复制不了的值由 `structuredClone` 拒绝（`validation`），循环引用由编码包抛 `TypeError`。
 
 提交边界**一次**执行；两件事各由一个函数负责，副作用只出现在其中一处：
 
 ```text
-structuredClone → canonical（纯编码：值域守卫 ＋ 键排序/数组保序）
+structuredClone → stringify（`fast-json-stable-stringify`：键排序 ＋ 数组保序）
                 → deepFreeze（唯一副作用：冻结这份副本）
                 → 可选 Source.validate 一次 → Parameters
 ```
 
 对象按键排序编码，数组保持原顺序，因此字段顺序不影响身份、数组顺序影响身份。
-**不设内部深度上限**：循环引用会让编码递归耗尽调用栈，引擎抛出的 `RangeError` 按非法参数处理（`U15`）。
+**不设内部深度上限**：循环引用由编码包抛 `TypeError`，与复制失败一样按非法参数处理（`U15`）。
 `validate` 每次接纳提交执行一次；轮询、恢复与 `readSnapshot` 都不执行。
 `validate` 返回 Promise 属于契约违约：同步抛错是给调用方的主信号，那个 Promise 也被观察掉，不产生未处理拒绝。
 
 ### 4.2 只读定位
 
 `readSnapshot` 在适配边界还原 Source 后交核心：**先算键，再查实例**。
-查不到就是 `undefined`，与此刻有没有活跃实例无关；查到返回独立副本。循环引用会让编码递归耗尽调用栈，由读取者接住。
+查不到就是 `undefined`，与此刻有没有活跃实例无关；查到返回独立副本。循环引用由编码包抛 `TypeError`，由读取者接住。
 它只能读到仍有活跃实例的结果：实例随最后一个需求退出而销毁，因此「查不到」不等于「没有这份数据」。
 它只交付值、不承诺新鲜度：需要结果产生时间就订阅（订阅会建立实例）。
 

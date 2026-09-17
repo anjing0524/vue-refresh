@@ -2,7 +2,7 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   build: {
     lib: { entry: 'src/index.ts', formats: ['es'], fileName: 'index' },
-    rolldownOptions: { external: ['vue'] },
+    rolldownOptions: { external: ['vue', 'fast-json-stable-stringify'] },
     sourcemap: true,
   },
 })
