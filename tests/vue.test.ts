@@ -79,12 +79,12 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
   assert.equal(currentCore()?.snapshot().resources.length, 0, '卸载后实例与结果一并消失')
 })
 
-test('A04/A05 配置非法：只报告一次并停止订阅，修正后按当前资格恢复', async () => {
+test('A04/A05 配置非法：不通知并停止订阅，修正后按当前资格恢复', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>({ load: async () => { loads++; return 1 } })
   const manager = newManager({ maxConcurrent: 1 })
   const every = ref(100_000)
-  const errors: Array<{ origin: string }> = []
+  const errors: unknown[] = []
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({
@@ -103,8 +103,8 @@ test('A04/A05 配置非法：只报告一次并停止订阅，修正后按当前
   every.value = 0
   await tick()
   await tick()
-  assert.equal(errors.length, 1, '连续非法只报告一次')
-  assert.equal(errors[0]?.origin, 'caller')
+  // 配置非法不通知：它是本页自己的输入事实，框架只负责不订阅、不请求（ADR-51）。
+  assert.equal(errors.length, 0)
 
   every.value = 50_000
   await tick()
@@ -182,12 +182,12 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
   app.unmount()
 })
 
-test('A04 运行期读到非布尔时按配置非法处理：不订阅、只通知一次、修正后恢复', async () => {
+test('A04 运行期读到非布尔时按配置非法处理：不订阅、不通知、修正后恢复', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>({ load: async () => { loads++; return 1 } })
   const manager = newManager({ maxConcurrent: 1 })
   const enabled = ref<boolean>(true)
-  const errors: Array<{ origin: string }> = []
+  const errors: unknown[] = []
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({
@@ -207,8 +207,7 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、只通�
   ;(enabled as Ref<unknown>).value = undefined
   await tick()
   await tick()
-  assert.equal(errors.length, 1, '连续非法只通知一次')
-  assert.equal(errors[0]?.origin, 'caller')
+  assert.equal(errors.length, 0, '配置非法不通知')
   api.submit({ symbol: 'B' })
   await tick()
   assert.equal(loads, 1, '配置非法时不订阅')

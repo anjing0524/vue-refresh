@@ -2,10 +2,9 @@ import {
   getCurrentInstance, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, watch,
 } from 'vue'
 import type { App } from 'vue'
-import { INVALID_CONFIG_MESSAGE, RefreshCore, report } from './core.ts'
+import { RefreshCore } from './core.ts'
 import type { Config, Handle } from './core.ts'
 import { prepareParameters } from './source.ts'
-import { ErrorOrigin } from './public-types.ts'
 import type {
   RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions, RefreshSource,
 } from './public-types.ts'
@@ -52,7 +51,6 @@ export function useRefresh<P extends object, T>(
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
 
   let snapshot: Config | null = null
-  let reported = false
 
   // Manager 保存异构 Source。P/T 只在这个适配边界还原：本句柄的 Source 不变，
   // 且 DTO 在发布前已经由框架建立了独立所有权。
@@ -69,15 +67,10 @@ export function useRefresh<P extends object, T>(
   }
   core.addHandle(handle)
 
-  // 唯一的配置 watcher：先写快照，再按当前资格协调；连续非法只通知一次。
+  // 唯一的配置 watcher：先写快照，再按当前资格协调。非法配置不通知——它是本页自己的输入事实，
+  // 页面读自己的 refs 就知道；框架只负责不订阅、不请求，修正后自动恢复（ADR-51）。
   const stopWatching = watch(() => readConfig(options), config => {
     snapshot = config
-    if (config) reported = false
-    else if (!reported) {
-      reported = true
-      // 配置非法是本页自己的输入事实：按 `caller` 通知，与参数准备失败归同一侧（ADR-48）。
-      report(handle, { origin: ErrorOrigin.Caller, error: new TypeError(INVALID_CONFIG_MESSAGE) })
-    }
     core.reconcile(handle)
   }, { flush: 'sync', immediate: true })
 

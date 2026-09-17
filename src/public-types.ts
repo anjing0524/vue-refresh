@@ -3,26 +3,14 @@ import type { App, Ref, ShallowRef } from 'vue'
 /**
  * 公共契约：本文件是正式 API 类型的唯一代码入口，与《统一刷新管理》「公共 API 契约」一节共同构成对外约定。
  *
- * 状态取值都提前枚举为常量对象，公开类型由对象推导：新增、删除或收敛一个取值只改这里。
- * 不使用 `enum` —— `erasableSyntaxOnly` 与 Node 的类型擦除都不接受该语法。
+ * 这里只有类型与判别联合：取值域直接写在联合里，没有常量对象（ADR-51）。不使用 `enum` ——
+ * `erasableSyntaxOnly` 与 Node 的类型擦除都不接受该语法。
  */
 
 /** 递归只读视图：编译期约束。框架交付的是独立副本，因此拿到只读视图不等于共享对象不可写。 */
 export type ReadonlySnapshot<T> =
   T extends (...args: never[]) => unknown ? T :
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
-
-/**
- * 错误的来源：**失败属于哪一侧**——按调用方能采取的动作分类，不按「哪一步失败的」分类（ADR-48）。
- * - `request`：共享请求失败（含框架上限到期）。同一身份再试有意义；
- * - `caller`：调用方给的参数或配置不能被使用（订阅声明的参数准备失败、刷新入口或配置快照非法）。
- *   重试同一份输入没有意义，要改的是调用方自己的代码或配置。
- */
-export const ErrorOrigin = {
-  Request: 'request',
-  Caller: 'caller',
-} as const
-export type ErrorOrigin = (typeof ErrorOrigin)[keyof typeof ErrorOrigin]
 
 /**
  * 固定资源定义：`P` 与 `T` 与 `load` 绑定。
@@ -34,16 +22,6 @@ export type ErrorOrigin = (typeof ErrorOrigin)[keyof typeof ErrorOrigin]
 export interface RefreshSource<P extends object, T> {
   load(args: ReadonlySnapshot<P>, context: { readonly signal: AbortSignal }): Promise<T>
   validate?(args: ReadonlySnapshot<P>): boolean
-}
-
-/**
- * 错误通知值。`error` 是原始异常，供页面自行判断；`origin` 说明失败属于哪一侧（要不要重试）。
- * 不交付「由谁触发」：页面若有两处 `useRefresh` 共用同一个 `onError`，用各自闭包里的
- * `display` 或自己的标记分辨即可（ADR-47）。
- */
-export interface RefreshError {
-  readonly origin: ErrorOrigin
-  readonly error: unknown
 }
 
 /**
@@ -73,8 +51,12 @@ export interface RefreshOptions {
   readonly enabled: Ref<boolean>
   /** 刷新间隔（毫秒）；只接受正安全整数，不自动转换或取整。 */
   readonly every: Ref<number>
-  /** 错误通知；框架立即观察其异步拒绝，但不等待完成。每次通知都重新读取本字段。 */
-  readonly onError?: (error: RefreshError) => void | Promise<void>
+  /**
+   * 取数失败通知（**只报共享请求失败**，ADR-51）：参数是原始异常，供页面自行判断。
+   * 框架立即观察其异步拒绝，但不等待完成；每次通知都重新读取本字段。
+   * 调用方自己的输入问题不走这条通道——参数不可用由 `submit` 同步返回 `rejected`。
+   */
+  readonly onError?: (error: unknown) => void | Promise<void>
 }
 
 /** 组件句柄：声明订阅、主动刷新并读取本页快照。 */

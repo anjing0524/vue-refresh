@@ -25,8 +25,8 @@ const QuoteCard = defineComponent({
       enabled: ref(true),
       // 频率是响应式输入：改动它就走配置变化路径，由框架替换当前任务。
       every: computed(() => props.every),
-      onError: error => {
-        if (error.origin !== 'request') return
+      // `onError` 只报取数失败：这里不需要再判断来源（ADR-51）。
+      onError: () => {
         failures.value += 1
         emit('failure')
       },

@@ -30,7 +30,7 @@ const PairCard = defineComponent({
     const options: RefreshOptions = {
       enabled: ref(true),
       every: computed(() => props.every),
-      onError: error => { if (error.origin === 'request') failures.value += 1 },
+      onError: () => { failures.value += 1 },
     }
     const task = useRefresh(quoteSource, options)
     const params = (symbol: string): QuoteParams => ({ account: 'demo', symbol })
@@ -131,8 +131,7 @@ export const B09View = defineComponent({
     const task = useRefresh(quoteSource, {
       enabled,
       every: ref(5_000),
-      onError: error => {
-        if (error.origin !== 'request') return
+      onError: () => {
         failures.value += 1
         enabled.value = false // 页面自己的策略：前次失败后先关闭意愿。
       },

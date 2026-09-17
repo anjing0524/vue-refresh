@@ -4,8 +4,7 @@ import { RefreshCore } from '../src/core.ts'
 import type { Config, Handle } from '../src/core.ts'
 import { defineRefresh, prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
-import { ErrorOrigin } from '../src/public-types.ts'
-import type { RefreshDisplay, RefreshError, RefreshSource, SubmitResult } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshSource, SubmitResult } from '../src/public-types.ts'
 
 /** 每个用例结束时销毁核心：周期调度会留下唯一的唤醒 Timer，不销毁的话进程不会退出。 */
 const cores: RefreshCore[] = []
@@ -23,7 +22,7 @@ afterEach(() => {
 interface Page {
   readonly handle: Handle
   readonly published: RefreshDisplay<object, unknown>[]
-  readonly errors: RefreshError[]
+  readonly errors: unknown[]
   readonly last: RefreshDisplay<object, unknown> | undefined
   submit(args: object): SubmitResult
   refresh(): void
@@ -34,11 +33,11 @@ function page(
   core: RefreshCore,
   source: RefreshSource<object, unknown>,
   config: Config | null = { enabled: true, every: 100_000 },
-  hooks: { publish?: (value: RefreshDisplay<object, unknown>) => void; onError?: (error: RefreshError) => unknown } = {},
+  hooks: { publish?: (value: RefreshDisplay<object, unknown>) => void; onError?: (error: unknown) => unknown } = {},
 ): Page {
   let current = config
   const published: RefreshDisplay<object, unknown>[] = []
-  const errors: RefreshError[] = []
+  const errors: unknown[] = []
   const handle: Handle = {
     source,
     config: () => current,
@@ -150,7 +149,7 @@ test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', a
   assert.equal(view.handle.subscription, subscription)
 })
 
-test('A03 参数被拒时返回 rejected，保留已有身份，并按 caller 通知', async () => {
+test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（输入问题只走同步返回值）', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1, validate: args => args.id > 0 })
   const core = newCore(2)
   const view = page(core, source)
@@ -163,11 +162,10 @@ test('A03 参数被拒时返回 rejected，保留已有身份，并按 caller �
   assert.equal(view.submit({ id: -1 }).status, 'rejected')
   assert.equal(view.handle.parameters, declared)
   assert.equal(view.handle.subscription, subscription)
-  assert.equal(view.errors.at(-1)?.origin, ErrorOrigin.Caller)
-  // 校验失败不改动任何状态：旧身份仍然在后台继续取数。
-  assert.equal(view.errors.length, 1)
+  // 校验失败不改动任何状态：旧身份仍然在后台继续取数；输入问题也不经 onError（ADR-51）。
+  assert.equal(view.errors.length, 0, '参数被拒只走同步返回值')
 
-  // 业务 validate 自己抛错时同样按 caller 拒绝：异常由提交边界收住，不冒泡到调用方。
+  // 业务 validate 自己抛错时同样按 rejected 返回：异常由提交边界收住，不冒泡到调用方。
   const throwing = defineRefresh<{ id: number }, number>({
     load: async () => 1,
     validate: () => { throw new Error('bad rule') },
@@ -175,7 +173,7 @@ test('A03 参数被拒时返回 rejected，保留已有身份，并按 caller �
   const victim = page(core, throwing)
   assert.equal(victim.submit({ id: 1 }).status, 'rejected')
   assert.equal(victim.handle.parameters, null, '被拒的声明不改动状态')
-  assert.equal(victim.errors.at(-1)?.origin, ErrorOrigin.Caller)
+  assert.equal(victim.errors.length, 0, '被拒的声明不产生通知')
 })
 
 test('A14 在途任务直接满足本次刷新：不追发第二次', async () => {
@@ -433,7 +431,7 @@ test('A13 共享请求失败：保留旧画面、通知页面、下个周期继�
 
   assert.ok(calls >= 2)
   assert.equal(view.last?.data, 5, '失败保留旧画面')
-  assert.equal(view.errors.at(-1)?.origin, 'request')
+  assert.ok(view.errors.length >= 1, '失败经 onError 通知')
   assert.equal(view.handle.subscription?.subscribers.size, 1, '需求与开启意愿都保留')
 })
 
@@ -453,7 +451,7 @@ test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重
 
   rejecters[0]?.(new Error('down'))
   await settle()
-  assert.equal(view.errors.at(-1)?.origin, 'request', '失败经 onError 通知：刷新没有回执')
+  assert.equal(view.errors.length, 1, '失败经 onError 通知：刷新没有回执')
   assert.notEqual(view.handle.subscription, null, '订阅与开启意愿都保留')
   assert.equal(resolvers.length, 1, '失败不自动重试')
 })
@@ -467,7 +465,7 @@ test('A13/A14 暂停页显式刷新失败：没有回执，失败仍经 onError 
   paused.refresh()
   await settle()
 
-  assert.equal(paused.errors.at(-1)?.origin, 'request', '未订阅页面只有 onError 这条失败通道')
+  assert.equal(paused.errors.length, 1, '未订阅页面只有 onError 这条失败通道')
   assert.equal(paused.published.length, 0, '失败不交付')
   assert.equal(core.snapshot().resources.length, 0, '失败撤销要求，实例随即释放')
 })
@@ -481,7 +479,7 @@ test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结�
   const empty = page(core, source)
   empty.submit({ id: 1 })
   await settle()
-  assert.equal(empty.errors.at(-1)?.origin, 'request')
+  assert.equal(empty.errors.length, 1)
   assert.equal(empty.last, undefined, '空结果不交付')
 
   mode = 'null'
@@ -571,7 +569,7 @@ test('A10 上限到期：挂死的 load 出册并交还槽位，迟到的结束�
 
   assert.equal(core.snapshot().running.length, 0, '上限到期当场出册，槽位交还调度')
   assert.equal(core.snapshot().resources[0]?.task, null)
-  assert.equal(view.errors.at(-1)?.origin, 'request')
+  assert.equal(view.errors.length, 1, '上限到期按请求失败通知一次')
 
   const delivered = view.published.length
   resolvers[0]?.(99)
@@ -676,7 +674,7 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
   core.dispose()
 })
 
-test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 caller 通知', async () => {
+test('A04/A05 配置非法时不订阅、不刷新、不通知，修正后恢复', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(2)
   const view = page(core, source, null)
@@ -687,7 +685,7 @@ test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 caller 通�
   assert.equal(view.published.length, 0)
 
   view.refresh()
-  assert.equal(view.errors.at(-1)?.origin, ErrorOrigin.Caller, '显式刷新在配置非法时经 onError 通知')
+  assert.equal(view.errors.length, 0, '配置非法不通知：页面读自己的 refs 就知道')
 })
 
 test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => {
@@ -744,11 +742,11 @@ test('边界总账：运行期失败只走返回值或 onError，公开入口都
     const view = page(core, source)
     assert.doesNotThrow(() => { view.submit({ id: 1 }) })
     await settle()
-    assert.equal(view.errors.at(-1)?.origin, 'request')
+    assert.equal(view.errors.length, 1)
     assert.equal(core.snapshot().running.length, 0)
   }
 
-  // 参数侧：复制失败、编码不出、`validate` 拒绝，一律是 `rejected` ＋ `caller` 通知，不产生实例。
+  // 参数侧：复制失败、编码不出、`validate` 拒绝，一律只给同步 `rejected`（不通知），也不产生实例。
   const source = defineRefresh<object, number>({
     load: async () => 1,
     validate: args => (args as { valid?: boolean }).valid !== false,
@@ -768,7 +766,7 @@ test('边界总账：运行期失败只走返回值或 onError，公开入口都
   ]) {
     assert.equal(page(newCore(1), defineRefresh<object, number>({ load: async () => 1, validate })).submit({}).status, 'rejected')
   }
-  assert.ok(view.errors.every(error => error.origin === ErrorOrigin.Caller))
+  assert.equal(view.errors.length, 0, '输入非法一律不通知')
   assert.equal(core.snapshot().resources.length, 0)
 
   // 刷新侧：入口状态不成立（这里是没有身份）时直接返回，不抛错、不需要 try/catch。

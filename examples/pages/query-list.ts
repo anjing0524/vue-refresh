@@ -41,15 +41,10 @@ export const QueryListPage = defineComponent({
     const task = useRefresh(listSource, {
       enabled,
       every: ref(1_500),
-      onError: error => {
-        // 框架只通知、从不写 enabled；「失败关闭」是页面在 onError 里自己做的决定。
-        if (error.origin === 'request') {
-          enabled.value = false
-          note.value = '后台请求失败：页面关闭自动刷新（框架不改写 enabled）'
-        } else {
-          // caller 侧：参数或配置不能被使用——重试同一份输入没有意义，页面不改写 enabled。
-          note.value = '页面参数或配置有误：框架只通知，不改写 enabled'
-        }
+      // 框架只通知取数失败、从不写 enabled；「失败关闭」是页面在 onError 里自己做的决定。
+      onError: () => {
+        enabled.value = false
+        note.value = '后台请求失败：页面关闭自动刷新（框架不改写 enabled）'
       },
     })
 

@@ -18,7 +18,7 @@ public-types.ts            公共类型的唯一代码定义与状态取值常�
 source.ts                  固定资源定义、提交边界准备与稳定键
 core.ts                    跨实例的协调者（注册表、名册、队列与并发、调度）＋ 一个身份的 Resource 类
 vue.ts                     组件适配与安装：配置快照、句柄、生命周期、可见性、只读入口
-index.ts                   包入口（三个函数、一个状态常量对象与 7 个公共类型）
+index.ts                   包入口（三个函数与 6 个公共类型；没有常量对象）
 ```
 
 依赖方向单向：`public-types` ← `source` ← `core` ← `vue` ← `index`。
@@ -35,11 +35,11 @@ index.ts                   包入口（三个函数、一个状态常量对象�
 
 | 文件 | 职责 |
 |---|---|
-| `public-types.ts` | 公共契约类型、一个状态取值常量对象（`ErrorOrigin`）与 `RefreshSource`（成员是方法，靠双变进入框架的擦除视图） |
+| `public-types.ts` | 公共契约类型（判别联合，没有常量对象）与 `RefreshSource`（成员是方法，靠双变进入框架的擦除视图） |
 | `source.ts` | `defineRefresh`、`Parameters`、`prepareParameters`（复制 → 稳定编码 → 深冻结 → 执行来源的 `validate`）、只读定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
 | `core.ts` | `RefreshCore`：跨实例的协调者——实例注册表、句柄名册、唯一 Timer 与 FIFO 队列、并发槽、只读计数投影；`Resource`：一个身份自己的状态与操作（订阅、刷新要求、到期、当前任务、交付与失败、结算与回收），越过实例边界只调核心的两个入口（`enqueue` / `releaseIfUnused`） |
 | `vue.ts` | `useRefresh`（配置快照、句柄、Display、生命周期）、`createRefreshManager`（安装、可见性监听、只读入口、销毁）、注入槽位 |
-| `index.ts` | 包导出：三个函数、一个状态常量对象、逐个列出的 7 个公共类型（不用 `export type *`）；工具型别名不导出 |
+| `index.ts` | 包导出：三个函数、逐个列出的 6 个公共类型（不用 `export type *`）；工具型别名不导出 |
 
 ### 2.1 调用链路
 
@@ -114,7 +114,7 @@ flowchart LR
 | Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
 | Entry | `data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
 | RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `snapshot` / `isDisposed` / `dispose`），**另加两个给实例用的入口** `enqueue` / `releaseIfUnused`（public，但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理 |
-| 配置快照与通知状态 | `snapshot`（初值非法）、`reported` | 名字见 `vue.ts`；只在适配闭包内，随组件作用域释放。快照同时是 `Handle.config` 返回的唯一事实，核心不重新调用 getter |
+| 配置快照 | `snapshot`（初值非法） | 名字见 `vue.ts`；只在适配闭包内，随组件作用域释放。快照同时是 `Handle.config` 返回的唯一事实，核心不重新调用 getter |
 
 `snapshot()` 是给演示面板与集成测试的只读计数投影（集合是副本，元素仍是核心对象），
 不属于包契约，也不提供改状态的入口。
@@ -160,7 +160,7 @@ flowchart LR
 | `refresh`（无论实例有没有当前请求） | 把本句柄加进集合 | 有请求就直接用它的结果（排队或已在执行都一样）；没有请求就当场登记一次。不 abort、不追发第二次 |
 | 同一实例多个句柄都要取数 | 各自保留 | 同一结果把它们一起满足 |
 | 任务成功 | 这一批要求全部移除 | 先交付（含仅由刷新要求产生的接收者），再移除 |
-| 任务失败或上限到期 | 该实例**全部**要求移除，并向这些页面各通知一次 `request` | 旧画面保留，订阅与开启意愿保留，下个周期继续 |
+| 任务失败或上限到期 | 该实例**全部**要求移除，并向这些页面各通知一次 | 旧画面保留，订阅与开启意愿保留，下个周期继续 |
 | 失去存在 / 卸载 / 销毁 | 撤销该句柄的要求，不通知 | `enabled` 边沿不撤销 |
 | 实例再无订阅与要求 | 随最后一个要求移除而销毁实例 | 不引入 TTL 或历史缓存 |
 
@@ -181,14 +181,12 @@ flowchart LR
 
 ### 3.8 状态取值与存放
 
-状态字面量的唯一来源是公开常量对象 `ErrorOrigin`（`public-types.ts`）。
-结果判别式（`status`）不单独枚举——判别联合本身就是这份枚举；单成员取值不立常量对象：
-`submit` 的取消分支不带原因（ADR-48）。
+取值域直接写在 `public-types.ts` 的判别联合里，**没有常量对象**（ADR-51）：调用方比较裸字面量。
+结果判别式（`status`）不单独枚举——判别联合本身就是这份枚举；单成员取值不立字段（`submit` 的取消分支不带原因）。
 
 | 状态域 | 取值 | 存放 |
 |---|---|---|
 | 结果产生时间 | 墙钟 epoch 毫秒（不保证单调） | `Entry.updatedAt` → 交付时进入 `RefreshDisplay.updatedAt`；与调度的单调时间 `settledAt` 是两个域 |
-| 错误来源 | `request` / `caller` | `RefreshError.origin`；按调用方能采取的动作分两侧（可重试 / 要改自己的输入），不按「哪一步失败」分（ADR-48）；交付面不交付「由谁触发」，这是唯一的来源域（ADR-34） |
 | 刷新要求 | 无 / 待满足（`Set<Handle>`） | `Resource.waiters` |
 | 当前订阅 | 实例 / `null`（间隔从配置快照现算） | `Handle.subscription` |
 | 配置快照 | 有效 / 非法（`null`） | 适配闭包 → `Handle.config` |
@@ -316,7 +314,7 @@ structuredClone → stringify（`fast-json-stable-stringify`：键排序 ＋ 数
 ### 6.1 配置快照
 
 - watch 源只读 `options.enabled.value` 与 `options.every.value`；两项都是必填的 `Ref`，改值即改配置。
-- 任一项读不出或值非法时快照为 `null`：不订阅、不自动刷新、连续非法只通知一次，修正后按当前资格恢复。
+- 任一项读不出或值非法时快照为 `null`：不订阅、不自动刷新、不通知，修正后按当前资格恢复（ADR-51）。
 - 读不到的开关绝不推断成 `false`：页面可以用 `computed` 表达暂态条件（例如
   `enabled: computed(() => store.ready && store.on)`），框架下一轮再读。
 - 核心只读这份快照，不重新调用业务 getter；快照不是可独立修改的第二份开启意愿。

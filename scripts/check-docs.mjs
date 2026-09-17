@@ -325,7 +325,7 @@ for (const form of new Set(allForms)) {
 // out would only weaken (c), never fail it. `active` was missing until 2026-09-17 (ADR-50).
 const INTERNAL_FIELDS = ['parameters', 'subscription', 'subscribers', 'waiters',
   'settledAt', 'entry', 'task', 'controller', 'wakeup', 'flushing', 'cleanup', 'disposed',
-  'visible', 'buckets', 'handles', 'queue', 'running', 'reported', 'snapshot', 'settle', 'active']
+  'visible', 'buckets', 'handles', 'queue', 'running', 'snapshot', 'settle', 'active']
 for (const field of INTERNAL_FIELDS) {
   check(!vocabulary.includes(field), '统一刷新管理.md §0',
     `§0 states outward meaning only, but names the internal field ${field} (DESIGN §3.3)`)
@@ -434,6 +434,11 @@ for (const [file, text] of [['/README.md', read('/README.md')], ['/DESIGN.md', d
 const apiRows = design.slice(design.indexOf('## 2. 公共 API 契约'), design.indexOf('### 2.1')).split('\n')
 for (const [kind, head] of [['函数', '| 函数 |'], ['状态常量对象', '| 状态常量'], ['公共类型', '| 类型 |']]) {
   const row = apiRows.find(value => value.startsWith(head))
+  if (!exported[kind].length) {
+    // A kind the entry no longer exports must not keep a row (ADR-51 removed the last constant object).
+    check(!row, '统一刷新管理.md §2', `the API list still has a ${kind} row, but the entry exports none`)
+    continue
+  }
   check(Boolean(row), '统一刷新管理.md §2', `missing the ${kind} row of the API list`)
   if (row) {
     const named = [...row.matchAll(/`([^`]+)`/g)].map(match => match[1]).filter(identifier)

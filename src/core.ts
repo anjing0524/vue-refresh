@@ -1,5 +1,4 @@
-import { ErrorOrigin } from './public-types.ts'
-import type { RefreshDisplay, RefreshError, RefreshSource, SubmitResult } from './public-types.ts'
+import type { RefreshDisplay, RefreshSource, SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
 
 /**
@@ -36,7 +35,7 @@ export interface Handle<P extends object = object, T = unknown> {
    * 擦除后的注册表槽位，适配层不必在创建点断言。
    */
   publish(display: RefreshDisplay<P, T>): void
-  readonly onError: (error: RefreshError) => unknown
+  readonly onError: (error: unknown) => unknown
   cleanup: (() => void) | null
   /** 已声明的身份；未声明时为 `null`。 */
   parameters: Parameters | null
@@ -148,7 +147,7 @@ export class Resource {
     for (const handle of notified) {
       // 前一个页面的 `onError` 可能已经改身份或退订，因此每个通知点重新复核归属。
       if (!this.subscribers.has(handle) && !this.waiters.has(handle)) continue
-      report(handle, { origin: ErrorOrigin.Request, error })
+      report(handle, error)
     }
     for (const handle of [...this.waiters]) this.clearRequest(handle)
   }
@@ -178,9 +177,6 @@ export class Resource {
   }
 }
 
-/** 配置非法的统一报错文本：`vue.ts` 的配置 watcher 与 `refresh` 入口共用同一句。 */
-export const INVALID_CONFIG_MESSAGE = '刷新配置非法：enabled 必须是布尔值，every 必须是正安全整数'
-
 /** 框架侧单次 `load` 的上限（毫秒）：从真正开始执行起算，排队等待不计入（数值与依据见 ADR-20）。 */
 const LOAD_TIMEOUT_MS = 10_000
 
@@ -197,8 +193,8 @@ function isolate(effect: () => unknown): void {
   }
 }
 
-/** 经 `onError` 通知页面。框架自身的失败不进这条通道（它没有页面可报）。 */
-export function report(handle: Handle, error: RefreshError): void {
+/** 经 `onError` 通知页面：**只报共享请求失败**，参数是原始异常（ADR-51）。框架自身的失败不进这条通道。 */
+export function report(handle: Handle, error: unknown): void {
   isolate(() => handle.onError(error))
 }
 
@@ -305,7 +301,7 @@ export class RefreshCore {
       parameters = prepare()
     } catch (error) {
       // 无效声明不改动任何状态：旧身份、订阅与未结算的刷新要求原样保留。
-      report(handle, { origin: ErrorOrigin.Caller, error })
+      // 输入问题不走 `onError`：它由本次调用的同步返回值说清楚（ADR-51）。
       return { status: 'rejected', error }
     }
     const declared = handle.parameters
@@ -323,16 +319,12 @@ export class RefreshCore {
    * 显式刷新：有当前请求就直接用它的结果，没有就当场登记一次；不恢复自动刷新，也不改写调用方的开关。
    *
    * **不回执**：成功只经 `display`（U11／U12），失败只经 `onError`（与自动刷新同一条通道，U13）。
-   * 入口条件不成立时直接返回、不产生副作用：已销毁、未声明身份、环境不允许都不通知（页面自己知道这些状态）；
-   * 只有配置非法会按 `caller` 通知一次——那是一次显式动作的失败，重试同一份配置没有意义。
+   * 入口条件不成立时直接返回、不产生副作用也不通知：已销毁、未声明身份、环境不允许、配置非法
+   * ——这些状态页面自己就能看到（ADR-51）。
    */
   refresh(handle: Handle): void {
     if (this.disposed || handle.disposed) return
-    const config = handle.config()
-    if (config === null) {
-      report(handle, { origin: ErrorOrigin.Caller, error: new TypeError(INVALID_CONFIG_MESSAGE) })
-      return
-    }
+    if (handle.config() === null) return
     if (!(handle.active && this.visible)) return
     const parameters = handle.parameters
     if (parameters === null) return
