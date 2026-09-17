@@ -323,8 +323,8 @@ for (const form of new Set(allForms)) {
 // Field names owned by DESIGN §3.3. Add one here when that table gains a persistent field; leaving it
 // out would only weaken (c), never fail it.
 const INTERNAL_FIELDS = ['operationId', 'parameters', 'subscription', 'subscribers', 'waiters',
-  'settledAt', 'issued', 'entry', 'task', 'controller', 'wakeup', 'flushing', 'cleanup', 'disposed',
-  'visible', 'buckets', 'handles', 'queue', 'running', 'reported', 'snapshot', 'min', 'settle']
+  'settledAt', 'entry', 'task', 'controller', 'wakeup', 'flushing', 'cleanup', 'disposed',
+  'visible', 'buckets', 'handles', 'queue', 'running', 'reported', 'snapshot', 'settle']
 for (const field of INTERNAL_FIELDS) {
   check(!vocabulary.includes(field), '统一刷新管理.md §0',
     `§0 states outward meaning only, but names the internal field ${field} (DESIGN §3.3)`)

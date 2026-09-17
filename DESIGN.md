@@ -28,7 +28,7 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 
 `core.ts` 按职责分成七个分段：状态观测与生命周期、页面操作、只读定位与观测面、需求关系、后台执行、刷新要求、调度。
 全部可变状态都在 `core.ts`，按所属分两处：跨实例的挂在协调者上（注册表、名册、队列与并发、唯一唤醒 Timer），
-一个身份自己的在 `Resource` 类里（订阅、刷新要求、结果、到期与当前任务），越过实例边界只调核心的三个入口；
+一个身份自己的在 `Resource` 类里（订阅、刷新要求、结果、到期与当前任务），越过实例边界只调核心的两个入口；
 `vue.ts` 只读公开入口与模块级单例（当前协调者），`source.ts` 是无状态函数的边界。
 
 ## 2. 模块职责
@@ -37,7 +37,7 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 |---|---|
 | `public-types.ts` | 公共契约类型、两个状态取值常量对象（`ErrorOrigin` / `CancelReason`）与 `RefreshSource`（成员是方法，靠双变进入框架的擦除视图） |
 | `source.ts` | `defineRefresh`、`Parameters`、`prepareParameters`（复制 → 稳定编码 → 深冻结 → 执行来源的 `validate`）、只读定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
-| `core.ts` | `RefreshCore`：跨实例的协调者——实例注册表、句柄名册、唯一 Timer 与 FIFO 队列、并发槽、只读计数投影；`Resource`：一个身份自己的状态与操作（订阅、刷新要求、到期、当前任务、交付与失败、结算与回收），越过实例边界只调核心的三个入口（`enqueue` / `registered` / `releaseIfUnused`） |
+| `core.ts` | `RefreshCore`：跨实例的协调者——实例注册表、句柄名册、唯一 Timer 与 FIFO 队列、并发槽、只读计数投影；`Resource`：一个身份自己的状态与操作（订阅、刷新要求、到期、当前任务、交付与失败、结算与回收），越过实例边界只调核心的两个入口（`enqueue` / `releaseIfUnused`） |
 | `vue.ts` | `useRefresh`（配置快照、句柄、Display、生命周期）、`createRefreshManager`（安装、可见性监听、只读入口、销毁）、注入槽位 |
 | `index.ts` | 包导出：三个函数、三个状态常量对象、逐个列出的 8 个公共类型（不用 `export type *`）；工具型别名不导出 |
 
@@ -63,7 +63,7 @@ readSnapshot → 算键 → 查实例 → 独立副本（不建实例、不保�
 ```
 
 实例与核心的边界只有两个入口：`enqueue`（排一次请求）、`releaseIfUnused`（没需求了就回收）
-（没人要了就注销）。实例持有核心本身，但只用这三个入口；核心其余成员全部 `private`。
+（没人要了就注销）。实例持有核心本身，但只用这两个入口；核心其余成员全部 `private`。
 
 需求侧对应：`U01`–`U03` → `submit` 与 `resourceFor`；`U04`–`U06` → `coordinate`、`unsubscribe`、`releaseIfUnused`；
 `U07`–`U10` → `Resource.dueAt`、`flush`、`runTask`、`expire`；`U11`–`U13` → `Resource.publish`、`Resource.fail`、`Resource.deliverTo`；
@@ -86,7 +86,7 @@ flowchart LR
   Resource --> Waiters[waiters: 刷新要求]
   Resource --> Task[task: 当前执行]
   Resource --> Entry[entry: 最近一次结果]
-  Resource -. 三个入口 .-> Core[RefreshCore 注册表 / 名册 / 队列 / 槽位]
+  Resource -. 两个入口 .-> Core[RefreshCore 注册表 / 名册 / 队列 / 槽位]
 ```
 
 `Handle.parameters` 是**声明的身份**，`Resource.parameters` 是**实例建立时用的参数**：前者是需求，后者是事实，
@@ -96,13 +96,12 @@ flowchart LR
 `Resource` 是**类**而不是字段集合：一个身份内的转换都定义在它自己身上，核心不替它做决定；两者之间只有
 两个入口（`enqueue` / `releaseIfUnused`）——核心因此不再需要中间接口，实例直接调它（ADR-42、ADR-44）。
 
-### 3.2 身份与版本域
+### 3.2 身份与代次域
 
 - Source 对象身份 ＋ `Parameters.key` 定位实例；实例的生存期由订阅与刷新要求共同决定。
-- `Handle.operationId` 是声明代次，只用于错误的归属；`Resource.issued` 是**最后一个已分配**的任务版本，
-  `Task.version` 与 `Entry.version` 处于同一实例的版本域；刷新要求不记版本（§3.6）。
-- 任务版本只在同一实例内比较；声明代次不能替代任务版本，刷新要求与页面身份也不共用计数。
-- 序号域足够大（安全整数上界，单页每毫秒一次提交也要约 28.5 万年才到达）：到达上界后停在原地，
+- `Handle.operationId` 是**唯一的代次**：一个页面自己的声明序列，只用于错误的归属。
+- 代次只在同一个句柄内递增；实例、刷新要求与页面身份都不共用这个计数——任务与结果都不记版本（ADR-45）。
+- 代次域足够大（安全整数上界，单页每毫秒一次提交也要约 28.5 万年才到达）：到达上界后停在原地，
   不销毁协调者、不抛错，也不给调用方第三种结果（ADR-23 的结论在 `nextSequence` 上保留）。
 
 ### 3.3 持久字段与唯一所有者
@@ -114,10 +113,10 @@ flowchart LR
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；准备成功后只读 | 提交边界复制/冻结/编码；需求与实例释放后回收 |
 | Handle | `operationId=0`、`parameters=null`、`subscription=null`、`cleanup=null`、`active=false`、`disposed=false` | 全部写入都在 `core.ts` 内：声明与关系由核心写，生命周期走 `activate` / `deactivate`，`cleanup` 走句柄字段；适配层只读它们。`source` / `config` / `publish` / `onError` 是固定端口；`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
-| Resource | 类：`core`（只用它三个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`entry=null`、`settledAt=null`、`issued=0`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值且已冻结，`deliverTo` 与 `load` 也只用这一份）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `settleWaiter` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `issued` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
-| Task | `resource`、`version`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
+| Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值且已冻结，`deliverTo` 与 `load` 也只用这一份）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `settleWaiter` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
+| Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
 | Waiter | `handle`、`settle` | `refresh` 创建并挂到实例的 `waiters` 上；原生 Promise 首次结算生效；由当前那个请求的结果结算（没有请求时由本次要求当场登记的任务结算）；失败/失去存在/销毁时结算 |
-| Entry | `version`、`data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
+| Entry | `data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
 | RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `readSnapshot` / `snapshot` / `isDisposed` / `dispose`），**另加两个给实例用的入口** `enqueue` / `releaseIfUnused`（public，但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理 |
 | 配置快照与通知状态 | `snapshot`（初值非法）、`reported` | 名字见 `vue.ts`；只在适配闭包内，随组件作用域释放。快照同时是 `Handle.config` 返回的唯一事实，核心不重新调用 getter |
 
@@ -149,11 +148,10 @@ flowchart LR
 5. 结果只来自该实例的当前任务的成功；删除后旧请求不得重建该实例。（`runTask` 在 `await` 之后与复制结果之后各复核一次，`Resource.publish` 只被它调用）
 6. 只有共享路径写结果与交付 `display`；DTO 与结果之间无可变别名，每个接收者各一份副本。（`Resource.publish` → `deliverTo` 的 `structuredClone`；`readSnapshot` 另复制一份）
 7. 当前任务的正常成功/失败在交付之前更新 `settledAt`；取消与旧任务不更新。（`Resource.publish` 与 `Resource.fail` 的第一行）
-8. `task` 非空时 `task.version === issued`；`issued` 单调不减，到达安全整数上界后停在原地。（`enqueue` 与 `nextSequence`）
-9. 订阅成立后 `handle.parameters === resource.parameters`：一个身份只保留一份参数对象，后加入者采用实例已持有的那一份。（`coordinate` 接入时改写句柄字段）
-10. `dispose` 后句柄、注册表、队列、结果、Timer 与监听已清；未结束的执行到真实结束才移除。（`dispose` → 逐个 `removeHandle` → `buckets.clear`）
-11. 框架上限由「开始执行时登记的一次性计时」表达；到期先撤销在册身份，之后任何迟到的结束都不再写事实。（`runTask` 的 `setTimeout` 与 `expire`）
-12. 注销只发生在订阅与要求都空时，且空实例再也拿不到新的边：新订阅只能落在 `resourceFor` 当前返回的实例上，新要求也一样。（`releaseIfUnused` 是唯一注销点；`coordinate` 与 `refresh` 都经 `resourceFor`）
+8. 订阅成立后 `handle.parameters === resource.parameters`：一个身份只保留一份参数对象，后加入者采用实例已持有的那一份。（`coordinate` 接入时改写句柄字段）
+9. `dispose` 后句柄、注册表、队列、结果、Timer 与监听已清；未结束的执行到真实结束才移除。（`dispose` → 逐个 `removeHandle` → `buckets.clear`）
+10. 框架上限由「开始执行时登记的一次性计时」表达；到期先撤销在册身份，之后任何迟到的结束都不再写事实。（`runTask` 的 `setTimeout` 与 `expire`）
+11. 注销只发生在订阅与要求都空时，且空实例再也拿不到新的边：新订阅只能落在 `resourceFor` 当前返回的实例上，新要求也一样。（`releaseIfUnused` 是唯一注销点；`coordinate` 与 `refresh` 都经 `resourceFor`）
 
 ### 3.6 刷新要求的唯一更新表
 
@@ -229,7 +227,7 @@ ADR-43 把它一并删掉。
 需求变空只有两个入口：`unsubscribe`（退订）与 `Resource.settleWaiter`（要求结算完），`submit` / 隐藏 / 卸载
 都经由它们。两者都调 `releaseIfUnused`，它只判 `subscribers` / `waiters` 是否真的都空，然后注销这个键——
 不再另判「实例是否仍在册」：「都空」已经蕴含「在册」，因为注销是唯一的删除路径，而空实例再也拿不到新的边
-（§3.5 第 12 条；ADR-44 删掉那次在册复核的依据）。注销做四件事：删注册、
+（§3.5 第 11 条；ADR-44 删掉那次在册复核的依据）。注销做四件事：删注册、
 清 `entry`、清 `task`、`abort` 在途；还在排队的任务同时从 `queue` 移除。
 `abort` 不承诺底层立刻结束，所以迟到的 `load` 返回由 `runTask` 的身份复核（`resource.task !== task`）判为无效：
 不写结果、不交付、不二次通知；它的 `finally` 只清自己的计时与槽位。
@@ -363,7 +361,7 @@ structuredClone → stringify（`fast-json-stable-stringify`：键排序 ＋ 数
 
 ## 7. 顺序约束
 
-1. **先建立新身份，再作废旧关系。** 新任务与版本、新声明必须先就位，再 abort 旧执行。
+1. **先建立新身份，再作废旧关系。** 新任务与新声明必须先就位，再 abort 旧执行。
 2. **先让内部关系完整失效，再产生外部效果。** 退订先清句柄字段与集合成员，再删结果，最后 abort。
 3. **外部效果之后复核身份。** `await`、复制结果、交付每个接收者之前都要重新判断归属。
 4. **旧清理只清自己。** 旧执行的 `finally` 只移除自己的槽位成员。

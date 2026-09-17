@@ -21,7 +21,7 @@ export interface HarnessSnapshot {
   events: string[]
   queryResults: Record<string, RefreshResult | null>
   pages: Record<string, { readonly args: QuoteParams; readonly data: Quote; readonly updatedAt: number; readonly manual: boolean } | null>
-  entries: Record<string, { version: number; data: Quote }>
+  entries: Record<string, { data: Quote }>
   running: number
   queued: number
   resources: number
@@ -191,7 +191,7 @@ function mountHarness(): void {
           const display = c.task.display.value
           return [name, display === null ? null : { ...structuredClone(display), manual: display.updatedAt === manualAt[name] }]
         })),
-        entries: structuredClone(view.entries) as Record<string, { version: number; data: Quote }>,
+        entries: structuredClone(view.entries) as Record<string, { data: Quote }>,
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,
         timer: view.scheduled, pending: view.flushing,

@@ -691,7 +691,7 @@ test('A05/A14 未声明身份时刷新结算 unavailable，不产生请求', asy
   assert.equal(calls, 0)
 })
 
-test('A18 参数编码与序号上界：键按 JSON 语义稳定排序，序号到达上界后停在原地', async () => {
+test('A18 参数编码与声明代次上界：键按 JSON 语义稳定排序，代次到达上界后停在原地', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(1)
   const view = page(core, source)
@@ -712,7 +712,7 @@ test('A18 参数编码与序号上界：键按 JSON 语义稳定排序，序号�
   assert.equal(view.submit(cyclic).status, 'rejected')
   assert.equal(view.handle.parameters, null)
 
-  // 序号到达安全整数上界后停在原地：不销毁、不抛错，入口照常工作。
+  // 声明代次到达安全整数上界后停在原地：不销毁、不抛错，入口照常工作。
   view.handle.operationId = Number.MAX_SAFE_INTEGER
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
   assert.equal(view.handle.operationId, Number.MAX_SAFE_INTEGER)

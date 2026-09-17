@@ -53,7 +53,6 @@ export interface Handle<P extends object = object, T = unknown> {
 /** 一次后台执行；执行位置由 `queue` / `running` 的归属决定。 */
 export interface Task {
   readonly resource: Resource
-  readonly version: number
   readonly controller: AbortController
 }
 
@@ -69,7 +68,6 @@ export interface Waiter {
 
 /** 实例最近一次有效结果。 */
 export interface Entry {
-  readonly version: number
   readonly data: unknown
   readonly updatedAt: number
 }
@@ -93,8 +91,6 @@ export class Resource {
   entry: Entry | null = null
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
   settledAt: number | null = null
-  /** 最后一个已分配的任务版本。 */
-  issued = 0
   task: Task | null = null
 
   constructor(core: RefreshCore, source: RefreshSource<object, unknown>, parameters: Parameters) {
@@ -177,7 +173,7 @@ export class Resource {
 
   /**
    * 任务结束后仍有未完成的要求时补一次请求。唯一来源是交付回调里的重入：`publish` 先定下这一批要结算的
-   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求结算。有要求就必然在册（§3.5 第 12 条）。
+   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求结算。有要求就必然在册（§3.5 第 11 条）。
    */
   refill(): void {
     if (this.waiters.size === 0 || this.task !== null) return
@@ -200,7 +196,7 @@ const LOAD_TIMEOUT_MS = 10_000
 /** `setTimeout` 的平台上限（约 24.8 天）；更远的到期分段等待。 */
 const MAX_TIMER_DELAY = 2_147_483_647
 
-/** 序号分配：安全整数区间内递增，到达上界后停在原地；不销毁、不抛错，也不给调用方第三种结果（ADR-23）。 */
+/** 声明代次分配：安全整数区间内递增，到达上界后停在原地；不销毁、不抛错，也不给调用方第三种结果（ADR-23）。 */
 function nextSequence(previous: number): number {
   return previous < Number.MAX_SAFE_INTEGER ? previous + 1 : previous
 }
@@ -498,7 +494,7 @@ export class RefreshCore {
 
   /**
    * 没有订阅者也没有刷新要求：删实例与排队任务，abort 在途；迟到的结束在任务身份复核处失效。**实例入口**。
-   * 只判「都空」就够：注销是唯一的删除路径，此刻这个键指向的必定是它自己（§3.5 第 12 条）。
+   * 只判「都空」就够：注销是唯一的删除路径，此刻这个键指向的必定是它自己（§3.5 第 11 条）。
    */
   releaseIfUnused(resource: Resource): void {
     if (resource.subscribers.size > 0 || resource.waiters.size > 0) return
@@ -517,11 +513,9 @@ export class RefreshCore {
 
   // ══════════════════════════ 后台执行 ══════════════════════════
 
-  /** 分配版本并登记一次后台执行；全部调用点都先确认没有当前任务，因此不替换、不 abort 在途。**实例入口**。 */
+  /** 登记一次后台执行；全部调用点都先确认没有当前任务，因此不替换、不 abort 在途。**实例入口**。 */
   enqueue(resource: Resource): void {
-    const version = nextSequence(resource.issued)
-    resource.issued = version
-    const task: Task = { resource, version, controller: new AbortController() }
+    const task: Task = { resource, controller: new AbortController() }
     resource.task = task
     this.queue.add(task)
   }
@@ -533,7 +527,7 @@ export class RefreshCore {
     try {
       const raw = await resource.source.load(resource.parameters.args, { signal: task.controller.signal })
       if (resource.task !== task) return
-      const entry: Entry = { version: task.version, data: copyResult(raw), updatedAt: Date.now() }
+      const entry: Entry = { data: copyResult(raw), updatedAt: Date.now() }
       if (resource.task !== task) return
       resource.publish(entry)
     } catch (error) {
