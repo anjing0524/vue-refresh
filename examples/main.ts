@@ -1,7 +1,7 @@
 import { createApp, defineComponent, h, inject, KeepAlive, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { defineRefresh } from '../src/source'
-import type { ReadonlySnapshot, RefreshHandle, RefreshLoadContext, RefreshResult } from '../src/public-types'
+import type { RefreshHandle, RefreshResult } from '../src/public-types'
 import { createRefreshManager, managerKey, useRefresh } from '../src/vue'
 import type { RefreshCore } from '../src/core'
 interface QuoteParams { account: string; symbol: string }
@@ -62,7 +62,7 @@ function mountHarness(): void {
   const timeout = Number(params.get('timeout') ?? 10_000)
   const calls: Array<{ id: number; signal: AbortSignal; finished: boolean; resolve: (value: Quote) => void }> = []
   const events: string[] = []
-  const readQuote = async (args: ReadonlySnapshot<QuoteParams>, { signal }: RefreshLoadContext): Promise<Quote> => {
+  const readQuote = async (args: QuoteParams, { signal }: { signal: AbortSignal }): Promise<Quote> => {
     const id = calls.length + 1
     let resolve!: (value: Quote) => void
     const deferred = controlled ? new Promise<Quote>(yes => { resolve = yes }) : null

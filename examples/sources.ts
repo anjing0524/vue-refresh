@@ -5,7 +5,7 @@
  * 身份、共享、调度、取消与有效结果交付都由框架负责；参数与 DTO 的运行时校验属于 HTTP 边界。
  */
 import { defineRefresh } from '../src/source'
-import type { ReadonlySnapshot, RefreshLoadContext, RefreshManager, RefreshSource } from '../src/public-types'
+import type { RefreshManager, RefreshSource } from '../src/public-types'
 
 export type SortField = 'price' | 'change' | 'volume'
 
@@ -47,7 +47,7 @@ async function request(path: string, signal: AbortSignal): Promise<unknown> {
   }
 }
 
-const quoteQuery = (args: ReadonlySnapshot<QuoteParams>): string =>
+const quoteQuery = (args: QuoteParams): string =>
   `account=${encodeURIComponent(args.account)}&symbol=${encodeURIComponent(args.symbol)}`
 
 /** HTTP 边界的响应校验：业务结构在这里被拒绝，框架只拒绝 undefined 并建立副本所有权。 */
@@ -61,7 +61,7 @@ function readQuote(body: unknown): QuoteResult {
   return { quote: { price, requestId } }
 }
 
-export async function runQuote(args: ReadonlySnapshot<QuoteParams>, { signal }: RefreshLoadContext): Promise<QuoteResult> {
+export async function runQuote(args: QuoteParams, { signal }: { signal: AbortSignal }): Promise<QuoteResult> {
   return readQuote(await request(`/api/quote?${quoteQuery(args)}`, signal))
 }
 
@@ -77,7 +77,7 @@ function readList(body: unknown, page: number): ListResult {
   return { rows, page, requestId: data.requestId }
 }
 
-export async function runList(args: ReadonlySnapshot<ListParams>, { signal }: RefreshLoadContext): Promise<ListResult> {
+export async function runList(args: ListParams, { signal }: { signal: AbortSignal }): Promise<ListResult> {
   const query = new URLSearchParams({
     account: args.account, market: args.market, page: String(args.page), sortBy: args.sortBy,
   })
@@ -105,8 +105,8 @@ export function bindManager(manager: RefreshManager): void {
   installed = manager
 }
 
-/** 只读共享快照（S03）：不创建资源、不延长生存期，无分区返回 undefined。 */
-export function readShared<P extends object, T>(source: RefreshSource<P, T>, args: P): ReadonlySnapshot<T> | undefined {
+/** 只读共享快照：不创建实例、不延长生存期，无结果返回 undefined。返回类型由包自己的签名推断。 */
+export function readShared<P extends object, T>(source: RefreshSource<P, T>, args: P) {
   return installed?.readSnapshot(source, args)
 }
 

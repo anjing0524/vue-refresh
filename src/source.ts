@@ -3,8 +3,9 @@ import type { ReadonlySnapshot, RefreshLoadContext, RefreshSource } from './publ
 /**
  * 参数边界：固定资源定义与提交边界的一次准备。
  *
- * 根需求只有两条：**身份稳定**（同样参数值共享同一次请求）与**快照隔离**（页面改草稿不影响已提交的
- * 身份）。因此这里只有一趟遍历：值域守卫、深度守卫、按需冻结与稳定编码在同一次递归里完成。
+ * 根需求只有两条：**身份稳定**（同样参数值共享同一次请求）与**快照隔离**（页面改草稿不影响已提交的身份）。
+ * 因此这里只有两个各做一件事的函数：`canonical` 是纯编码（对象键排序、数组保序、值域与深度守卫都在它里面），
+ * `deepFreeze` 是唯一一处副作用（冻结框架自己持有的那份副本）。
  */
 
 /** 一次已准备的请求参数。 */
@@ -38,54 +39,67 @@ export function sourceRuntime(source: object): SourceRuntime {
 /** 只为阻断循环与病态嵌套，**不是业务上限**（G01 已关闭：不因键大而拒绝合法查询）。 */
 const MAX_PARAMETER_DEPTH = 1_000
 
-/** 一趟完成：值域守卫 → 深度守卫 → 按需冻结 → 稳定编码。非法值按非法参数抛错。 */
-function encode(value: unknown, depth: number, freeze: boolean): string {
+/**
+ * 稳定编码：对象键排序、数组保序；值域与深度非法即抛。**纯函数**，不改动输入。
+ *
+ * `JSON.stringify` 无法重排对象键，所以排序只能自己走一遍；守卫与深度检查顺路做完，
+ * 因此这一趟同时承担「值域守卫 ＋ 循环/病态嵌套守卫 ＋ 稳定编码」。
+ */
+function canonical(value: unknown, depth: number): string {
   if (value === null) return 'null'
   if (typeof value === 'string') return JSON.stringify(value)
   if (typeof value === 'boolean') return value ? 'true' : 'false'
-  if (typeof value === 'number') return encodeNumber(value)
+  if (typeof value === 'number') return canonicalNumber(value)
   if (typeof value !== 'object') throw new TypeError('Parameters require JSON data')
   if (depth > MAX_PARAMETER_DEPTH) throw new RangeError('Parameters must be acyclic JSON data')
   return Array.isArray(value)
-    ? encodeArray(value, depth, freeze)
-    : encodeRecord(value as Record<string, unknown>, depth, freeze)
+    ? canonicalArray(value, depth)
+    : canonicalRecord(value as Record<string, unknown>, depth)
 }
 
-function encodeNumber(value: number): string {
+function canonicalNumber(value: number): string {
   if (!Number.isFinite(value) || Object.is(value, -0)) throw new TypeError('Parameters require JSON data')
   return String(value)
 }
 
-function encodeArray(value: unknown[], depth: number, freeze: boolean): string {
+function canonicalArray(value: unknown[], depth: number): string {
   const items: string[] = []
-  for (const item of value) items.push(encode(item, depth + 1, freeze))
-  if (freeze) Object.freeze(value)
+  for (const item of value) items.push(canonical(item, depth + 1))
   return `[${items.join(',')}]`
 }
 
-/** 对象按键排序编码，因此字段顺序不同仍共享同一个身份；数组保持原顺序。 */
-function encodeRecord(value: Record<string, unknown>, depth: number, freeze: boolean): string {
+function canonicalRecord(value: Record<string, unknown>, depth: number): string {
   const prototype = Object.getPrototypeOf(value)
   if (prototype !== Object.prototype && prototype !== null) {
     throw new TypeError('Parameters require JSON records or arrays')
   }
   const entries: string[] = []
   for (const key of Object.keys(value).sort()) {
-    entries.push(`${JSON.stringify(key)}:${encode(value[key], depth + 1, freeze)}`)
+    entries.push(`${JSON.stringify(key)}:${canonical(value[key], depth + 1)}`)
   }
-  if (freeze) Object.freeze(value)
   return `{${entries.join(',')}}`
+}
+
+/** 冻结框架自己持有的副本（`structuredClone` 的产物，只有普通对象与数组）；调用方原对象不冻结。 */
+function deepFreeze(value: unknown): void {
+  if (value === null || typeof value !== 'object') return
+  Object.freeze(value)
+  for (const child of Object.values(value)) deepFreeze(child)
 }
 
 /** 只读定位：只编码，不复制、不冻结、不执行 `validate`。 */
 export function parameterKey(input: object): string {
-  return encode(input, 1, false)
+  return canonical(input, 1)
 }
 
-/** 提交边界只执行一次：复制 → 守卫/冻结/编码 → 可选业务校验；任何一步失败都按非法参数拒绝。 */
+/**
+ * 提交边界只执行一次：复制 → 稳定编码（顺路守卫值域、循环与深度）→ 冻结副本 → 可选业务校验。
+ * 任何一步失败都按非法参数拒绝，不产生实例或后台任务。
+ */
 export function prepareParameters(input: object, validate?: (args: object) => boolean): Parameters {
   const args: object = structuredClone(input)
-  const key = encode(args, 1, true)
+  const key = canonical(args, 1)
+  deepFreeze(args)
   if (validate) {
     const valid: unknown = validate(args)
     if (typeof valid !== 'boolean') {
