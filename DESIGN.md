@@ -109,8 +109,8 @@ flowchart LR
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给每个消费者（`validate`／每轮 `load`／每个接收者的 `display`）时各复制一份；需求与实例释放后回收 |
 | Handle | 组 A 端口：`source` / `config` / `publish` / `onError`（创建时给全）；组 B 状态：`parameters=null`、`subscription=null`、`active=false`；组 C 接驳：`cleanup=null` | 三种角色分开看（**本表是这三组角色的权威定义**）：**组 A** 适配层一次给全、此后只读，核心只调它们；**组 B** 核心独占写入，适配层只给初值、从不读——其中 `subscription` 是**反向索引**（与 `Resource.subscribers` 的成员资格同源，成对写入，见 §3.5 第 1 条）；**组 C** `cleanup` 是唯一双向成员：适配层在 watcher 就绪后写一次（晚于 `addHandle` 才产生），核心在 `removeHandle` 读、清、调。「句柄是否已释放」不存字段，由 `RefreshCore.handles` 的名册成员资格决定（§3.7）。`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
-| Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `clearRequest` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
-| Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
+| Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `clearRequest` / `refill`（`deliverTo` 私有）；核心越出实例边界只碰四个字段：`task`（只经 `placeTask`，§3.5 第 4 条）、`entry`（`releaseIfUnused` 清）、`subscribers` 与 `waiters` 的增删（`coordinate` / `unsubscribe` / `refresh`） |
+| Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；位置（在队／在跑／被弃／已结算）只由 `placeTask` 迁移；`finally` 交还真实槽位，`expire` 提前交还 |
 | Entry | `data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
 | RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `snapshot` / `isDisposed` / `dispose`），**另加两个给实例用的入口** `enqueue` / `releaseIfUnused`（public，但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理 |
 | 配置快照 | `snapshot`（初值非法） | 名字见 `vue.ts`；只在适配闭包内，随组件作用域释放。快照同时是 `Handle.config` 返回的唯一事实，核心不重新调用 getter |
@@ -139,7 +139,7 @@ flowchart LR
 1. `subscription` 非空时，它指向的实例的 `subscribers` 一定含有该句柄；退订先把句柄字段清空再删集合成员。（`coordinate` 接入、`unsubscribe` 退出）
 2. 注册表只指向当前生存期的实例；实例被删除后不再被 `flush` 遍历到，也不接受新的订阅。（`resourceFor` 建立、`releaseIfUnused` 删桶）
 3. 每次调度都用各订阅**当前配置快照**里 `every` 的最小值现算到期，不缓存间隔，也不缓存「下次到期」以外的派生值。（`Resource.dueAt` / `Resource.shortestEvery`）
-4. 一个实例至多一个当前任务；任务至多在 `queue` / `running` 之一；abort 不释放槽位，`expire` 除外。（`enqueue` 与 `runTask` 的 `finally` / `expire`；`flush` 排空时丢弃 `resource.task` 已不指向它的过期任务）
+4. 一个实例至多一个当前任务；任务的位置（在队／在跑／被弃／已结算）与它是不是「当前执行」只由 `placeTask` 一处改写，`enqueue`、`flush` 起跑、`runTask` 的 `finally`、`expire`、`releaseIfUnused` 都经它；abort 不释放槽位，`expire` 除外。仅有的两处例外是 `dispose` 整表清空 `queue` 与 `flush` 丢弃过期项。（ADR-56）
 5. 结果只来自该实例的当前任务的成功；删除后旧请求不得重建该实例。（`runTask` 在 `await` 之后与复制结果之后各复核一次，`Resource.publish` 只被它调用）
 6. 只有共享路径写结果与交付 `display`；DTO 与结果之间无可变别名，每个接收者各一份副本。（`Resource.publish` → `deliverTo` 的 `structuredClone`）
 7. 当前任务的正常成功/失败在交付之前更新 `settledAt`；取消与旧任务不更新。（`Resource.publish` 与 `Resource.fail` 的第一行）
@@ -172,7 +172,7 @@ flowchart LR
 
 ### 3.7 派生值：不重复保存
 
-- 任务的执行阶段由 `queue` / `running` 的归属决定，不存字段。
+- 任务的位置由 `queue` / `running` 的归属决定；此外另存一个「本实例的当前执行」位 `Resource.task`（它要回答的是「这次迟到的结束还算不算数」，不是位置）。三处只由 `placeTask` 一起迁移（§3.5 第 4 条）。
 - 下次到期时刻由 `settledAt ＋ 当前最短 every` 现算，因此改频率立刻生效；`settledAt` 本身是事实（最近一次正常结束）。
 - 有效最短间隔由各订阅的 `every` 现算，不缓存。
 - 资格由存活、已声明身份、生命周期与可见性、配置快照四组事实决定，不镜像 `enabled`。
@@ -194,7 +194,7 @@ flowchart LR
 | 待唤醒调度 | 取消句柄 / `null`；已排 flush true / false | `RefreshCore.wakeup` / `flushing` |
 | 资源已结算 | 时刻 / `null`（从未结算） | `Resource.settledAt` |
 | 当前后台任务 | Task / `null` | `Resource.task` |
-| 任务执行位置 | 排队 / 执行中 / 都不是 | **推导**：`queue` / `running` 的归属 |
+| 任务位置 | 在队 / 在跑 / 被弃（在跑但已不是当前执行）/ 已结算 | `RefreshCore.queue` / `running`；「当前执行」另存为 `Resource.task`，三处由 `placeTask` 一起迁移（§3.5 第 4 条） |
 | 有效最短间隔 | 正安全整数 | **推导**：现算各订阅的 `every` 最小值 |
 | 订阅资格 | 是 / 否 | **推导**：存活、已声明身份、环境允许、配置开启四组事实 |
 
@@ -217,15 +217,16 @@ flowchart LR
 都经由它们。两者都调 `releaseIfUnused`，它只判 `subscribers` / `waiters` 是否真的都空，然后注销这个键——
 不再另判「实例是否仍在册」：「都空」已经蕴含「在册」，因为注销是唯一的删除路径，而空实例再也拿不到新的边
 （§3.5 第 11 条；ADR-44 删掉那次在册复核的依据）。注销做四件事：删注册、
-清 `entry`、清 `task`、`abort` 在途；还在排队的任务同时从 `queue` 移除。
+清 `entry`、撤销当前执行、`abort` 在途；在跑的那次标为**被弃**——它仍占着并发槽位，直到迟到的结束自己交还，
+而当场交还就会让在途的 `load` 与后来者并发；还在排队的任务同时从 `queue` 移除（`placeTask`，ADR-56）。
 `abort` 不承诺底层立刻结束，所以迟到的 `load` 返回由 `runTask` 的身份复核（`resource.task !== task`）判为无效：
 不写结果、不交付、不二次通知；它的 `finally` 只清自己的计时与槽位。
 
 **三、上限到期（为什么先撤销身份再 abort）**
-`runTask` 从真正开始执行时登记一次性计时；到期走 `expire`，顺序是**先** `resource.task = null`、`running.delete`，
-**再** `abort`、`Resource.fail`、`Resource.refill`。这个顺序就是全部要点：`abort` 与失败通知都会同步重入页面代码，
-而此刻这次执行的在册身份已被撤销，因此它在 `await` 之后的任何返回都被身份复核判为无效；槽位当场交还
-（`running.delete`），不等底层结束——所以 `maxConcurrent` 约束的是**在册任务数**，不是底层连接数。
+`runTask` 从真正开始执行时登记一次性计时；到期走 `expire`，顺序是**先** `placeTask(task, 'settled')`
+（撤销当前执行并交还槽位），**再** `abort`、`Resource.fail`、`Resource.refill`。这个顺序就是全部要点：`abort` 与失败通知都会同步重入页面代码，
+而此刻这次执行的在册身份已被撤销，因此它在 `await` 之后的任何返回都被身份复核判为无效；槽位当场交还，
+不等底层结束——所以 `maxConcurrent` 约束的是**在册任务数**，不是底层连接数。
 
 ## 4. 参数与结果边界
 
@@ -387,7 +388,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 |---|---|---|
 | 在册 | 这个句柄还在名册里；**不在册就等于已释放** | `addHandle` / `removeHandle`（§3.7） |
 | 资格 | 存活 ＋ 已声明身份 ＋ 环境允许（激活且可见）＋ 配置开启且有周期，四组缺一不可 | `coordinate`（§3.5 第 12 条） |
-| 当前任务 | 一个实例至多一个任务，它至多在队列或在执行之一 | `RefreshCore.enqueue`、`runTask` 的 `finally`、`expire` |
+| 当前任务 | 一个实例至多一个任务，它至多在队列或在执行之一 | `placeTask`（`enqueue` / `flush` 起跑 / `runTask` 的 `finally` / `expire` / `releaseIfUnused` 都经它） |
 | 刷新要求 | 这个句柄此刻想要一次取数；是**标志不是队列**，没有回执 | `Resource.waiters`；`refresh` 登记、`Resource.clearRequest` 撤销 |
 
 ### 9.3 每个符号做什么
@@ -408,6 +409,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 | `RefreshCore.snapshot` | 只读计数投影，给演示面板、基准脚本与测试看；不属于包契约 |
 | `RefreshCore.dispose` | 销毁：幂等、不可复用 |
 | `RefreshCore.enqueue` / `releaseIfUnused` | 给实例用的两个跨实例入口（排队／回收）；public 但不在包契约内 |
+| `RefreshCore.placeTask`（私有） | 任务位置的唯一迁移点：在队／在跑／被弃／已结算，`Resource.task` 与 `queue`／`running` 一起改 |
 | `Resource.dueAt` / `shortestEvery` | 下次到期时刻／当前有效最短间隔；都现算，不缓存 |
 | `Resource.publish` / `fail` | 一次请求的两种结局：交付，或失败结算 |
 | `Resource.clearRequest` / `refill` | 撤销一条要数／任务结束后补一次后继请求 |
@@ -420,7 +422,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 | 防什么 | 长相 | 作用 |
 |---|---|---|
 | 已销毁或不在册 | 入口第一行的 `this.disposed` 检查，以及 `!this.handles.has(handle)` | 不在册的句柄按已释放处理，后续写入一概不发生 |
-| 任务已被替换 | `resource.task !== task`（也有 `=== task` 的反面） | 每个 `await` 与每次外部效果之后：丢弃迟到结束，不写结果、不交付、不二次通知 |
+| 任务已被替换 | `resource.task !== task`（也有 `=== task` 的反面） | 每个 `await` 与每次外部效果之后：丢弃迟到结束，不写结果、不交付、不二次通知；`placeTask` 撤销当前执行时同样认人（`expire` 交还槽位后可能已经登记了后继任务） |
 | 回调里同步重入 | `!this.subscribers.has(handle)`、`!this.waiters.has(handle)` | 每个交付／通知点之前：前一个接收者的回调可能已经改身份、退订或卸载 |
 
 **这三组守卫是承重的，不是冗余。** 以 `RefreshCore.activate` 为例：它先查一次在册，再写激活状态——

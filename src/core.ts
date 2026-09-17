@@ -431,21 +431,37 @@ export class RefreshCore {
     if (bucket?.size === 0) this.buckets.delete(resource.source)
 
     const task = resource.task
-    resource.task = null
     resource.entry = null
     if (task) {
-      this.queue.delete(task)
+      // 在跑的那次不能当场交还槽位：它仍占着并发账本，必须等迟到的结束自己交还（`detached`）。
+      this.placeTask(task, this.running.has(task) ? 'detached' : 'settled')
       task.controller.abort()
     }
   }
 
   // ══════════════════════════ 后台执行 ══════════════════════════
 
+  /**
+   * 任务位置（`queue` / `running` / `Resource.task`）的唯一写入点。
+   *
+   * `queued`／`running` 是「占着并发账本的某一格，且是本实例的当前执行」；`detached` 是实例已被回收、
+   * 当前执行已撤销，但在跑的那次仍占着槽位，直到迟到的结束自己交还（`releaseIfUnused`——槽位若当场
+   * 交还，在途的 `load` 就与后来者并发了）；`settled` 是三处都不在。
+   */
+  private placeTask(task: Task, position: 'queued' | 'running' | 'detached' | 'settled'): void {
+    this.queue.delete(task)
+    this.running.delete(task)
+    if (position === 'queued') this.queue.add(task)
+    if (position === 'running' || position === 'detached') this.running.add(task)
+    // 撤销当前执行要认人：`expire` 交还槽位后可能已经登记了后继任务，那一刻它才是当前执行。
+    if (position === 'queued' || position === 'running') task.resource.task = task
+    else if (task.resource.task === task) task.resource.task = null
+  }
+
   /** 登记一次后台执行；全部调用点都先确认没有当前任务，因此不替换、不 abort 在途。**实例入口**。 */
   enqueue(resource: Resource): void {
     const task: Task = { resource, controller: new AbortController() }
-    resource.task = task
-    this.queue.add(task)
+    this.placeTask(task, 'queued')
   }
 
   /** 执行一次后台请求；成功、失败或被上限结算，都在 `finally` 释放槽位并补后继请求。 */
@@ -464,8 +480,7 @@ export class RefreshCore {
       if (resource.task === task) resource.fail(error)
     } finally {
       clearTimeout(timer)
-      this.running.delete(task)
-      if (resource.task === task) resource.task = null
+      this.placeTask(task, 'settled')
       resource.refill()
       this.flushSoon()
     }
@@ -478,8 +493,7 @@ export class RefreshCore {
   private expire(task: Task): void {
     const resource = task.resource
     if (resource.task !== task) return
-    resource.task = null
-    this.running.delete(task)
+    this.placeTask(task, 'settled')
     task.controller.abort()
     resource.fail(new Error(`load 未在框架上限 ${LOAD_TIMEOUT_MS} 毫秒内结束`))
     resource.refill()
@@ -530,8 +544,7 @@ export class RefreshCore {
         continue
       }
       if (this.running.size >= this.maxConcurrent) break
-      this.queue.delete(task)
-      this.running.add(task)
+      this.placeTask(task, 'running')
       void this.runTask(task)
     }
     if (this.queue.size === 0 && next < Infinity) this.setWakeup(next)
