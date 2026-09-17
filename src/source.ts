@@ -60,7 +60,8 @@ export function parameterKey(input: object): string {
  */
 export function prepareParameters(input: object, validate?: (args: object) => boolean): Parameters {
   const args: object = structuredClone(input)
-  const key = stringify(args)
+  // 编码只有这一处入口：`parameterKey` 与提交边界共用同一条规则。
+  const key = parameterKey(args)
   deepFreeze(args)
   if (validate) {
     const valid: unknown = validate(args)
