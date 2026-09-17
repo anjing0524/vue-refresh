@@ -47,12 +47,9 @@ export type CancelReason = (typeof CancelReason)[keyof typeof CancelReason]
  * 代价是「拿一个擦除后的 Source 当具体 Source 用」不再被编译器拦住——与 ADR-24 对 `publish` 的取舍一致。
  */
 export interface RefreshSource<P extends object, T> {
-  load(args: ReadonlySnapshot<P>, context: RefreshLoadContext): Promise<T>
+  load(args: ReadonlySnapshot<P>, context: { readonly signal: AbortSignal }): Promise<T>
   validate?(args: ReadonlySnapshot<P>): boolean
 }
-
-/** 框架请求（`load`）收到的上下文。 */
-export interface RefreshLoadContext { readonly signal: AbortSignal }
 
 /**
  * 错误通知值。`error` 是原始异常，供页面自行判断。
@@ -118,12 +115,6 @@ export interface RefreshHandle<P extends object, T> {
   submit(args: P): SubmitResult
   /** 显式刷新当前身份；与自动刷新共用同一条获取与交付路径。 */
   refresh(): Promise<RefreshResult>
-}
-
-/** 创建协调者的必填配置。结果集由协调者自己持有，不依赖应用的状态库。 */
-export interface RefreshManagerOptions {
-  /** 共享请求的并发上限；显式刷新与自动刷新共用这些槽位。 */
-  readonly maxConcurrent: number
 }
 
 /** 应用级协调者：安装、只读快照与销毁。 */

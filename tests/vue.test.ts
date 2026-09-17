@@ -3,7 +3,7 @@ import { afterEach, test } from 'node:test'
 import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose, ref } from 'vue'
 import { createRefreshManager, useRefresh } from '../src/vue.ts'
 import { defineRefresh } from '../src/source.ts'
-import type { RefreshDisplay, RefreshHandle, RefreshManager, RefreshManagerOptions, RefreshOptions } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
 
 /** 这几个用例验证浏览器路径：`install` 靠 `typeof document` 区分 SSR，因此先提供最小替身。 */
 Object.defineProperty(globalThis, 'document', {
@@ -26,7 +26,7 @@ const renderer = createRenderer({
 } as never)
 
 const managers: RefreshManager[] = []
-function newManager(options: RefreshManagerOptions): RefreshManager {
+function newManager(options: { readonly maxConcurrent: number }): RefreshManager {
   const manager = createRefreshManager(options)
   managers.push(manager)
   return manager

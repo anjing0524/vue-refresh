@@ -7,7 +7,7 @@ import type { Config, Handle } from './core.ts'
 import { prepareParameters } from './source.ts'
 import { ErrorOrigin } from './public-types.ts'
 import type {
-  ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshInput, RefreshManager, RefreshManagerOptions,
+  ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshInput, RefreshManager,
   RefreshOptions, RefreshSource,
 } from './public-types.ts'
 
@@ -101,7 +101,8 @@ export function useRefresh<P extends object, T>(
 }
 
 /** 创建应用级协调者：注册可见性监听与卸载释放；SSR 下不发请求。 */
-export function createRefreshManager(options: RefreshManagerOptions): RefreshManager {
+/** 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限（显式刷新与自动刷新共用这些槽位）。 */
+export function createRefreshManager(options: { readonly maxConcurrent: number }): RefreshManager {
   if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
     throw new TypeError('Invalid concurrency')
   }
