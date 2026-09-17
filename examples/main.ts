@@ -1,13 +1,11 @@
 import { createApp, defineComponent, h, inject, KeepAlive, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
-import { createPinia } from 'pinia'
 import { defineRefresh } from '../src/source'
 import type { ReadonlySnapshot, RefreshHandle, RefreshLoadContext, RefreshResult } from '../src/public-types'
-import type { Manager } from '../src/manager'
+import { createRefreshManager, managerKey, useRefresh } from '../src/vue'
+import type { RefreshCore } from '../src/core'
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
-import { createRefreshManager, managerKey } from '../src/app'
-import { useRefresh } from '../src/vue'
 import { bindManager, log } from './sources'
 import type { CallLog } from './sources'
 import { QueryListPage } from './pages/query-list'
@@ -100,12 +98,12 @@ function mountHarness(): void {
   })
   const queryResults: Record<string, RefreshResult | null> = {}
 
-  let manager: Manager
+  let core: RefreshCore
   const components = new Map<string, { task: RefreshHandle<QuoteParams, Quote>; enabled: ReturnType<typeof ref<boolean>> }>()
   const Widget = defineComponent({
     props: { label: { type: String, required: true } },
     setup(props) {
-      manager = inject(managerKey)!.manager
+      core = inject(managerKey)!.core
       const enabled = ref(true)
       const draftSymbol = ref('DEMO')
       const task = useRefresh(source, { enabled, every, onError: () => { events.push('后台请求失败，等待下一周期') } })
@@ -155,7 +153,7 @@ function mountHarness(): void {
   })
   const app = createApp({
     render: () => h('main', [
-      h('p', { class: 'eyebrow' }, '真实 Vue · Pinia · HTTP'),
+      h('p', { class: 'eyebrow' }, '真实 Vue · HTTP'),
       h('h1', '两个组件，一份共享刷新'),
       h('p', { class: 'intro' }, '暂停一页，另一页继续；全部暂停后取消请求，恢复时重新获取。暂停页面保留自己的画面。'),
       h('div', { class: 'cards' }, [h(Widget, { label: '甲' }), h(Widget, { label: '乙' })]),
@@ -164,9 +162,7 @@ function mountHarness(): void {
       h('p', { class: 'note' }, '固定业务参数接口 · 共享刷新与显式刷新 · 验证范围见运行记录。'),
     ]),
   })
-  const pinia = createPinia()
-  app.use(pinia)
-  const refresh = createRefreshManager({ pinia, maxConcurrent: params.get('slots') === '1' ? 1 : 2 })
+  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2 })
   app.use(refresh)
   if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
   app.mount('#app')
@@ -175,7 +171,7 @@ function mountHarness(): void {
   const bridge: HarnessBridge = {
     snapshot() {
       // 只读观测面：示例面板与测试用同一个投影，不直接读核心的可变字段。
-      const view = manager.inspect()
+      const view = core.snapshot()
       return {
         calls: calls.map(c => ({ id: c.id, aborted: c.signal.aborted, finished: c.finished })),
         events: [...events],
@@ -184,7 +180,7 @@ function mountHarness(): void {
         entries: structuredClone(view.entries) as Record<string, { version: number; data: Quote }>,
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,
-        timer: view.scheduled, pending: view.pendingFlush,
+        timer: view.scheduled, pending: view.flushing,
       }
     },
     refresh(name: string, symbol: string) {
@@ -204,7 +200,7 @@ function mountHarness(): void {
     submit(name: string, args: QuoteParams) { return components.get(name)!.task.submit(args) },
     nestedOuter(shown: boolean) { nestedOuterShown.value = shown },
     // 受控可见性：真实浏览器里覆写 document.hidden 并派发真正的 visibilitychange 事件，
-    // 走的是 app.ts 注册的那条监听，而不是直接调用核心的 setBrowserVisible。
+    // 走的是 vue.ts 安装时注册的那条监听，而不是直接调用核心的 setVisible。
     visibility(hidden: boolean) {
       Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
       document.dispatchEvent(new Event('visibilitychange'))
@@ -226,19 +222,18 @@ const VIEWS: Array<{ id: string; label: string; component: Component }> = [
  * 因此每个视图的共享事实只由它自己的组件决定。
  */
 function mountShell(): void {
-  const pinia = createPinia()
-  const refresh = createRefreshManager({ pinia, maxConcurrent: params.get('slots') === '1' ? 1 : 2 })
+  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2 })
   bindManager(refresh)
   const active = ref(params.get('page') ?? VIEWS[0]!.id)
-  let manager: Manager | null = null
+  let core: RefreshCore | null = null
   const current = (): { id: string; label: string; component: Component } =>
     VIEWS.find(view => view.id === active.value) ?? VIEWS[0]!
 
   const Shell = defineComponent({
     setup() {
-      manager = inject(managerKey)!.manager
+      core = inject(managerKey)!.core
       return () => h('main', [
-        h('p', { class: 'eyebrow' }, '真实 Vue · Pinia · HTTP · 三个代表页面'),
+        h('p', { class: 'eyebrow' }, '真实 Vue · HTTP · 三个代表页面'),
         h('h1', '统一刷新管理：代表页面'),
         h('nav', { class: 'tabs' }, VIEWS.map(view => h('button', {
           'data-testid': `tab-${view.id}`,
@@ -251,14 +246,13 @@ function mountShell(): void {
     },
   })
   const app = createApp(Shell)
-  app.use(pinia)
   app.use(refresh)
   if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
   app.mount('#app')
 
   window.pages = {
     inspect() {
-      const view = manager!.inspect()
+      const view = core!.snapshot()
       return {
         resources: view.resources.length, handles: view.handles.length,
         entries: Object.keys(view.entries).length,

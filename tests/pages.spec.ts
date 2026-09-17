@@ -223,7 +223,7 @@ test('双组件共享：1s/5s 同参共享、单页暂停、重新进入交付�
   await expect(page.getByTestId('sp-price-甲')).toHaveText(`${100 + fresh}.00`)
 })
 
-test('B09：无启停按钮，前次失败后在同一个同步块里开启意愿并声明新身份，不先请求旧参数', async ({ page, request }) => {
+test('A05/A14 无启停按钮，前次失败后在同一个同步块里开启意愿并声明新身份，不先请求旧参数', async ({ page, request }) => {
   await request.post('/__fixture/fail-next', { data: { count: 1 } })
   await page.goto('/?page=b09')
   await expect(page.getByTestId('page-b09')).toBeVisible()

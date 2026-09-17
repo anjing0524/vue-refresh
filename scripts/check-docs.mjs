@@ -2,7 +2,7 @@
 // Checks what actually drifted before: the module manifest, the dependency direction,
 // the public-contract mirror in the unified document, the README metrics row, the recorded
 // built-artifact size, the code symbols both normative documents promise, the unified
-// document's own section numbering, and the §0 vocabulary table's forms.
+// document's own section numbering, the §0 vocabulary table's forms, and the core section banners.
 // The unified document lives in this repository root, so the check is self-contained.
 // Usage: pnpm check:docs
 import { execFileSync } from 'node:child_process'
@@ -141,7 +141,9 @@ for (const line of rulesText.split('\n')) {
 check(declared.size > 0, '统一刷新管理.md §3', 'no trigger anchors declared')
 const doubled = [...declared].filter(([, count]) => count > 1).map(([id]) => id)
 check(doubled.length === 0, '统一刷新管理.md §3', `trigger anchors declared more than once: ${doubled.join(' ') || '-'}`)
-for (const file of ['/统一刷新管理.md', '/DESIGN.md', '/README.md', '/ADR.md']) {
+// ADR.md is excluded: it is a historical decision record and quotes the anchors in force at the time
+// (ADR-27 retires the previous anchor family wholesale, so those quotes must stay as written).
+for (const file of ['/统一刷新管理.md', '/DESIGN.md', '/README.md']) {
   const danglingAnchors = [...new Set([...read(file).matchAll(/\bU\d{1,3}\b/g)].map(match => match[0]))]
     .filter(id => !declared.has(id)).sort()
   check(danglingAnchors.length === 0, file,
@@ -179,10 +181,11 @@ for (const prefix of OWNERSHIP) {
 //    the members of one layer are counted, so the distinction stays visible instead of silent.
 //    Layer numbers follow the README 「依赖方向单向」 line.
 const LAYERS = {
-  'diagnostics.ts': 0, 'public-types.ts': 0, 'model.ts': 1, 'source.ts': 1, 'delivery.ts': 1,
-  'store.ts': 2, 'scheduler.ts': 2, 'manager.ts': 3, 'app.ts': 4, 'vue.ts': 4, 'index.ts': 5,
+  'public-types.ts': 0, 'source.ts': 1, 'core.ts': 2, 'vue.ts': 3, 'index.ts': 4,
 }
-const ACKNOWLEDGED_EDGES = ['vue.ts → app.ts']
+// The root-contract rewrite left no same-layer or upward runtime edge: every module only imports
+// from a lower layer, so the acknowledged list is empty on purpose (ADR-27).
+const ACKNOWLEDGED_EDGES = []
 // Three forms are edges: a static `from './x'` clause, a bare side-effect import (`import './x'`),
 // and a dynamic `import('./x')`. Matching only the static form left the graph partly invisible: a
 // same-layer or upward runtime edge written as a bare or dynamic import passed this gate, so the
@@ -236,11 +239,11 @@ for (const edge of edges) {
 const entry = read('/src/index.ts')
 check(!/^export\s+type\s+\*/m.test(entry), '/src/index.ts', 'must list exported types explicitly (export type * requires TS 5.0+)')
 
-// 11) `manager.ts` has no class body worth reading top to bottom without its `═══` banners, and the
-//     documented section list is the only map of them. The list drifted once (six documented, seven
-//     in the code), so both documents must name the same sections in the same order.
-const banners = [...read('/src/manager.ts').matchAll(/═+ ([^═\n]+?) ═+/g)].map(match => match[1].trim())
-check(banners.length > 0, '/src/manager.ts', 'no section banners found')
+// 11) `core.ts` has no class body worth reading top to bottom without its `═══` banners, and the
+//     documented section list is the only map of them. The list drifted once under the previous
+//     layout, so both documents must name the same sections in the same order.
+const banners = [...read('/src/core.ts').matchAll(/═+ ([^═\n]+?) ═+/g)].map(match => match[1].trim())
+check(banners.length > 0, '/src/core.ts', 'no section banners found')
 for (const file of ['/README.md', '/DESIGN.md']) {
   const listed = /按职责分成[一二三四五六七八九十]+个分段：([^。\n]+)/.exec(read(file))
   check(Boolean(listed), file, 'missing the manager section list')
@@ -260,8 +263,8 @@ for (const file of ['/README.md', '/DESIGN.md']) {
 //     behaviour fails here instead of going silent. §6.2 requires updating this table with the citation.
 //     The anchor list must be literal `U…` ids, so a sentence *about* citations (`§3（U…）`) is not one.
 const TOPIC_CITATIONS = [
-  { claim: '配置无效通知', anchor: 'U18', phrase: '配置快照无效' },
-  { claim: '诊断内容', anchor: 'U19', phrase: 'observer' },
+  { claim: '配置非法的通知', anchor: 'U05', phrase: '配置快照读不出' },
+  { claim: '参数非法时的抛错', anchor: 'U15', phrase: '参数非法' },
 ]
 for (const line of design.split('\n')) {
   const citation = /^(.+?)的行为规则见 §3（(U\d{1,3}(?:、U\d{1,3})*)）/.exec(line)
@@ -319,9 +322,9 @@ for (const form of new Set(allForms)) {
 }
 // Field names owned by DESIGN §3.3. Add one here when that table gains a persistent field; leaving it
 // out would only weaken (c), never fail it.
-const INTERNAL_FIELDS = ['operationId', 'minVersion', 'issuedVersion', 'issuedResourceId',
-  'lastSettledAt', 'lifecycleActive', 'waiters', 'subscribers', 'refreshes', 'flushPending',
-  'cancelTimer', 'browserVisible', 'controller', 'settle', 'cleanup', 'reported']
+const INTERNAL_FIELDS = ['operationId', 'parameters', 'subscription', 'subscribers', 'waiters',
+  'settledAt', 'issued', 'entry', 'task', 'controller', 'wakeup', 'flushing', 'cleanup', 'disposed',
+  'visible', 'buckets', 'handles', 'queue', 'running', 'reported', 'snapshot', 'min', 'settle']
 for (const field of INTERNAL_FIELDS) {
   check(!vocabulary.includes(field), '统一刷新管理.md §0',
     `§0 states outward meaning only, but names the internal field ${field} (DESIGN §3.3)`)
@@ -354,8 +357,7 @@ if (existsSync(`${root}/dist/index.js`)) {
 //     (b) the Manager row in DESIGN §3.3 is the public-surface promise, so every method it names
 //         must exist in `src/manager.ts`.
 //     ADR.md is excluded on purpose: it quotes historical names ("`OBSERVER_FAILED` 已不存在").
-const DOC_SYMBOL_EXEMPT = new Set(['EVIDENCE', 'STATIC', 'PARTIAL', 'UNVERIFIED',
-  'ActivityKind', 'NoInfer', 'ToggleEvent'])
+const DOC_SYMBOL_EXEMPT = new Set(['EVIDENCE', 'STATIC', 'PARTIAL', 'UNVERIFIED'])
 const sourceText = modules.map(file => read(`/src/${file}`)).join('\n')
 const documentedSymbols = new Set([...designText.matchAll(/`([A-Z][A-Za-z0-9]{2,})`/g)].map(match => match[1]))
 for (const symbol of documentedSymbols) {
@@ -363,19 +365,19 @@ for (const symbol of documentedSymbols) {
   check(new RegExp(`\\b${symbol}\\b`).test(sourceText), 'DESIGN.md / 统一刷新管理.md',
     `documented code symbol ${symbol} does not appear in src/`)
 }
-const managerRow = designText.split('\n').find(line => line.startsWith('| Manager |'))
-check(Boolean(managerRow), 'DESIGN.md §3.3', 'missing the Manager ownership row')
-if (managerRow) {
-  const namedOperations = /外部只能走命名操作（([^）]*)）/.exec(managerRow)?.[1] ?? ''
+const coreRow = designText.split('\n').find(line => line.startsWith('| RefreshCore |'))
+check(Boolean(coreRow), 'DESIGN.md §3.3', 'missing the RefreshCore ownership row')
+if (coreRow) {
+  const namedOperations = /外部只能走命名操作（([^）]*)）/.exec(coreRow)?.[1] ?? ''
   const promised = new Set([
     ...[...namedOperations.matchAll(/`([^`]+)`/g)].map(match => match[1]),
-    ...[...managerRow.matchAll(/`([a-zA-Z][\w$]*)\(\)`/g)].map(match => match[1]),
+    ...[...coreRow.matchAll(/`([a-zA-Z][\w$]*)\(\)`/g)].map(match => match[1]),
   ])
-  check(promised.size > 0, 'DESIGN.md §3.3', 'no named operations parsed from the Manager row')
-  const managerSource = read('/src/manager.ts')
+  check(promised.size > 0, 'DESIGN.md §3.3', 'no named operations parsed from the RefreshCore row')
+  const coreSource = read('/src/core.ts')
   for (const name of promised) {
-    check(new RegExp(`\\b${name}\\s*\\(`).test(managerSource), 'DESIGN.md §3.3',
-      `the Manager row promises ${name}(), which src/manager.ts does not define`)
+    check(new RegExp(`\\b${name}\\s*\\(`).test(coreSource), 'DESIGN.md §3.3',
+      `the RefreshCore row promises ${name}(), which src/core.ts does not define`)
   }
 }
 
@@ -388,6 +390,6 @@ if (problems.length) {
 console.log(execFileSync(process.execPath, [`${root}/scripts/trace-leaves.mjs`], { cwd: root, encoding: 'utf8' }).trimEnd())
 console.log(`[docs] consistent: ${modules.length} modules, contract mirror, README metrics, `
   + `README artifact size, documented symbols, ${declared.size} trigger anchors, capability blocks, `
-  + `dependency direction, published entry, manager sections, ${TOPIC_CITATIONS.length} topic citations, `
+  + `dependency direction, published entry, core sections, ${TOPIC_CITATIONS.length} topic citations, `
   + `${vocabularyRows.length} vocabulary rows, ${leaves.size} layered leaves, `
   + `${peerTypeEdges} peer type edges, ${backTypeEdges} type-only back edges`)

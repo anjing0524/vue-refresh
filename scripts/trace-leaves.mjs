@@ -54,38 +54,16 @@ for (const title of titles) {
  * - `UNVERIFIED`：没有断言，写明原因。
  */
 const EVIDENCE = {
-  'A01/A02/A06/B06/P08/Q08: 入口返回契约在正确边界保留或清空需求': ['B13a', 'C04', 'P09'],
-  'Q07/D01/D02/D04/F09/L10: 刷新要求随隐藏与卸载作废、不受暂停影响；恢复不重放刷新': ['R11'],
-  'P03/L01/L02/L03/L09/P07/R05/A03: share, history, copies, updatedAt, cancel and resource rebirth': ['B12b', 'B13b', 'F01', 'M07', 'R07', 'S04', 'T08', 'T13'],
-  'Q01/Q04/B05/Q13: 暂停页刷新走共享路径，交付本页与有效订阅，不惊动其他暂停页': ['Q02'],
-  'Q03/A02/D03/B02/F02: 刷新失败结算本次等待、保留旧画面，订阅下周期继续': ['M06'],
-  'F06/F07/A01.04: 校验重入与替换身份时的 abort 重入都由新声明接管': ['F03'],
-  'F11/T10/T11/T12/M04: FIFO 顺序、真实结束释放槽位、退订作废排队任务': ['R06'],
-  'F14/R01/R02: 后台失败对每个有效订阅各通知一次；onError 里改频率不打断本次通知': ['M06', 'R03'],
-  'U11/T04/T01/T02/T06/T07/C09: 改频率只重算到期，保留在途请求；最短间隔与分段等待': ['T09'],
-  'M01–M09/F11/F12: seed 42, 300 有限步保持归属、并发槽与刷新要求': ['P04', 'S01'],
-  'C01/C02/P02: full-value object keys, sorted nested fields, arrays and scalar distinctions': ['P09'],
-  'C11: native clone preserves supported values and independent ownership': ['R09'],
-  'A07/B08/F09: 配置非法拒绝新刷新并按资格退出订阅；修正后恢复': ['C10'],
-  'F05/A05: onError reentry cannot be overwritten by old failure': ['M08'],
-  'S05: two real SSR renders create no request, timer or shared state': ['C08'],
-  'P01/C03/C13: resource validation runs once per submission, never on restore or lookup': ['C12', 'S03'],
-  '查询列表：提交才发请求、分页排序复用已提交参数、独立启停、暂停仍可刷新、失败关闭': ['Q10'],
-  '双组件共享：1s/5s 同参共享、单页暂停、重新进入交付已有结果、切换品种、全部退订、快照隔离': ['P04', 'S03', 'S04'],
-  'B09：无启停按钮，前次失败后在同一个同步块里开启意愿并声明新身份，不先请求旧参数': ['Q11'],
-  '真实HTTP：共享、单页冻结、最后取消、恢复': ['R10'],
-  '真实传输超时：客户端截止生效、槽位释放、页面收到失败': ['S08'],
+  // 暂无：A01–A18 全部由测试标题直接点名（根契约重写后叶子从 129 降到 18，标题即账目）。
 }
 const STATIC = {
-  S09: 'pnpm typecheck：tests/types.ts 的 @ts-expect-error 反例（缺字段、字段类型、旧元组调用、Source 不变性、DTO、readonly、refresh 不接受参数且结算不含 DTO）',
-  M10: '变体 02（包级导入与包内清单核对）：clean 消费方安装 vue-refresh-0.0.0.tgz 后用包入口的三个函数跑通 SSR 与客户端场景，typescript@4.9.5 下 tsc 零错误；15 个条目与 README 记录一致',
+  // 暂无。
 }
 const PARTIAL = {
-  F13: '最小 every 由 U11/T04/T01/T02/T06/T07/C09 与 M01–M09/F11/F12 覆盖；「每次扫描只聚合一次、计数随订阅线性增长」无算法计数断言',
+  // 暂无。
 }
 const UNVERIFIED = {
-  // 暂无：§7 13.1 曾列出的 9 项（B04 B16a C05 C06 F08 L06 L08 P05 S06）已由
-  // 「B04/F08」「B16a」「C05」「C06」「L06」「L08」「P05」「S06」八条定向用例点名。
+  // 暂无。
 }
 const ledger = new Map()
 const EVIDENCE_LEAVES = new Set(Object.values(EVIDENCE).flat())

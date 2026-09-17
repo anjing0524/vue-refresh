@@ -27,7 +27,7 @@ async function until(condition: () => Promise<boolean>, message: string) {
 }
 
 export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> }> = [
-  { name: '暂停后显式刷新：同一条共享路径取一次、只更新本页、不恢复自动刷新', async run(d) {
+  { name: 'A14 暂停后显式刷新：同一条共享路径取一次、只更新本页、不恢复自动刷新', async run(d) {
     await d.open('/?test')
     await until(async () => (await d.requests()).length === 1, 'initial shared request')
     await d.enable('甲', false); await d.enable('乙', false)
@@ -43,7 +43,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await sleep(200)
     check((await d.requests()).length === 2, 'refresh must not start polling')
   } },
-  { name: '刷新与自动刷新共用队列：满槽时排队，不绕过并发上限', async run(d) {
+  { name: 'A09/A14 刷新与自动刷新共用队列：满槽时排队，不绕过并发上限', async run(d) {
     await d.open('/?test&slots=1')
     await until(async () => (await d.requests()).length === 1, 'background fills slot')
     await d.enable('甲', false)
@@ -59,7 +59,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(await d.price('甲') === String(100 + 2), 'refresh delivered the shared result to the initiating paused page')
   } },
 
-  { name: '真实HTTP：共享、单页冻结、最后取消、恢复', async run(d) {
+  { name: 'A02/A06 真实HTTP：共享、单页冻结、最后取消、恢复', async run(d) {
     await d.open('/?test')
     await until(async () => (await d.requests()).length === 1, 'one shared request')
     check((await d.snapshot()).calls.length === 1, 'two subscribers must share the first load')
@@ -91,7 +91,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(await d.price('乙') === String(100 + second.id), 'other paused page remains frozen')
     await d.enable('甲', false)
   } },
-  { name: '真实传输超时：客户端截止生效、槽位释放、页面收到失败', async run(d) {
+  { name: 'A13 真实传输超时：客户端截止生效、槽位释放、页面收到失败', async run(d) {
     await d.open('/?test&timeout=300&every=3000')
     await until(async () => (await d.requests()).length === 1, 'first request in flight')
     await until(async () => (await d.snapshot()).events.some(event => event.includes('后台请求失败')), 'page observes the timeout failure')
@@ -103,7 +103,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await sleep(1_000)
     check((await d.requests()).length === 1, 'next attempt waits for the interval, not a busy retry')
   } },
-  { name: '旧响应晚到：新资源不被覆盖或删除，页面副本独立', async run(d) {
+  { name: 'A10/A11 旧响应晚到：新资源不被覆盖或删除，页面副本独立', async run(d) {
     await d.open('/?mode=controlled')
     await until(async () => (await d.snapshot()).calls.length === 1, 'initial controlled load')
     await d.enable('甲', false); await d.enable('乙', false)
@@ -126,7 +126,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     const isolated = await d.snapshot()
     check(isolated.pages['乙']!.data.quote.price === 222 && isolated.entries[id]!.data.quote.price === 222, 'nested page mutation must not alias another page or Store')
   } },
-  { name: '真实结束才放槽：等待期间不启动、不忙循环', async run(d) {
+  { name: 'A09 真实结束才放槽：等待期间不启动、不忙循环', async run(d) {
     await d.open('/?mode=controlled&slots=1')
     await until(async () => (await d.snapshot()).calls.length === 1, 'initial load fills slot')
     await d.enable('甲', false); await d.enable('乙', false); await d.enable('甲', true)
@@ -140,7 +140,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await d.resolve(2, 222)
     await until(async () => await d.price('甲') === '222', 'queued request actually delivers')
   } },
-  { name: '卸载清理：晚到执行不复活资源', async run(d) {
+  { name: 'A06 卸载清理：晚到执行不复活资源', async run(d) {
     await d.open('/?mode=controlled')
     await until(async () => (await d.snapshot()).calls.length === 1, 'load before unmount')
     await d.unmount()
@@ -151,7 +151,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(!now.resources && !now.queued && !now.timer && !Object.keys(now.entries).length && now.pages['甲'] === null, 'disposed state must stay empty')
   } },
 
-  { name: 'L07/A05: 真实浏览器下祖先 KeepAlive 失活与受控 visibilitychange', async run(d) {
+  { name: 'A04/A06 真实浏览器下祖先 KeepAlive 失活与受控 visibilitychange', async run(d) {
     // controlled 模式下 harness 的 deferred 先于 HTTP 发起，因此断言走 calls／pages，而不是 fixture 的请求表。
     await d.open('/?mode=controlled')
     const calls = async () => (await d.snapshot()).calls

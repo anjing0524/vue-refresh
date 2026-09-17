@@ -13,8 +13,7 @@
 //                                [--every 25] [--runs 3]
 import { monitorEventLoopDelay } from 'node:perf_hooks'
 import { createRenderer, defineComponent, h, inject, onMounted } from 'vue'
-import { createPinia } from 'pinia'
-import { createRefreshManager, managerKey } from '../src/app.ts'
+import { createRefreshManager, managerKey } from '../src/vue.ts'
 import { defineRefresh } from '../src/source.ts'
 import { useRefresh } from '../src/vue.ts'
 
@@ -64,7 +63,7 @@ async function measure() {
       active += 1
       peakInFlight = Math.max(peakInFlight, active)
       // 交叉核对：在真实 load 的入口读框架自己的槽位投影。
-      peakRunning = Math.max(peakRunning, core.inspect().running.length)
+      peakRunning = Math.max(peakRunning, core.snapshot().running.length)
       try {
         await Promise.resolve()
         return { price: loads }
@@ -77,10 +76,10 @@ async function measure() {
   const Card = defineComponent({
     props: { identity: { type: Number, required: true } },
     setup(props) {
-      core = inject(managerKey).manager
+      core = inject(managerKey).core
       // Node 没有 `document`，安装时会按 SSR 处理为不可见；这里显式声明可见，
       // 与 tests/vue.test.ts 的做法一致（自定义渲染器不冒充浏览器可见性测试）。
-      core.setBrowserVisible(true)
+      core.setVisible(true)
       const task = useRefresh(source, { enabled: true, every, onError: () => { failures += 1 } })
       onMounted(() => task.submit({ symbol: `S${props.identity}` }))
       return () => h('span', String(task.display.value?.data.price ?? ''))
@@ -90,21 +89,20 @@ async function measure() {
   const app = renderer.createApp({
     render: () => h('div', cards.map((identity, index) => h(Card, { key: index, identity }))),
   })
-  const pinia = createPinia()
-  const manager = createRefreshManager({ pinia, maxConcurrent })
-  app.use(pinia); app.use(manager)
+  const manager = createRefreshManager({ maxConcurrent })
+  app.use(manager)
 
   const heapBefore = process.memoryUsage().heapUsed
   const started = performance.now()
   app.mount(node())
   await sleep(duration)
   const elapsed = performance.now() - started
-  const view = core.inspect()
+  const view = core.snapshot()
   const observed = { resources: view.resources.length, handles: view.handles.length, running: view.running.length }
 
   app.unmount()
   manager.dispose()
-  const after = core.inspect()
+  const after = core.snapshot()
   const residue = {
     resources: after.resources.length, handles: after.handles.length, queued: after.queued.length,
     running: after.running.length, entries: Object.keys(after.entries).length,
