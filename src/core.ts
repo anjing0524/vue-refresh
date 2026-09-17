@@ -123,7 +123,7 @@ function identity(handle: Handle): { operationId?: number } {
 
 /** 结果边界：拒绝 `undefined`，其余原生复制；业务合法性由请求适配器负责。 */
 function copyResult(input: unknown): unknown {
-  if (input === undefined) throw new TypeError('A request must return a result')
+  if (input === undefined) throw new TypeError('load 必须返回一个结果，不能是 undefined')
   return structuredClone(input)
 }
 
@@ -246,7 +246,7 @@ export class RefreshCore {
 
     const config = handle.config()
     if (config === null) {
-      return immediate({ status: 'error', origin: ErrorOrigin.Configuration, error: new TypeError('Invalid refresh configuration') })
+      return immediate({ status: 'error', origin: ErrorOrigin.Configuration, error: new TypeError('刷新配置非法：enabled 必须是布尔值，every 必须是正安全整数') })
     }
     if (!(handle.active && this.visible)) {
       return immediate({ status: 'cancelled', reason: CancelReason.Unavailable })
@@ -456,7 +456,7 @@ export class RefreshCore {
     resource.task = null
     this.running.delete(task)
     task.controller.abort()
-    this.fail(resource, new Error(`load did not settle within ${LOAD_TIMEOUT_MS} ms`))
+    this.fail(resource, new Error(`load 未在框架上限 ${LOAD_TIMEOUT_MS} 毫秒内结束`))
     this.refill(resource)
     this.flushSoon()
   }

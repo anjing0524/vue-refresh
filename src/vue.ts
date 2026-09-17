@@ -46,8 +46,8 @@ export function useRefresh<P extends object, T>(
   source: RefreshSource<P, T>,
   options: RefreshOptions,
 ): RefreshHandle<P, T> {
-  if (!getCurrentInstance()) throw new Error('useRefresh must run synchronously in component setup')
-  if (!current || current.isDisposed()) throw new Error('A live refresh coordinator must be installed')
+  if (!getCurrentInstance()) throw new Error('useRefresh 必须在组件的 setup 中同步调用')
+  if (!current || current.isDisposed()) throw new Error('需要先安装一个存活的刷新协调者')
   const core = current
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
 
@@ -77,7 +77,7 @@ export function useRefresh<P extends object, T>(
     else if (!reported) {
       reported = true
       // 配置非法是本页自己的输入事实，不是某次取数的归属，因此不带声明代次。
-      report(handle, { origin: ErrorOrigin.Configuration, error: new TypeError('Invalid refresh configuration') })
+      report(handle, { origin: ErrorOrigin.Configuration, error: new TypeError('刷新配置非法：enabled 必须是布尔值，every 必须是正安全整数') })
     }
     core.reconcile(handle)
   }, { flush: 'sync', immediate: true })
@@ -102,7 +102,7 @@ export function useRefresh<P extends object, T>(
 /** 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限（显式刷新与自动刷新共用这些槽位）。 */
 export function createRefreshManager(options: { readonly maxConcurrent: number }): RefreshManager {
   if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
-    throw new TypeError('Invalid concurrency')
+    throw new TypeError('maxConcurrent 必须是正安全整数')
   }
   const core = new RefreshCore(options.maxConcurrent)
   let installed: App | null = null
@@ -110,12 +110,12 @@ export function createRefreshManager(options: { readonly maxConcurrent: number }
   return {
     install(app) {
       if (core.isDisposed() || (installed !== null && installed !== app)) {
-        throw new Error('Refresh coordinator installation conflict')
+        throw new Error('刷新协调者安装冲突：同一个实例不能安装到两个 App，已销毁的实例也不能再安装')
       }
       if (installed === app) return // 同实例同 App 重复安装无副作用。
       // 单例：现有协调者还活着就拒绝；已销毁（HMR、会话切换）就直接替换。
       if (current !== null && !current.isDisposed() && current !== core) {
-        throw new Error('Refresh coordinator installation conflict')
+        throw new Error('刷新协调者安装冲突：同一进程里已有一个存活的实例')
       }
       current = core
       installed = app

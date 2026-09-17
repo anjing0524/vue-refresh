@@ -226,7 +226,7 @@ test('A17 安装：同一实例重复安装无副作用，另一个活跃实例�
 
   app.use(manager)
   app.use(manager)
-  assert.throws(() => { app.use(other) }, /installation conflict/)
+  assert.throws(() => { app.use(other) }, /安装冲突/)
 
   manager.dispose()
   app.use(other) // 上一个实例已销毁：原地接管同一个注入槽位。
@@ -239,7 +239,7 @@ test('A17 未安装协调者时 useRefresh 直接抛错', () => {
   const quote = defineRefresh<{ symbol: string }, number>({ load: async () => 1 })
   const app = renderer.createApp(defineComponent({
     setup() {
-      assert.throws(() => { useRefresh(quote, { enabled: ref(true), every: ref(1000) }) }, /installed/)
+      assert.throws(() => { useRefresh(quote, { enabled: ref(true), every: ref(1000) }) }, /需要先安装/)
       return () => h('div')
     },
   }))

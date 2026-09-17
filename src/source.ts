@@ -36,7 +36,12 @@ function deepFreeze(value: unknown): void {
 
 /** 只读定位：只编码，不复制、不冻结、不执行 `validate`。 */
 export function parameterKey(input: object): string {
-  return stringify(input)
+  try {
+    return stringify(input)
+  } catch (error) {
+    // 上游包抛的是英文 TypeError（循环引用等）；对外统一成中文，原错误挂在 `cause` 上。
+    throw new TypeError('参数无法稳定编码：存在循环引用或无法序列化的值', { cause: error })
+  }
 }
 
 /**
@@ -54,9 +59,9 @@ export function prepareParameters(input: object, source?: RefreshSource<object, 
     if (typeof valid !== 'boolean') {
       // 返回 Promise 属于契约违约：同步抛错是给调用方的主信号，那个 Promise 也要观察掉，避免未处理拒绝。
       void Promise.resolve(valid).catch(() => {})
-      throw new TypeError('validate must return a synchronous boolean')
+      throw new TypeError('validate 必须同步返回布尔值')
     }
-    if (!valid) throw new TypeError('Parameter validation failed')
+    if (!valid) throw new TypeError('参数未通过 validate 校验')
   }
   return { args, key }
 }
