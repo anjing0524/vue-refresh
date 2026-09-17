@@ -51,18 +51,15 @@ export function useRefresh<P extends object, T>(
   const core = current
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
 
-  let snapshot: Config | null = null
-
   // Manager 保存异构 Source。P/T 只在这个适配边界还原：本句柄的 Source 不变，
   // 且 DTO 在发布前已经由框架建立了独立所有权。
   const handle: Handle<P, T> = {
     source,
-    config: () => snapshot,
+    config: null,
     publish: value => { display.value = value },
     onError: error => options.onError?.(error),
     cleanup: null,
     parameters: null,
-    subscription: null,
     active: false,
   }
   core.addHandle(handle)
@@ -70,7 +67,7 @@ export function useRefresh<P extends object, T>(
   // 唯一的配置 watcher：先写快照，再按当前资格协调。非法配置不通知——它是本页自己的输入事实，
   // 页面读自己的 refs 就知道；框架只负责不订阅、不请求，修正后自动恢复（ADR-51）。
   const stopWatching = watch(() => readConfig(options), config => {
-    snapshot = config
+    handle.config = config
     core.reconcile(handle)
   }, { flush: 'sync', immediate: true })
 

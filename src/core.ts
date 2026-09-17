@@ -15,17 +15,18 @@ export interface Config {
 }
 
 /**
- * 组件需求句柄：三种角色挂在一个对象上，读之前先分清是哪一组——**组 A｜端口**（`source` / `config` /
- * `publish` / `onError`）只读、**组 B｜状态**（`parameters` / `subscription` / `active`）由核心独占写入、
+ * 组件需求句柄：三种角色挂在一个对象上，读之前先分清是哪一组——**组 A｜端口与配置**（`source` / `config` /
+ * `publish` / `onError`）由适配层给、核心只读、**组 B｜状态**（`parameters` / `active`）由核心独占写入、
  * **组 C｜接驳**（`cleanup`）双向。完整所有权表见 DESIGN §3.3。
  *
- * 「句柄是否已释放」不存字段：它就是 `RefreshCore.handles` 的名册成员资格（DESIGN §3.7）。
+ * 两件事不存字段：**是否已释放**是 `RefreshCore.handles` 的名册成员资格（DESIGN §3.7），
+ * **订阅到哪个实例**是那个实例 `subscribers` 的成员资格（DESIGN §3.5 第 1 条）。
  */
 export interface Handle<P extends object = object, T = unknown> {
   /** 擦除后的固定定义：具体 Source 靠方法双变进入这里。 */
   readonly source: RefreshSource<object, unknown>
-  /** 最近一次配置快照。 */
-  readonly config: () => Config | null
+  /** 最近一次配置快照；适配层每读到新值就改写，核心只读。 */
+  config: Config | null
   /** 本页交付出口；唯一调用者是 `Resource.deliverTo`。为什么写成方法见 DESIGN §3.3。 */
   publish(display: RefreshDisplay<P, T>): void
   readonly onError: (error: unknown) => unknown
@@ -33,8 +34,6 @@ export interface Handle<P extends object = object, T = unknown> {
   cleanup: (() => void) | null
   /** 已声明的身份；未声明时为 `null`。 */
   parameters: Parameters | null
-  /** 当前订阅到的共享实例；资格成立时存在，失活或隐藏时为空。本页间隔不在这里存副本（DESIGN §3.7）。 */
-  subscription: Resource | null
   /** 组件是否挂载/激活。 */
   active: boolean
 }
@@ -82,7 +81,7 @@ export class Resource {
     let every = Infinity
     for (const handle of this.subscribers) {
       // 订阅成立 ⟹ 配置快照有效（§3.5 第 12 条），因此间隔现算，不在句柄或实例上另存一份。
-      const config = handle.config()
+      const config = handle.config
       if (config) every = Math.min(every, config.every)
     }
     return every
@@ -244,9 +243,10 @@ export class RefreshCore {
     const cleanup = handle.cleanup
     handle.cleanup = null
     if (cleanup) isolate(cleanup)
+    // 退订要按身份找实例，因此必须在清空 `parameters` 之前（它与 `clearRefreshes` 都读身份）。
     this.clearRefreshes(handle)
-    handle.parameters = null
     this.unsubscribe(handle)
+    handle.parameters = null
     this.flushSoon()
   }
 
@@ -306,7 +306,7 @@ export class RefreshCore {
    */
   refresh(handle: Handle): void {
     if (this.disposed || !this.handles.has(handle)) return
-    if (handle.config() === null) return
+    if (handle.config === null) return
     if (!(handle.active && this.visible)) return
     const parameters = handle.parameters
     if (parameters === null) return
@@ -370,22 +370,23 @@ export class RefreshCore {
     const present = handle.active && this.visible
     if (!present) this.clearRefreshes(handle)
 
-    const config = handle.config()
+    const config = handle.config
     const parameters = handle.parameters
-    const subscribed = handle.subscription
+    const resource = this.resourceOf(handle)
+    const subscribed = resource?.subscribers.has(handle) ?? false
     if (!present || !config?.enabled || parameters === null) {
       if (subscribed) this.unsubscribe(handle)
       return
     }
     // 已订阅：改频率不需要重建连接（间隔现算），在途请求也保留，下一次调度按新间隔重算到期。
     if (subscribed) return
-    const resource = this.resourceFor(handle.source, parameters)
+    // `resourceOf` 没找到就当场建立；找到了就是它，不必再查一次桶。
+    const target = resource ?? this.resourceFor(handle.source, parameters)
     // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值）。这份是框架私有权威副本，
     // 外发给每个消费者（`validate`／每轮 `load`／每个接收者的 `display`）时各复制一份（ADR-52）。
-    handle.parameters = resource.parameters
-    handle.subscription = resource
-    resource.subscribers.add(handle)
-    resource.deliverLatest(handle)
+    handle.parameters = target.parameters
+    target.subscribers.add(handle)
+    target.deliverLatest(handle)
   }
 
   /** 按「Source 身份 ＋ 完整参数值稳定键」查找，没有就建立实例。 */
@@ -403,21 +404,17 @@ export class RefreshCore {
     return resource
   }
 
-  /** 本页已声明身份所在的实例；只查不建（结算刷新要求时用）。 */
+  /** 本页已声明身份所在的实例；只查不建（协调资格、结算刷新要求、退订都用它）。 */
   private resourceOf(handle: Handle): Resource | undefined {
-    const subscription = handle.subscription
-    if (subscription) return subscription
     const parameters = handle.parameters
     return parameters ? this.buckets.get(handle.source)?.get(parameters.key) : undefined
   }
 
   /** 退订一个句柄；退订后若订阅与要求都空了，实例随之被回收。 */
   private unsubscribe(handle: Handle): void {
-    const subscription = handle.subscription
-    if (!subscription) return
-    handle.subscription = null
-    subscription.subscribers.delete(handle)
-    this.releaseIfUnused(subscription)
+    const resource = this.resourceOf(handle)
+    if (!resource?.subscribers.delete(handle)) return
+    this.releaseIfUnused(resource)
   }
 
   /**
