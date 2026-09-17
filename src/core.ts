@@ -1,4 +1,4 @@
-import { CancelReason, ErrorOrigin, RequestOrigin } from './public-types.ts'
+import { CancelReason, ErrorOrigin } from './public-types.ts'
 import type { RefreshDisplay, RefreshError, RefreshResult, SubmitResult } from './public-types.ts'
 import { parameterKey } from './source.ts'
 import type { Parameters, SourceRuntime } from './source.ts'
@@ -355,7 +355,7 @@ export class RefreshCore {
     handle.subscription = { resource, every }
     resource.subscribers.add(handle)
     // 已有结果立即交付（恢复时拿历史结果，不重复取数）；没有结果时交给这一轮 flush 的到期遍历首查。
-    if (resource.entry) this.deliverTo(handle, resource, resource.entry, RequestOrigin.Background)
+    if (resource.entry) this.deliverTo(handle, resource, resource.entry)
   }
 
   /** 按「Source 身份 ＋ 完整参数值稳定键」查找，没有就建立实例。 */
@@ -510,22 +510,20 @@ export class RefreshCore {
       // 前一个接收者的回调可能已经改身份或退订，因此每个交付点重新复核归属。
       if (!resource.subscribers.has(handle)) continue
       delivered.add(handle)
-      const origin = refreshing.has(handle) ? RequestOrigin.Refresh : RequestOrigin.Background
-      this.deliverTo(handle, resource, entry, origin)
+      this.deliverTo(handle, resource, entry)
     }
     for (const handle of refreshing) {
-      if (!delivered.has(handle)) this.deliverTo(handle, resource, entry, RequestOrigin.Refresh)
+      if (!delivered.has(handle)) this.deliverTo(handle, resource, entry)
     }
     // 结算在交付之后：`await refresh()` 返回 success 时本页 display 已经是这次的结果。
     for (const waiter of satisfied) this.settleWaiter(resource, waiter, { status: 'success' })
   }
 
   /** 交付一份独立副本。 */
-  private deliverTo(handle: Handle, resource: Resource, entry: Entry, origin: RequestOrigin): void {
+  private deliverTo(handle: Handle, resource: Resource, entry: Entry): void {
     isolate(() => handle.publish({
       args: resource.parameters.args,
       data: structuredClone(entry.data),
-      origin,
       updatedAt: entry.updatedAt,
     }))
   }

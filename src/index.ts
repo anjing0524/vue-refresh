@@ -1,5 +1,5 @@
 /**
- * 包入口：三个正式函数、三个状态常量对象，以及**调用方会持有或接收的 8 个类型**。
+ * 包入口：三个正式函数、两个状态常量对象，以及**调用方会持有或接收的 8 个类型**。
  *
  * 只导出这些是刻意的：其余类型（`ReadonlySnapshot` / `RefreshInput` / `RefreshLoadContext` /
  * `RefreshManagerOptions`）只是上面这些类型的组成部分，调用方按推断使用即可，不必也不应再记一个名字。
@@ -9,7 +9,7 @@
  */
 export { defineRefresh } from './source.ts'
 export { createRefreshManager, useRefresh } from './vue.ts'
-export { CancelReason, ErrorOrigin, RequestOrigin } from './public-types.ts'
+export { CancelReason, ErrorOrigin } from './public-types.ts'
 export type {
   RefreshDisplay, RefreshError, RefreshHandle, RefreshManager, RefreshOptions, RefreshResult, RefreshSource,
   SubmitResult,

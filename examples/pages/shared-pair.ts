@@ -164,7 +164,7 @@ export const B09View = defineComponent({
         h('p', { 'data-testid': 'b09-state' }, enabled.value ? '开启意愿：真' : '开启意愿：假（页面已关闭）'),
         h('p', { class: 'price', 'data-testid': 'b09-price' }, display ? display.data.quote.price.toFixed(2) : '等待首查'),
         h('p', { 'data-testid': 'b09-request' }, display
-          ? `来自请求 ${display.data.quote.requestId} · ${display.args.symbol} · 来源 ${display.origin}`
+          ? `来自请求 ${display.data.quote.requestId} · ${display.args.symbol}`
           : '尚未交付'),
         h('button', { 'data-testid': 'b09-refresh', onClick: refreshAndResume }, '刷新并在页面内开启订阅'),
       ])

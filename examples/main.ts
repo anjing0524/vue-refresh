@@ -20,7 +20,7 @@ export interface HarnessSnapshot {
   calls: Array<{ id: number; aborted: boolean; finished: boolean }>
   events: string[]
   queryResults: Record<string, RefreshResult | null>
-  pages: Record<string, { readonly args: QuoteParams; readonly data: Quote; readonly origin: string; readonly updatedAt: number } | null>
+  pages: Record<string, { readonly args: QuoteParams; readonly data: Quote; readonly updatedAt: number; readonly manual: boolean } | null>
   entries: Record<string, { version: number; data: Quote }>
   running: number
   queued: number
@@ -97,6 +97,8 @@ function mountHarness(): void {
     load: readQuote,
   })
   const queryResults: Record<string, RefreshResult | null> = {}
+  // 页面侧事实：上一次手刷拿到的结果时间。框架不再交付「这次是谁触发的」。
+  const manualAt: Record<string, number> = {}
 
   let core: RefreshCore
   const components = new Map<string, { task: RefreshHandle<QuoteParams, Quote>; enabled: ReturnType<typeof ref<boolean>> }>()
@@ -115,13 +117,22 @@ function mountHarness(): void {
         h('div', { class: 'card-heading' }, [h('h2', `组件${props.label}`), h('span', enabled.value ? '订阅中' : '已暂停')]),
         h('p', { class: 'price', 'data-testid': `price-${props.label}` }, task.display.value?.data.quote.price.toString() ?? '等待首查'),
         h('p', task.display.value ? `来自请求 ${task.display.value.data.quote.requestId}` : '两个组件共用同一来源和参数'),
-        h('p', task.display.value ? `展示参数：${task.display.value.args.symbol} · ${task.display.value.origin === 'refresh' ? '本页刷新' : '共享刷新'}` : ''),
+        h('p', task.display.value
+          ? `展示参数：${task.display.value.args.symbol} · ${task.display.value.updatedAt === manualAt[props.label] ? '本页刷新' : '共享刷新'}`
+          : ''),
         // updatedAt 是墙钟读数：相对时间按 U16/§2.5 的建议把差值钳制到 0，避免校时回拨显示负数。
         h('p', { 'data-testid': `age-${props.label}` }, task.display.value
           ? `数据时间：${new Date(task.display.value.updatedAt).toLocaleTimeString()} · ${Math.max(0, Math.round((Date.now() - task.display.value.updatedAt) / 1000))} 秒前`
           : ''),
         h('label', ['品种 ', h('input', { value: draftSymbol.value, onInput: (event: Event) => { draftSymbol.value = (event.target as HTMLInputElement).value } })]),
-        h('button', { onClick: () => { task.submit({ account: 'demo', symbol: draftSymbol.value }); void task.refresh() } }, '刷新本页'),
+        h('button', {
+          onClick: () => {
+            task.submit({ account: 'demo', symbol: draftSymbol.value })
+            void task.refresh().then(result => {
+              if (result.status === 'success') manualAt[props.label] = task.display.value?.updatedAt ?? 0
+            })
+          },
+        }, '刷新本页'),
         h('button', { onClick: () => { enabled.value = !enabled.value } }, enabled.value ? '暂停刷新' : '恢复刷新'),
       ])
     },
@@ -176,7 +187,10 @@ function mountHarness(): void {
         calls: calls.map(c => ({ id: c.id, aborted: c.signal.aborted, finished: c.finished })),
         events: [...events],
         queryResults: structuredClone(queryResults),
-        pages: Object.fromEntries([...components].map(([name, c]) => [name, structuredClone(c.task.display.value)])),
+        pages: Object.fromEntries([...components].map(([name, c]) => {
+          const display = c.task.display.value
+          return [name, display === null ? null : { ...structuredClone(display), manual: display.updatedAt === manualAt[name] }]
+        })),
         entries: structuredClone(view.entries) as Record<string, { version: number; data: Quote }>,
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,
@@ -188,7 +202,10 @@ function mountHarness(): void {
       queryResults[name] = null
       // 主动刷新：先声明身份，再用与自动刷新同一条路径取一次。
       page.task.submit({ account: 'demo', symbol })
-      void page.task.refresh().then(result => { queryResults[name] = result })
+      void page.task.refresh().then(result => {
+        queryResults[name] = result
+        if (result.status === 'success') manualAt[name] = page.task.display.value?.updatedAt ?? 0
+      })
     },
     enable(name: string, enabled: boolean) { components.get(name)!.enabled.value = enabled },
     resolve(id: number, price: number) { if (controlled) calls[id - 1]!.resolve({ quote: { price, requestId: id } }) },

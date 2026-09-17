@@ -25,6 +25,8 @@ export const QueryListPage = defineComponent({
     // 页面自己记录「本次提交了什么」：已提交参数是页面的事实，不依赖是否已经交付。
     // 必须用 shallowRef：ref 会把参数对象包成 Proxy，而框架在提交边界执行结构化克隆。
     const submitted = shallowRef<ListParams | null>(null)
+    // 页面自己记「上一次手刷拿到的结果时间」：框架不交付「这次是谁触发的」，这是页面侧的事实。
+    const manualAt = ref(0)
 
     const draft = (): ListParams => ({
       account: account.value, market: market.value, page: page.value, sortBy: sortBy.value,
@@ -64,7 +66,9 @@ export const QueryListPage = defineComponent({
       submitted.value = args
       // 暂停后单查：声明该身份并显式刷新一次；刷新不恢复自动轮询。
       task.submit(args)
-      void task.refresh()
+      void task.refresh().then(result => {
+        if (result.status === 'success') manualAt.value = task.display.value?.updatedAt ?? 0
+      })
     }
     const field = (label: string, input: () => unknown) =>
       h('label', { class: 'field' }, [label, input() as never])
@@ -106,8 +110,9 @@ export const QueryListPage = defineComponent({
         h('p', { 'data-testid': 'ql-submitted' }, submitted.value
           ? `已提交参数：${submitted.value.account} / ${submitted.value.market} / 第 ${submitted.value.page} 页 / 按${SORT_LABEL[submitted.value.sortBy]}`
           : '尚未提交'),
+        // 框架不再交付「这次是谁触发的」：页面用手刷那次结算后的 updatedAt 自己判定。
         h('p', { 'data-testid': 'ql-origin' }, display
-          ? `本次来源：${display.origin === 'refresh' ? '本页刷新' : '共享刷新'} · 请求号 ${display.data.requestId}`
+          ? `本次来源：${display.updatedAt === manualAt.value ? '本页刷新' : '共享刷新'} · 请求号 ${display.data.requestId}`
           : ''),
         h('p', { 'data-testid': 'ql-age' }, display ? ageLine(display.updatedAt) : ''),
         h('p', { 'data-testid': 'ql-note' }, note.value),

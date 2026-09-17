@@ -15,17 +15,8 @@ export type ReadonlySnapshot<T> =
 /** 可以是值、只读 Ref 或 getter；Vue 适配层统一解包。 */
 export type RefreshInput<T> = T | Readonly<Ref<T>> | (() => T)
 
-/** 一次结果由谁触发。 */
-export const RequestOrigin = {
-  /** 页面显式刷新。 */
-  Refresh: 'refresh',
-  /** 框架按订阅到期自动刷新。 */
-  Background: 'background',
-} as const
-export type RequestOrigin = (typeof RequestOrigin)[keyof typeof RequestOrigin]
-
 /**
- * 错误的来源：**哪一步失败了**。与「一次请求由谁触发」（`RequestOrigin`）是两个语义域，因此各自持有取值。
+ * 错误的来源：**哪一步失败了**。
  * - `request`：共享请求失败（含框架上限到期）；
  * - `validation`：订阅声明的参数准备失败；
  * - `configuration`：刷新入口或配置快照非法。
@@ -87,11 +78,10 @@ export type RefreshResult =
   | { readonly status: 'error'; readonly origin: typeof ErrorOrigin.Request | typeof ErrorOrigin.Configuration; readonly error: unknown }
   | { readonly status: 'cancelled'; readonly reason: CancelReason }
 
-/** 交付面：参数、数据、来源与结果产生时间同次整体发布。 */
+/** 交付面：参数、数据与结果产生时间同次整体发布。 */
 export interface RefreshDisplay<P extends object, T> {
   readonly args: ReadonlySnapshot<P>
   readonly data: ReadonlySnapshot<T>
-  readonly origin: RequestOrigin
   readonly updatedAt: number
 }
 

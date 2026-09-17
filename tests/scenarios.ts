@@ -37,7 +37,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await d.release((await d.requests())[1]!.id)
     await until(async () => (await d.snapshot()).queryResults['甲']?.status === 'success', 'refresh settles')
     const state = await d.snapshot()
-    check(state.pages['甲']!.args.symbol === 'OTHER' && state.pages['甲']!.origin === 'refresh', 'display contains refreshed parameters and origin')
+    check(state.pages['甲']!.args.symbol === 'OTHER' && state.pages['甲']!.manual, 'display contains refreshed parameters and the page knows it was its own refresh')
     check(state.pages['乙'] === null, 'paused page without a refresh requirement receives nothing')
     check(Object.keys(state.entries).length === 0 && state.resources === 0, 'temporary requirement is cleaned up once it settles')
     await sleep(200)

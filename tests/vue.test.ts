@@ -64,7 +64,6 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
   await tick()
   const display: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
   assert.equal(display?.data, 42)
-  assert.equal(display?.origin, 'background')
   assert.equal(loads, 1)
 
   enabled.value = false

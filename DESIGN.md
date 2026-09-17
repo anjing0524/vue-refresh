@@ -29,7 +29,7 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 
 | 文件 | 职责 |
 |---|---|
-| `public-types.ts` | 公共契约类型、三个状态取值常量对象（`RequestOrigin` / `ErrorOrigin` / `CancelReason`）与品牌化的 `RefreshSource` |
+| `public-types.ts` | 公共契约类型、两个状态取值常量对象（`ErrorOrigin` / `CancelReason`）与品牌化的 `RefreshSource` |
 | `source.ts` | `defineRefresh`、`Parameters` 与 `SourceRuntime`、`prepareParameters`（复制 → 稳定编码 → 深冻结 → 可选校验）、只读定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
 | `core.ts` | `RefreshCore`：实例注册表、句柄关系、刷新要求、唯一 Timer 与 FIFO 队列、并发槽、交付与失败、只读计数投影 |
 | `vue.ts` | `useRefresh`（配置快照、句柄、Display、生命周期）、`createRefreshManager`（安装、可见性监听、只读入口、销毁）、注入槽位 |
@@ -171,15 +171,14 @@ flowchart LR
 
 ### 3.8 状态取值与存放
 
-状态字面量的唯一来源是三个公开常量对象：`RequestOrigin`、`ErrorOrigin`、`CancelReason`（`public-types.ts`）。
+状态字面量的唯一来源是两个公开常量对象：`ErrorOrigin`、`CancelReason`（`public-types.ts`）。
 子集类型（`SubmitResult` 的取消原因、`RefreshResult` 的错误来源）在类型层写成可达成员的联合，
 不新增第二个常量对象，也不手写差集求补。结果判别式（`status`）不单独枚举——判别联合本身就是这份枚举。
 
 | 状态域 | 取值 | 存放 |
 |---|---|---|
-| 请求来源 | `refresh` / `background` | `RefreshDisplay.origin`，每次发布的事实（按接收者判定） |
 | 结果产生时间 | 墙钟 epoch 毫秒（不保证单调） | `Entry.updatedAt` → 交付时进入 `RefreshDisplay.updatedAt`；与调度的单调时间 `settledAt` 是两个域 |
-| 错误来源 | `request` / `validation` / `configuration` | `RefreshError.origin`；与请求来源是两个语义域 |
+| 错误来源 | `request` / `validation` / `configuration` | `RefreshError.origin`；交付面不交付「由谁触发」，这是唯一的来源域（ADR-34） |
 | 刷新失败来源 | `request` / `configuration` | `RefreshResult` 的 error 分支 |
 | 取消原因 | `superseded` / `unavailable` / `disposed` | `RefreshResult` 的 cancelled 分支 |
 | submit 取消原因 | 可达子集：`superseded` / `disposed` | `SubmitResult` 的 cancelled 分支 |

@@ -88,7 +88,6 @@ test('A01/A11 首次订阅立即取一次，并按整体发布交付参数、数
   assert.equal(view.published.length, 1)
   assert.deepEqual(view.last?.args, { symbol: 'A' })
   assert.equal(view.last?.data, 7)
-  assert.equal(view.last?.origin, 'background')
   assert.equal(typeof view.last?.updatedAt, 'number')
   assert.equal(core.readSnapshot(quote, { symbol: 'A' }), 7)
 })
@@ -196,7 +195,6 @@ test('A12/A14 在途任务不满足本次刷新：它结束后补一次后继请
   await settle()
   assert.deepEqual(await refreshing, { status: 'success' })
   assert.equal(view.last?.data, 200)
-  assert.equal(view.last?.origin, 'refresh')
 })
 
 test('A14 排队未启动的任务已经算「动作之后启动」，直接满足本次刷新', async () => {
