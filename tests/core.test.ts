@@ -170,6 +170,16 @@ test('A03 参数被拒时返回 rejected，保留已有身份，并按 validatio
   assert.equal(view.errors.at(-1)?.operationId, 2)
   // 校验失败不改动任何状态：旧身份仍然在后台继续取数。
   assert.equal(view.errors.length, 1)
+
+  // 业务 validate 自己抛错时同样按 validation 拒绝：异常由提交边界收住，不冒泡到调用方。
+  const throwing = defineRefresh<{ id: number }, number>({
+    load: async () => 1,
+    validate: () => { throw new Error('bad rule') },
+  })
+  const victim = page(core, throwing)
+  assert.equal(victim.submit({ id: 1 }).status, 'rejected')
+  assert.equal(victim.handle.parameters, null, '被拒的声明不改动状态')
+  assert.equal(victim.errors.at(-1)?.origin, 'validation')
 })
 
 test('A12/A14 在途任务不满足本次刷新：它结束后补一次后继请求，结算在交付之后', async () => {

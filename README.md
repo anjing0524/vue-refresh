@@ -122,7 +122,7 @@ pnpm dev
 | 实际检查 | 结果/范围 |
 |---|---|
 | pnpm typecheck | 通过，0 错误。`tests/types.ts` 的 `@ts-expect-error` 反例（缺字段/字段类型/旧元组调用/Source 不变性/DTO/readonly/refresh 不接受参数且结算不含 DTO）一并被校验 |
-| pnpm test | 通过：35 个用例全绿（`tests/core.test.ts` 28、`tests/vue.test.ts` 7），覆盖 A01–A18。核心用例直接驱动 `RefreshCore` 并提供配置快照；Vue 用例用无 DOM 的自定义渲染器 ＋ 真实 KeepAlive，安装路径用最小 `document` 替身，不冒充真实可见性测试 |
+| pnpm test | 通过：36 个用例全绿（`tests/core.test.ts` 29、`tests/vue.test.ts` 7），覆盖 A01–A18。核心用例直接驱动 `RefreshCore` 并提供配置快照；Vue 用例用无 DOM 的自定义渲染器 ＋ 真实 KeepAlive，安装路径用最小 `document` 替身，不冒充真实可见性测试 |
 | pnpm build | 通过。生成 `dist/index.js`（12.49 kB，12487 字节）与 5 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态） |
 | pnpm build:demo | 通过。生成 `dist-demo/` 演示页面（四个视图：查询列表、行情面板、双组件共享、B09 组合） |
 | pnpm test:browser | 通过：真实 Chrome 12 条场景全绿——三条代表页面交互（`tests/pages.spec.ts`）＋ 八条受控场景（`tests/refresh.spec.ts`：暂停后显式刷新、满槽排队、真实 HTTP 共享与恢复、真实传输超时、旧响应晚到、真实结束放槽、卸载清理、祖先 KeepAlive 失活与受控 `visibilitychange`）。这些场景在根契约重写后**未改一行**仍然通过 |
