@@ -1,4 +1,4 @@
-import { CancelReason, ErrorOrigin } from './public-types.ts'
+import { ErrorOrigin } from './public-types.ts'
 import type { RefreshDisplay, RefreshError, RefreshSource, SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
 
@@ -298,14 +298,14 @@ export class RefreshCore {
 
   /** 声明或更新身份。相同参数值幂等；参数准备在身份被接纳之后才执行。 */
   submit(handle: Handle, prepare: () => Parameters): SubmitResult {
-    if (this.disposed || handle.disposed) return { status: 'cancelled', reason: CancelReason.Disposed }
+    if (this.disposed || handle.disposed) return { status: 'cancelled' }
 
     let parameters: Parameters
     try {
       parameters = prepare()
     } catch (error) {
       // 无效声明不改动任何状态：旧身份、订阅与未结算的刷新要求原样保留。
-      report(handle, { origin: ErrorOrigin.Validation, error })
+      report(handle, { origin: ErrorOrigin.Caller, error })
       return { status: 'rejected', error }
     }
     const declared = handle.parameters
@@ -324,13 +324,13 @@ export class RefreshCore {
    *
    * **不回执**：成功只经 `display`（U11／U12），失败只经 `onError`（与自动刷新同一条通道，U13）。
    * 入口条件不成立时直接返回、不产生副作用：已销毁、未声明身份、环境不允许都不通知（页面自己知道这些状态）；
-   * 只有配置非法会按 `configuration` 通知一次——那是一次显式动作的失败。
+   * 只有配置非法会按 `caller` 通知一次——那是一次显式动作的失败，重试同一份配置没有意义。
    */
   refresh(handle: Handle): void {
     if (this.disposed || handle.disposed) return
     const config = handle.config()
     if (config === null) {
-      report(handle, { origin: ErrorOrigin.Configuration, error: new TypeError(INVALID_CONFIG_MESSAGE) })
+      report(handle, { origin: ErrorOrigin.Caller, error: new TypeError(INVALID_CONFIG_MESSAGE) })
       return
     }
     if (!(handle.active && this.visible)) return

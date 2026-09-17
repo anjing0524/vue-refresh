@@ -75,8 +75,8 @@ export function useRefresh<P extends object, T>(
     if (config) reported = false
     else if (!reported) {
       reported = true
-      // 配置非法是本页自己的输入事实，不是某次取数的归属。
-      report(handle, { origin: ErrorOrigin.Configuration, error: new TypeError(INVALID_CONFIG_MESSAGE) })
+      // 配置非法是本页自己的输入事实：按 `caller` 通知，与参数准备失败归同一侧（ADR-48）。
+      report(handle, { origin: ErrorOrigin.Caller, error: new TypeError(INVALID_CONFIG_MESSAGE) })
     }
     core.reconcile(handle)
   }, { flush: 'sync', immediate: true })

@@ -4,7 +4,7 @@ import { RefreshCore } from '../src/core.ts'
 import type { Config, Handle } from '../src/core.ts'
 import { defineRefresh, prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
-import { CancelReason, ErrorOrigin } from '../src/public-types.ts'
+import { ErrorOrigin } from '../src/public-types.ts'
 import type { RefreshDisplay, RefreshError, RefreshSource, SubmitResult } from '../src/public-types.ts'
 
 /** 每个用例结束时销毁核心：周期调度会留下唯一的唤醒 Timer，不销毁的话进程不会退出。 */
@@ -150,7 +150,7 @@ test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', a
   assert.equal(view.handle.subscription, subscription)
 })
 
-test('A03 参数被拒时返回 rejected，保留已有身份，并按 validation 通知', async () => {
+test('A03 参数被拒时返回 rejected，保留已有身份，并按 caller 通知', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1, validate: args => args.id > 0 })
   const core = newCore(2)
   const view = page(core, source)
@@ -163,11 +163,11 @@ test('A03 参数被拒时返回 rejected，保留已有身份，并按 validatio
   assert.equal(view.submit({ id: -1 }).status, 'rejected')
   assert.equal(view.handle.parameters, declared)
   assert.equal(view.handle.subscription, subscription)
-  assert.equal(view.errors.at(-1)?.origin, 'validation')
+  assert.equal(view.errors.at(-1)?.origin, ErrorOrigin.Caller)
   // 校验失败不改动任何状态：旧身份仍然在后台继续取数。
   assert.equal(view.errors.length, 1)
 
-  // 业务 validate 自己抛错时同样按 validation 拒绝：异常由提交边界收住，不冒泡到调用方。
+  // 业务 validate 自己抛错时同样按 caller 拒绝：异常由提交边界收住，不冒泡到调用方。
   const throwing = defineRefresh<{ id: number }, number>({
     load: async () => 1,
     validate: () => { throw new Error('bad rule') },
@@ -175,7 +175,7 @@ test('A03 参数被拒时返回 rejected，保留已有身份，并按 validatio
   const victim = page(core, throwing)
   assert.equal(victim.submit({ id: 1 }).status, 'rejected')
   assert.equal(victim.handle.parameters, null, '被拒的声明不改动状态')
-  assert.equal(victim.errors.at(-1)?.origin, 'validation')
+  assert.equal(victim.errors.at(-1)?.origin, ErrorOrigin.Caller)
 })
 
 test('A14 在途任务直接满足本次刷新：不追发第二次', async () => {
@@ -663,7 +663,7 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
   core.dispose()
   assert.equal(core.isDisposed(), true)
   assert.equal(cleaned, 1)
-  assert.deepEqual(view.submit({ id: 2 }), { status: 'cancelled', reason: CancelReason.Disposed })
+  assert.deepEqual(view.submit({ id: 2 }), { status: 'cancelled' })
   view.refresh()
   const empty = core.snapshot()
   assert.deepEqual([empty.handles.length, empty.resources.length, empty.queued.length, empty.scheduled], [0, 0, 0, false])
@@ -676,7 +676,7 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
   core.dispose()
 })
 
-test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 configuration 通知', async () => {
+test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 caller 通知', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(2)
   const view = page(core, source, null)
@@ -687,7 +687,7 @@ test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 configurati
   assert.equal(view.published.length, 0)
 
   view.refresh()
-  assert.equal(view.errors.at(-1)?.origin, ErrorOrigin.Configuration, '显式刷新在配置非法时经 onError 通知')
+  assert.equal(view.errors.at(-1)?.origin, ErrorOrigin.Caller, '显式刷新在配置非法时经 onError 通知')
 })
 
 test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => {
@@ -748,7 +748,7 @@ test('边界总账：运行期失败只走返回值或 onError，公开入口都
     assert.equal(core.snapshot().running.length, 0)
   }
 
-  // 参数侧：复制失败、编码不出、`validate` 拒绝，一律是 `rejected` ＋ `validation` 通知，不产生实例。
+  // 参数侧：复制失败、编码不出、`validate` 拒绝，一律是 `rejected` ＋ `caller` 通知，不产生实例。
   const source = defineRefresh<object, number>({
     load: async () => 1,
     validate: args => (args as { valid?: boolean }).valid !== false,
@@ -768,7 +768,7 @@ test('边界总账：运行期失败只走返回值或 onError，公开入口都
   ]) {
     assert.equal(page(newCore(1), defineRefresh<object, number>({ load: async () => 1, validate })).submit({}).status, 'rejected')
   }
-  assert.ok(view.errors.every(error => error.origin === 'validation'))
+  assert.ok(view.errors.every(error => error.origin === ErrorOrigin.Caller))
   assert.equal(core.snapshot().resources.length, 0)
 
   // 刷新侧：入口状态不成立（这里是没有身份）时直接返回，不抛错、不需要 try/catch。

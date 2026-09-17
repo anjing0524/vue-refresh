@@ -47,7 +47,8 @@ export const QueryListPage = defineComponent({
           enabled.value = false
           note.value = '后台请求失败：页面关闭自动刷新（框架不改写 enabled）'
         } else {
-          note.value = `页面查询失败：${error.origin}`
+          // caller 侧：参数或配置不能被使用——重试同一份输入没有意义，页面不改写 enabled。
+          note.value = '页面参数或配置有误：框架只通知，不改写 enabled'
         }
       },
     })

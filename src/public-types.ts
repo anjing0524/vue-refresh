@@ -13,27 +13,16 @@ export type ReadonlySnapshot<T> =
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
 
 /**
- * 错误的来源：**哪一步失败了**。
- * - `request`：共享请求失败（含框架上限到期）；
- * - `validation`：订阅声明的参数准备失败；
- * - `configuration`：刷新入口或配置快照非法。
+ * 错误的来源：**失败属于哪一侧**——按调用方能采取的动作分类，不按「哪一步失败的」分类（ADR-48）。
+ * - `request`：共享请求失败（含框架上限到期）。同一身份再试有意义；
+ * - `caller`：调用方给的参数或配置不能被使用（订阅声明的参数准备失败、刷新入口或配置快照非法）。
+ *   重试同一份输入没有意义，要改的是调用方自己的代码或配置。
  */
 export const ErrorOrigin = {
   Request: 'request',
-  Validation: 'validation',
-  Configuration: 'configuration',
+  Caller: 'caller',
 } as const
 export type ErrorOrigin = (typeof ErrorOrigin)[keyof typeof ErrorOrigin]
-
-/**
- * 取消原因。显式刷新不再有回执（ADR-46），因此只剩 `submit` 的一个可达取值：
- * 它不检查可见性与开启意愿（不会被「失去存在」取消），也不取消自己（换身份只是撤销本页未完成的刷新要求）。
- */
-export const CancelReason = {
-  /** 句柄或协调者已销毁。 */
-  Disposed: 'disposed',
-} as const
-export type CancelReason = (typeof CancelReason)[keyof typeof CancelReason]
 
 /**
  * 固定资源定义：`P` 与 `T` 与 `load` 绑定。
@@ -48,7 +37,7 @@ export interface RefreshSource<P extends object, T> {
 }
 
 /**
- * 错误通知值。`error` 是原始异常，供页面自行判断；`origin` 说明是哪一步失败的。
+ * 错误通知值。`error` 是原始异常，供页面自行判断；`origin` 说明失败属于哪一侧（要不要重试）。
  * 不交付「由谁触发」：页面若有两处 `useRefresh` 共用同一个 `onError`，用各自闭包里的
  * `display` 或自己的标记分辨即可（ADR-47）。
  */
@@ -59,13 +48,13 @@ export interface RefreshError {
 
 /**
  * `submit` 的同步结果。`accepted` 只表示身份已被记录，不代表请求成功。
- * 取消原因是可达成员的联合，只有一个成员 `disposed`：声明不检查可见性与开启意愿，换身份也只是撤销本页
- * 未完成的刷新要求（那些要求没有回执，见 `refresh`）。
+ * `cancelled` 不带原因：取消只有一个来源（句柄或协调者已销毁），单成员取值没有信息量（ADR-48）。
+ * 声明不检查可见性与开启意愿，换身份也只是撤销本页未完成的刷新要求（那些要求没有回执，见 `refresh`）。
  */
 export type SubmitResult =
   | { readonly status: 'accepted' }
   | { readonly status: 'rejected'; readonly error: unknown }
-  | { readonly status: 'cancelled'; readonly reason: typeof CancelReason.Disposed }
+  | { readonly status: 'cancelled' }
 
 /** 交付面：参数、数据与结果产生时间同次整体发布。 */
 export interface RefreshDisplay<P extends object, T> {

@@ -18,7 +18,7 @@ public-types.ts            公共类型的唯一代码定义与状态取值常�
 source.ts                  固定资源定义、提交边界准备与稳定键
 core.ts                    跨实例的协调者（注册表、名册、队列与并发、调度）＋ 一个身份的 Resource 类
 vue.ts                     组件适配与安装：配置快照、句柄、生命周期、可见性、只读入口
-index.ts                   包入口（三个函数、三个状态常量对象与 8 个公共类型）
+index.ts                   包入口（三个函数、一个状态常量对象与 7 个公共类型）
 ```
 
 依赖方向单向：`public-types` ← `source` ← `core` ← `vue` ← `index`。
@@ -35,11 +35,11 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 
 | 文件 | 职责 |
 |---|---|
-| `public-types.ts` | 公共契约类型、两个状态取值常量对象（`ErrorOrigin` / `CancelReason`）与 `RefreshSource`（成员是方法，靠双变进入框架的擦除视图） |
+| `public-types.ts` | 公共契约类型、一个状态取值常量对象（`ErrorOrigin`）与 `RefreshSource`（成员是方法，靠双变进入框架的擦除视图） |
 | `source.ts` | `defineRefresh`、`Parameters`、`prepareParameters`（复制 → 稳定编码 → 深冻结 → 执行来源的 `validate`）、只读定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
 | `core.ts` | `RefreshCore`：跨实例的协调者——实例注册表、句柄名册、唯一 Timer 与 FIFO 队列、并发槽、只读计数投影；`Resource`：一个身份自己的状态与操作（订阅、刷新要求、到期、当前任务、交付与失败、结算与回收），越过实例边界只调核心的两个入口（`enqueue` / `releaseIfUnused`） |
 | `vue.ts` | `useRefresh`（配置快照、句柄、Display、生命周期）、`createRefreshManager`（安装、可见性监听、只读入口、销毁）、注入槽位 |
-| `index.ts` | 包导出：三个函数、三个状态常量对象、逐个列出的 8 个公共类型（不用 `export type *`）；工具型别名不导出 |
+| `index.ts` | 包导出：三个函数、一个状态常量对象、逐个列出的 7 个公共类型（不用 `export type *`）；工具型别名不导出 |
 
 ### 2.1 调用链路
 
@@ -181,15 +181,14 @@ flowchart LR
 
 ### 3.8 状态取值与存放
 
-状态字面量的唯一来源是两个公开常量对象：`ErrorOrigin`、`CancelReason`（`public-types.ts`）。
-子集类型（`SubmitResult` 的取消原因）在类型层写成可达成员的联合，
-不新增第二个常量对象，也不手写差集求补。结果判别式（`status`）不单独枚举——判别联合本身就是这份枚举。
+状态字面量的唯一来源是公开常量对象 `ErrorOrigin`（`public-types.ts`）。
+结果判别式（`status`）不单独枚举——判别联合本身就是这份枚举；单成员取值不立常量对象：
+`submit` 的取消分支不带原因（ADR-48）。
 
 | 状态域 | 取值 | 存放 |
 |---|---|---|
 | 结果产生时间 | 墙钟 epoch 毫秒（不保证单调） | `Entry.updatedAt` → 交付时进入 `RefreshDisplay.updatedAt`；与调度的单调时间 `settledAt` 是两个域 |
-| 错误来源 | `request` / `validation` / `configuration` | `RefreshError.origin`；交付面不交付「由谁触发」，这是唯一的来源域（ADR-34） |
-| submit 取消原因 | 可达子集只有一个成员：`disposed` | `SubmitResult` 的 cancelled 分支 |
+| 错误来源 | `request` / `caller` | `RefreshError.origin`；按调用方能采取的动作分两侧（可重试 / 要改自己的输入），不按「哪一步失败」分（ADR-48）；交付面不交付「由谁触发」，这是唯一的来源域（ADR-34） |
 | 刷新要求 | 无 / 待满足（`Set<Handle>`） | `Resource.waiters` |
 | 当前订阅 | 实例 / `null`（间隔从配置快照现算） | `Handle.subscription` |
 | 配置快照 | 有效 / 非法（`null`） | 适配闭包 → `Handle.config` |
@@ -234,7 +233,7 @@ flowchart LR
 
 ### 4.1 参数准备与键
 
-固定 Source 绑定 `P`、`T`、`load` 及可选同步 `validate`。输入按普通 JSON 记录使用；框架**不判断值是否合法**——那是调用方的责任，编码交给 `fast-json-stable-stringify`，沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 与函数字段按省略，`Date` 按其 ISO 字符串。传函数、Proxy 这类复制不了的值由 `structuredClone` 拒绝（`validation`），循环引用由编码包抛 `TypeError`。
+固定 Source 绑定 `P`、`T`、`load` 及可选同步 `validate`。输入按普通 JSON 记录使用；框架**不判断值是否合法**——那是调用方的责任，编码交给 `fast-json-stable-stringify`，沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 与函数字段按省略，`Date` 按其 ISO 字符串。传函数、Proxy 这类复制不了的值由 `structuredClone` 拒绝（`caller`），循环引用由编码包抛 `TypeError`。
 
 提交边界**一次**执行；两件事各由一个函数负责，副作用只出现在其中一处：
 

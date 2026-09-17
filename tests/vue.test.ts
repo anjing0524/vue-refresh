@@ -104,7 +104,7 @@ test('A04/A05 配置非法：只报告一次并停止订阅，修正后按当前
   await tick()
   await tick()
   assert.equal(errors.length, 1, '连续非法只报告一次')
-  assert.equal(errors[0]?.origin, 'configuration')
+  assert.equal(errors[0]?.origin, 'caller')
 
   every.value = 50_000
   await tick()
@@ -208,7 +208,7 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、只通�
   await tick()
   await tick()
   assert.equal(errors.length, 1, '连续非法只通知一次')
-  assert.equal(errors[0]?.origin, 'configuration')
+  assert.equal(errors[0]?.origin, 'caller')
   api.submit({ symbol: 'B' })
   await tick()
   assert.equal(loads, 1, '配置非法时不订阅')
