@@ -192,15 +192,11 @@ test('双组件共享：1s/5s 同参共享、单页暂停、重新进入交付�
   await expect(page.getByTestId('sp-request-甲')).toContainText(`来自请求 ${second} · DEMO`)
   expect((await state(request)).length).toBe(beforeReenter)
 
-  // Store 快照隔离：页面副本被篡改不影响共享分区与另一页。
-  await page.getByTestId('sp-read-snapshot').click()
-  await expect(page.getByTestId('sp-snapshot')).toHaveText(`共享快照（readSnapshot）：${100 + second}.00`)
+  // 画面副本隔离：页面副本被篡改不影响另一页。
   await page.getByTestId('sp-mutate-a').click()
   await expect(page.getByTestId('sp-copies')).toContainText('甲 999.00')
   await expect(page.getByTestId('sp-copies')).toContainText(`乙 ${100 + second}.00`)
   await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + second}.00`)
-  await page.getByTestId('sp-read-snapshot').click()
-  await expect(page.getByTestId('sp-snapshot')).toHaveText(`共享快照（readSnapshot）：${100 + second}.00`)
 
   // 切换品种：新参数即新身份，两页一起换到新实例。
   await page.getByTestId('sp-symbol').selectOption('DEMO2')

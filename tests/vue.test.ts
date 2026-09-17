@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose, ref } from 'vue'
-import { createRefreshManager, useRefresh } from '../src/vue.ts'
+import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import { defineRefresh } from '../src/source.ts'
 import type { RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
 import type { Ref } from 'vue'
@@ -76,7 +76,7 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
   app.unmount()
   await tick()
   assert.equal(released, 1)
-  assert.equal(manager.readSnapshot(quote, { symbol: 'A' }), undefined, '卸载后实例与结果一并消失')
+  assert.equal(currentCore()?.snapshot().resources.length, 0, '卸载后实例与结果一并消失')
 })
 
 test('A04/A05 配置非法：只报告一次并停止订阅，修正后按当前资格恢复', async () => {
@@ -137,7 +137,7 @@ test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接
   enabled.value = false
   await tick()
   assert.equal(api.display.value?.data, 7, '暂停保留画面')
-  assert.equal(manager.readSnapshot(quote, { symbol: 'A' }), undefined, '失去最后一个需求即清实例')
+  assert.equal(currentCore()?.snapshot().resources.length, 0, '失去最后一个需求即清实例')
 
   enabled.value = true
   await tick()

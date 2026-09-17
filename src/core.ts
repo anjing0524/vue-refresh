@@ -1,6 +1,5 @@
 import { CancelReason, ErrorOrigin } from './public-types.ts'
-import type { RefreshDisplay, RefreshError, RefreshResult, RefreshSource, SubmitResult } from './public-types.ts'
-import { parameterKey } from './source.ts'
+import type { RefreshDisplay, RefreshError, RefreshSource, SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
 
 /**
@@ -13,7 +12,7 @@ import type { Parameters } from './source.ts'
  * submit ─ 准备参数 → 建立身份 → reconcile：资格成立就订阅，否则退订
  * refresh ─ 登记要求（直接用当前请求的结果）→ 没有请求就入队
  * flush  ─ 协调句柄 → 到期入队 → 按 FIFO 占槽启动 → 安排唯一唤醒 Timer
- * runTask ─ source.load → 复核任务身份 → Resource.publish（逐页独立副本 → 结算要求）
+ * runTask ─ source.load → 复核任务身份 → Resource.publish（逐页独立副本 → 满足要求）
  * ```
  *
  * 交付、失败与取消都不另立镜像：句柄的「当前订阅」是它自己身上的一个字段，
@@ -56,16 +55,6 @@ export interface Task {
   readonly controller: AbortController
 }
 
-/**
- * 一次显式刷新尚未满足的要求：由「本实例当前那个请求」的结果结算，只结算一次。
- * 它不记版本下限：`refresh` 登记时请求若有就是当前那个（`enqueue` 只在不忙时登记），若没有就当场登记一个，
- * 因此结算它的结果一定不早于登记——「谁的版本号不低于谁」这层门槛恒真，不需要存（ADR-43）。
- */
-export interface Waiter {
-  readonly handle: Handle
-  readonly settle: (result: RefreshResult) => void
-}
-
 /** 实例最近一次有效结果。 */
 export interface Entry {
   readonly data: unknown
@@ -86,8 +75,11 @@ export class Resource {
   readonly parameters: Parameters
   /** 按周期订阅本实例的句柄；各自的间隔在它们自己的 `subscription` 上。 */
   readonly subscribers = new Set<Handle>()
-  /** 尚未结算的刷新要求。 */
-  readonly waiters = new Set<Waiter>()
+  /**
+   * 仍想要一次取数的句柄（显式刷新登记的要求）。它是一个**标志**而不是队列：重复刷新同一个句柄只留一份，
+   * 由当前或本次登记的那个请求的结果满足，满足之后移除（ADR-46）。
+   */
+  readonly waiters = new Set<Handle>()
   entry: Entry | null = null
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
   settledAt: number | null = null
@@ -123,14 +115,13 @@ export class Resource {
     if (this.entry) this.deliverTo(handle, this.entry)
   }
 
-  /** 后台成功：收货方一次收齐（有效订阅 ∪ 未结算的刷新要求），同一句柄只交付一次。 */
+  /** 后台成功：收货方一次收齐（有效订阅 ∪ 本次要满足的刷新要求），同一句柄只交付一次。 */
   publish(entry: Entry): void {
-    // 结算时刻先于交付：交付回调里看到的调度状态已经是「这一次已经结束」。
+    // 满足时刻先于交付：交付回调里看到的调度状态已经是「这一次已经结束」。
     this.settledAt = Date.now()
     this.entry = entry
-    // 这一批要结算的要求先定下来再交付：交付回调里重入登记的要求不在这一批里，只能由 `refill` 的后继请求结算。
+    // 这一批要满足的要求先定下来再交付：交付回调里重入登记的要求不在这一批里，只能由 `refill` 的后继请求满足。
     const satisfied = [...this.waiters]
-    const refreshing = new Set(satisfied.map(waiter => waiter.handle))
     const delivered = new Set<Handle>()
     for (const handle of [...this.subscribers]) {
       // 前一个接收者的回调可能已经改身份或退订，因此每个交付点重新复核归属。
@@ -138,42 +129,41 @@ export class Resource {
       delivered.add(handle)
       this.deliverTo(handle, entry)
     }
-    for (const handle of refreshing) {
+    for (const handle of satisfied) {
       if (delivered.has(handle)) continue
-      // 与订阅者同口径的复核：交付回调可能已经把这个句柄的要求结算掉（换身份、失活、卸载），
-      // 它就不再是「未结算的刷新要求」，不该收这一次的结果。
-      if (!satisfied.some(waiter => waiter.handle === handle && this.waiters.has(waiter))) continue
+      // 与订阅者同口径的复核：交付回调可能已经撤销这个句柄的要求（换身份、失活、卸载）。
+      if (!this.waiters.has(handle)) continue
       this.deliverTo(handle, entry)
     }
-    // 结算在交付之后：`await refresh()` 返回 success 时本页 display 已经是这次的结果。
-    for (const waiter of satisfied) this.settleWaiter(waiter, { status: 'success' })
+    // 满足在交付之后：交付回调里重入登记的要求留给 `refill`，不会被这一批清掉。
+    for (const handle of satisfied) this.clearRequest(handle)
   }
 
   /**
-   * 共享请求失败（含上限到期）：通知仍有效的订阅者，并按同一失败结算本实例全部未完成的要求。
-   * 失败保留画面、需求与开启意愿，下个周期继续。
+   * 共享请求失败（含上限到期）：通知仍有效的订阅者、以及本次有未完成要求的页面（后者没有回执，这是它唯一的
+   * 失败通道），然后撤销本实例全部未完成的刷新要求。失败保留画面、需求与开启意愿，下个周期继续。
    */
   fail(error: unknown): void {
     this.settledAt = Date.now()
-    for (const handle of [...this.subscribers]) {
-      if (!this.subscribers.has(handle)) continue
+    const notified = new Set<Handle>(this.subscribers)
+    for (const handle of this.waiters) notified.add(handle)
+    for (const handle of notified) {
+      // 前一个页面的 `onError` 可能已经改身份或退订，因此每个通知点重新复核归属。
+      if (!this.subscribers.has(handle) && !this.waiters.has(handle)) continue
       report(handle, { origin: ErrorOrigin.Request, error, ...identity(handle) })
     }
-    for (const waiter of [...this.waiters]) {
-      this.settleWaiter(waiter, { status: 'error', origin: ErrorOrigin.Request, error })
-    }
+    for (const handle of [...this.waiters]) this.clearRequest(handle)
   }
 
-  /** 结算一个要求；它可能是本实例的最后一个需求，因此顺手让核心判断要不要回收这个实例。 */
-  settleWaiter(waiter: Waiter, result: RefreshResult): void {
-    if (!this.waiters.delete(waiter)) return
-    waiter.settle(result)
+  /** 撤销一个句柄的刷新要求；它可能是本实例的最后一个需求，因此顺手让核心判断要不要回收这个实例。 */
+  clearRequest(handle: Handle): void {
+    if (!this.waiters.delete(handle)) return
     this.core.releaseIfUnused(this)
   }
 
   /**
    * 任务结束后仍有未完成的要求时补一次请求。唯一来源是交付回调里的重入：`publish` 先定下这一批要结算的
-   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求结算。有要求就必然在册（§3.5 第 11 条）。
+   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求满足。有要求就必然在册（§3.5 第 11 条）。
    */
   refill(): void {
     if (this.waiters.size === 0 || this.task !== null) return
@@ -189,6 +179,9 @@ export class Resource {
     }))
   }
 }
+
+/** 配置非法的统一报错文本：`vue.ts` 的配置 watcher 与 `refresh` 入口共用同一句。 */
+export const INVALID_CONFIG_MESSAGE = '刷新配置非法：enabled 必须是布尔值，every 必须是正安全整数'
 
 /** 框架侧单次 `load` 的上限（毫秒）：从真正开始执行起算，排队等待不计入（数值与依据见 ADR-20）。 */
 const LOAD_TIMEOUT_MS = 10_000
@@ -283,7 +276,7 @@ export class RefreshCore {
     const cleanup = handle.cleanup
     handle.cleanup = null
     if (cleanup) isolate(cleanup)
-    this.settleRefreshes(handle, CancelReason.Disposed)
+    this.clearRefreshes(handle)
     handle.parameters = null
     this.unsubscribe(handle)
     this.flushSoon()
@@ -331,55 +324,41 @@ export class RefreshCore {
     const declared = handle.parameters
     if (declared && declared.key === parameters.key) return { status: 'accepted' }
 
-    // 顺序固定：先用旧身份结算刷新要求（它可能落在旧实例上），再退订，最后换身份并重新协调。
-    this.settleRefreshes(handle, CancelReason.Superseded)
+    // 顺序固定：先用旧身份撤销刷新要求（它可能落在旧实例上），再退订，最后换身份并重新协调。
+    this.clearRefreshes(handle)
     this.unsubscribe(handle)
     handle.parameters = parameters
     this.reconcile(handle)
     return { status: 'accepted' }
   }
 
-  /** 显式刷新：有当前请求就直接用它的结果，没有就登记一次；不恢复自动刷新，也不改写调用方的开关。 */
-  refresh(handle: Handle): Promise<RefreshResult> {
-    const immediate = (result: RefreshResult): Promise<RefreshResult> => Promise.resolve(result)
-    if (this.disposed || handle.disposed) return immediate({ status: 'cancelled', reason: CancelReason.Disposed })
-
+  /**
+   * 显式刷新：有当前请求就直接用它的结果，没有就当场登记一次；不恢复自动刷新，也不改写调用方的开关。
+   *
+   * **不回执**：成功只经 `display`（U11／U12），失败只经 `onError`（与自动刷新同一条通道，U13）。
+   * 入口条件不成立时直接返回、不产生副作用：已销毁、未声明身份、环境不允许都不通知（页面自己知道这些状态）；
+   * 只有配置非法会按 `configuration` 通知一次——那是一次显式动作的失败。
+   */
+  refresh(handle: Handle): void {
+    if (this.disposed || handle.disposed) return
     const config = handle.config()
     if (config === null) {
-      return immediate({ status: 'error', origin: ErrorOrigin.Configuration, error: new TypeError('刷新配置非法：enabled 必须是布尔值，every 必须是正安全整数') })
+      report(handle, { origin: ErrorOrigin.Configuration, error: new TypeError(INVALID_CONFIG_MESSAGE) })
+      return
     }
-    if (!(handle.active && this.visible)) {
-      return immediate({ status: 'cancelled', reason: CancelReason.Unavailable })
-    }
+    if (!(handle.active && this.visible)) return
     const parameters = handle.parameters
-    if (parameters === null) return immediate({ status: 'cancelled', reason: CancelReason.Unavailable })
+    if (parameters === null) return
 
     const resource = this.resourceFor(handle.source, parameters)
-    let settle!: (result: RefreshResult) => void
-    const result = new Promise<RefreshResult>(resolve => { settle = resolve })
     // 有请求就直接用：`enqueue` 的三个调用点都先确认没有当前任务，因此有 `task` 时它就是本实例唯一的请求；
-    // 没有请求时由本次登记的任务满足。
-    resource.waiters.add({ handle, settle })
+    // 没有请求时由本次登记的任务满足。同一个句柄重复刷新只留一份要求。
+    resource.waiters.add(handle)
     if (!resource.task) this.enqueue(resource)
     this.flushSoon()
-    return result
   }
 
-  // ══════════════════════════ 只读定位与观测面 ══════════════════════════
-
-  /**
-   * 只读定位：按参数键查实例并返回独立副本。不创建实例、不保活、不执行 `validate`。
-   *
-   * 编码不出身份的参数没有对应实例，与「没有结果」一样返回 `undefined`：读取没有通知通道，
-   * 不该逼每个读取点写 `try/catch`；同一个参数对象交给 `submit` 会得到 `rejected` 与通知。
-   */
-  readSnapshot(source: RefreshSource<object, unknown>, args: object): unknown {
-    // 已销毁时注册表已清空（`dispose` 的末行），因此不必单独判 `disposed`。
-    const key = parameterKey(args)
-    if (key === null) return undefined
-    const resource = this.buckets.get(source)?.get(key)
-    return resource?.entry ? structuredClone(resource.entry.data) : undefined
-  }
+  // ══════════════════════════ 观测面 ══════════════════════════
 
   /**
    * 只读计数投影：给演示面板与集成测试看状态。**不属于包契约**，也不提供改状态的入口；
@@ -392,24 +371,18 @@ export class RefreshCore {
     resources: readonly Resource[]
     queued: readonly Task[]
     running: readonly Task[]
-    entries: Readonly<Partial<Record<string, Entry>>>
     scheduled: boolean
     flushing: boolean
   } {
     const resources: Resource[] = []
-    const entries: Partial<Record<string, Entry>> = {}
     for (const bucket of this.buckets.values()) {
-      for (const [key, resource] of bucket) {
-        resources.push(resource)
-        if (resource.entry) entries[key] = resource.entry
-      }
+      for (const resource of bucket.values()) resources.push(resource)
     }
     return {
       handles: [...this.handles],
       resources,
       queued: [...this.queue],
       running: [...this.running],
-      entries,
       scheduled: this.wakeup !== null,
       flushing: this.flushing,
     }
@@ -439,7 +412,7 @@ export class RefreshCore {
   private coordinate(handle: Handle): void {
     if (this.disposed || handle.disposed) return
     const present = handle.active && this.visible
-    if (!present) this.settleRefreshes(handle, CancelReason.Unavailable)
+    if (!present) this.clearRefreshes(handle)
 
     const config = handle.config()
     const parameters = handle.parameters
@@ -558,13 +531,10 @@ export class RefreshCore {
 
   // ══════════════════════════ 刷新要求 ══════════════════════════
 
-  /** 结算一个句柄未完成的要求（失去存在、身份被替代、卸载、销毁都由它收尾）。 */
-  private settleRefreshes(handle: Handle, reason: CancelReason): void {
+  /** 撤销一个句柄未完成的刷新要求（失去存在、身份被替代、卸载、销毁都由它收尾）。 */
+  private clearRefreshes(handle: Handle): void {
     const resource = this.resourceOf(handle)
-    if (!resource) return
-    for (const waiter of [...resource.waiters]) {
-      if (waiter.handle === handle) resource.settleWaiter(waiter, { status: 'cancelled', reason })
-    }
+    if (resource) resource.clearRequest(handle)
   }
 
   // ══════════════════════════ 调度 ══════════════════════════

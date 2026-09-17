@@ -7,7 +7,7 @@
  */
 import { computed, defineComponent, h, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRefresh } from '../../src/vue'
-import { ageLine, quoteSource, readShared } from '../sources'
+import { ageLine, quoteSource } from '../sources'
 import type { QuoteParams, QuoteResult } from '../sources'
 import type { RefreshHandle, RefreshOptions } from '../../src/public-types'
 
@@ -64,7 +64,6 @@ export const SharedPairPage = defineComponent({
     const symbol = ref('DEMO')
     const showA = ref(true)
     const showB = ref(true)
-    const snapshot = ref('尚未读取')
     const revision = ref(0)
     // 句柄注册表用 shallowRef：句柄内部有 ref，不能被深层响应式代理解包。
     const entries = shallowRef<Record<string, Entry>>({})
@@ -99,13 +98,6 @@ export const SharedPairPage = defineComponent({
           onClick: () => { showA.value = true; showB.value = true },
         }, '重新进入两页'),
         h('button', {
-          'data-testid': 'sp-read-snapshot',
-          onClick: () => {
-            const value = readShared(quoteSource, { account: 'demo', symbol: symbol.value })
-            snapshot.value = value ? value.quote.price.toFixed(2) : '无分区'
-          },
-        }, '读共享快照'),
-        h('button', {
           'data-testid': 'sp-mutate-a',
           onClick: () => {
             const display = entries.value['甲']?.task.display.value
@@ -117,7 +109,6 @@ export const SharedPairPage = defineComponent({
         }, '篡改甲的画面副本'),
       ]),
       h('p', { 'data-testid': 'sp-pair-state' }, state()),
-      h('p', { 'data-testid': 'sp-snapshot' }, `共享快照（readSnapshot）：${snapshot.value}`),
       h('p', { 'data-testid': 'sp-copies' }, `画面副本对照（第 ${revision.value} 次篡改后）：甲 ${copyPrice('甲')} ｜ 乙 ${copyPrice('乙')}`),
       h('div', { class: 'cards' }, [
         showA.value
@@ -153,7 +144,7 @@ export const B09View = defineComponent({
       // 不能先按旧参数发后台请求（旧契约由 runner 的同步前缀保证，现在由声明顺序保证）。
       enabled.value = true
       task.submit({ account: 'demo', symbol: 'B09-NEW' })
-      void task.refresh()
+      task.refresh()
     }
     return () => {
       const display = task.display.value

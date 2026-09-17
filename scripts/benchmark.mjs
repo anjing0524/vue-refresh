@@ -108,7 +108,7 @@ async function measure() {
   const after = core.snapshot()
   const residue = {
     resources: after.resources.length, handles: after.handles.length, queued: after.queued.length,
-    running: after.running.length, entries: Object.keys(after.entries).length,
+    running: after.running.length, entries: after.resources.filter(resource => resource.entry !== null).length,
   }
   const heapAfter = process.memoryUsage().heapUsed
   const expectedCycles = Math.max(1, Math.round(elapsed / every))

@@ -1,12 +1,12 @@
 import { createApp, defineComponent, h, KeepAlive, onMounted, ref } from 'vue'
 import type { Component } from 'vue'
 import { defineRefresh } from '../src/source'
-import type { RefreshHandle, RefreshResult } from '../src/public-types'
+import type { RefreshHandle } from '../src/public-types'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue'
 import type { RefreshCore } from '../src/core'
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
-import { bindManager, log } from './sources'
+import { log } from './sources'
 import type { CallLog } from './sources'
 import { QueryListPage } from './pages/query-list'
 import { QuotePanelPage } from './pages/quote-panel'
@@ -19,7 +19,6 @@ const params = new URLSearchParams(location.search)
 export interface HarnessSnapshot {
   calls: Array<{ id: number; aborted: boolean; finished: boolean }>
   events: string[]
-  queryResults: Record<string, RefreshResult | null>
   pages: Record<string, { readonly args: QuoteParams; readonly data: Quote; readonly updatedAt: number; readonly manual: boolean } | null>
   entries: Record<string, { data: Quote }>
   running: number
@@ -96,7 +95,6 @@ function mountHarness(): void {
     validate: params => params.account.length > 0 && params.symbol.length > 0,
     load: readQuote,
   })
-  const queryResults: Record<string, RefreshResult | null> = {}
   // 页面侧事实：上一次手刷拿到的结果时间。框架不再交付「这次是谁触发的」。
   const manualAt: Record<string, number> = {}
 
@@ -118,7 +116,7 @@ function mountHarness(): void {
         h('p', { class: 'price', 'data-testid': `price-${props.label}` }, task.display.value?.data.quote.price.toString() ?? '等待首查'),
         h('p', task.display.value ? `来自请求 ${task.display.value.data.quote.requestId}` : '两个组件共用同一来源和参数'),
         h('p', task.display.value
-          ? `展示参数：${task.display.value.args.symbol} · ${task.display.value.updatedAt === manualAt[props.label] ? '本页刷新' : '共享刷新'}`
+          ? `展示参数：${task.display.value.args.symbol} · ${task.display.value.updatedAt >= (manualAt[props.label] ?? Infinity) ? '本页刷新' : '共享刷新'}`
           : ''),
         // updatedAt 是墙钟读数：相对时间按 U16/§2.5 的建议把差值钳制到 0，避免校时回拨显示负数。
         h('p', { 'data-testid': `age-${props.label}` }, task.display.value
@@ -127,10 +125,10 @@ function mountHarness(): void {
         h('label', ['品种 ', h('input', { value: draftSymbol.value, onInput: (event: Event) => { draftSymbol.value = (event.target as HTMLInputElement).value } })]),
         h('button', {
           onClick: () => {
+            // 手刷没有回执：页面自己记下点击时刻，交付后比较 `updatedAt` 判断这次结果是不是自己的动作之后产生的。
+            manualAt[props.label] = Date.now()
             task.submit({ account: 'demo', symbol: draftSymbol.value })
-            void task.refresh().then(result => {
-              if (result.status === 'success') manualAt[props.label] = task.display.value?.updatedAt ?? 0
-            })
+            task.refresh()
           },
         }, '刷新本页'),
         h('button', { onClick: () => { enabled.value = !enabled.value } }, enabled.value ? '暂停刷新' : '恢复刷新'),
@@ -186,12 +184,13 @@ function mountHarness(): void {
       return {
         calls: calls.map(c => ({ id: c.id, aborted: c.signal.aborted, finished: c.finished })),
         events: [...events],
-        queryResults: structuredClone(queryResults),
         pages: Object.fromEntries([...components].map(([name, c]) => {
           const display = c.task.display.value
-          return [name, display === null ? null : { ...structuredClone(display), manual: display.updatedAt === manualAt[name] }]
+          return [name, display === null ? null : { ...structuredClone(display), manual: display.updatedAt >= (manualAt[name] ?? Infinity) }]
         })),
-        entries: structuredClone(view.entries) as Record<string, { data: Quote }>,
+        entries: Object.fromEntries(view.resources
+          .filter(resource => resource.entry !== null)
+          .map(resource => [resource.parameters.key, { data: resource.entry!.data as Quote }])),
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,
         timer: view.scheduled, pending: view.flushing,
@@ -199,13 +198,10 @@ function mountHarness(): void {
     },
     refresh(name: string, symbol: string) {
       const page = components.get(name)!
-      queryResults[name] = null
-      // 主动刷新：先声明身份，再用与自动刷新同一条路径取一次。
+      // 主动刷新：先声明身份，再用与自动刷新同一条路径取一次；没有回执，因此记下点击时刻。
+      manualAt[name] = Date.now()
       page.task.submit({ account: 'demo', symbol })
-      void page.task.refresh().then(result => {
-        queryResults[name] = result
-        if (result.status === 'success') manualAt[name] = page.task.display.value?.updatedAt ?? 0
-      })
+      page.task.refresh()
     },
     enable(name: string, enabled: boolean) { components.get(name)!.enabled.value = enabled },
     resolve(id: number, price: number) { if (controlled) calls[id - 1]!.resolve({ quote: { price, requestId: id } }) },
@@ -240,7 +236,6 @@ const VIEWS: Array<{ id: string; label: string; component: Component }> = [
  */
 function mountShell(): void {
   const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2 })
-  bindManager(refresh)
   const active = ref(params.get('page') ?? VIEWS[0]!.id)
   let core: RefreshCore | null = null
   const current = (): { id: string; label: string; component: Component } =>
@@ -272,7 +267,7 @@ function mountShell(): void {
       const view = core!.snapshot()
       return {
         resources: view.resources.length, handles: view.handles.length,
-        entries: Object.keys(view.entries).length,
+        entries: view.resources.filter(resource => resource.entry !== null).length,
         running: view.running.length, queued: view.queued.length, scheduled: view.scheduled,
       }
     },

@@ -2,12 +2,12 @@ import {
   getCurrentInstance, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, watch,
 } from 'vue'
 import type { App } from 'vue'
-import { RefreshCore, report } from './core.ts'
+import { INVALID_CONFIG_MESSAGE, RefreshCore, report } from './core.ts'
 import type { Config, Handle } from './core.ts'
 import { prepareParameters } from './source.ts'
 import { ErrorOrigin } from './public-types.ts'
 import type {
-  ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions, RefreshSource,
+  RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions, RefreshSource,
 } from './public-types.ts'
 
 /**
@@ -77,7 +77,7 @@ export function useRefresh<P extends object, T>(
     else if (!reported) {
       reported = true
       // 配置非法是本页自己的输入事实，不是某次取数的归属，因此不带声明代次。
-      report(handle, { origin: ErrorOrigin.Configuration, error: new TypeError('刷新配置非法：enabled 必须是布尔值，every 必须是正安全整数') })
+      report(handle, { origin: ErrorOrigin.Configuration, error: new TypeError(INVALID_CONFIG_MESSAGE) })
     }
     core.reconcile(handle)
   }, { flush: 'sync', immediate: true })
@@ -126,12 +126,6 @@ export function createRefreshManager(options: { readonly maxConcurrent: number }
       core.setCleanup(() => document.removeEventListener('visibilitychange', onVisibilityChange))
       core.setVisible(!document.hidden)
       app.onUnmount(() => core.dispose())
-    },
-
-    readSnapshot<P extends object, T>(source: RefreshSource<P, T>, args: P): ReadonlySnapshot<T> | undefined {
-      // 只计算参数键并直读实例；不准备参数、不校验、不创建实例。
-      // 断言是诚实的：核心返回的是该来源 `load` 结果的独立副本，编译期无法证明它就是 `T`。
-      return core.readSnapshot(source, args) as ReadonlySnapshot<T> | undefined
     },
 
     dispose: () => core.dispose(),

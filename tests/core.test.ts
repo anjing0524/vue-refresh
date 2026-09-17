@@ -5,7 +5,7 @@ import type { Config, Handle } from '../src/core.ts'
 import { defineRefresh, prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
 import { CancelReason, ErrorOrigin } from '../src/public-types.ts'
-import type { RefreshDisplay, RefreshError, RefreshResult, RefreshSource, SubmitResult } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshError, RefreshSource, SubmitResult } from '../src/public-types.ts'
 
 /** 每个用例结束时销毁核心：周期调度会留下唯一的唤醒 Timer，不销毁的话进程不会退出。 */
 const cores: RefreshCore[] = []
@@ -26,7 +26,7 @@ interface Page {
   readonly errors: RefreshError[]
   readonly last: RefreshDisplay<object, unknown> | undefined
   submit(args: object): SubmitResult
-  refresh(): Promise<RefreshResult>
+  refresh(): void
   set(config: Config | null): void
 }
 
@@ -89,7 +89,6 @@ test('A01/A11 首次订阅立即取一次，并按整体发布交付参数、数
   assert.deepEqual(view.last?.args, { symbol: 'A' })
   assert.equal(view.last?.data, 7)
   assert.equal(typeof view.last?.updatedAt, 'number')
-  assert.equal(core.readSnapshot(quote, { symbol: 'A' }), 7)
 })
 
 test('A11/A02 同参数的两个组件共享同一次请求，各自拿到独立副本', async () => {
@@ -113,7 +112,6 @@ test('A11/A02 同参数的两个组件共享同一次请求，各自拿到独立
   // 改自己拿到的副本不影响共享实例，也不影响别人。
   const copy = first.last?.data as { list: number[] }
   copy.list.push(99)
-  assert.deepEqual(core.readSnapshot(quote, { id: 1 }), { list: [1, 2] })
   assert.deepEqual(second.last?.data, { list: [1, 2] })
 })
 
@@ -182,7 +180,7 @@ test('A03 参数被拒时返回 rejected，保留已有身份，并按 validatio
   assert.equal(victim.errors.at(-1)?.origin, 'validation')
 })
 
-test('A14 在途任务直接满足本次刷新：不追发第二次，结算在交付之后', async () => {
+test('A14 在途任务直接满足本次刷新：不追发第二次', async () => {
   const resolvers: Array<(value: number) => void> = []
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({
@@ -193,15 +191,14 @@ test('A14 在途任务直接满足本次刷新：不追发第二次，结算在�
 
   view.submit({ id: 1 })
   await settle()
-  const refreshing = view.refresh()
+  view.refresh()
   await settle()
   assert.equal(calls, 1, '有请求就直接用它，不再发第二次')
 
   resolvers[0]?.(100)
   await settle()
-  assert.equal(resolvers.length, 1, '在途任务直接结算本次刷新，不追发后继请求')
-  assert.deepEqual(await refreshing, { status: 'success' })
-  assert.equal(view.last?.data, 100, '结算在交付之后：返回 success 时本页 display 已是这次结果')
+  assert.equal(resolvers.length, 1, '在途任务直接满足本次刷新，不追发后继请求')
+  assert.equal(view.last?.data, 100, '刷新拿到的就是这次请求的结果')
 })
 
 test('A14 排队未启动的任务同样直接满足本次刷新', async () => {
@@ -220,14 +217,13 @@ test('A14 排队未启动的任务同样直接满足本次刷新', async () => {
   await settle()
   assert.equal(calls, 1, '槽位被第一个身份占满，第二个排队')
 
-  const refreshing = view.refresh()
+  view.refresh()
   resolvers[0]?.(1)
   await settle()
 
   assert.equal(calls, 2)
   resolvers[1]?.(2)
   await settle()
-  assert.deepEqual(await refreshing, { status: 'success' })
   assert.equal(view.last?.data, 2)
 })
 
@@ -244,13 +240,32 @@ test('A12 交付期间被结算的刷新要求不再收这一次结果：交付�
 
   watcher.submit({ id: 1 })
   paused.submit({ id: 1 })
-  const pending = paused.refresh()
+  paused.refresh()
   await settle()
 
-  assert.equal(calls, 1, '暂停页的刷新要求由这一个在途请求结算，不追发第二次')
+  assert.equal(calls, 1, '暂停页的刷新要求由这一个在途请求满足，不追发第二次')
   assert.equal(delivered.length, 1)
-  assert.deepEqual(await pending, { status: 'cancelled', reason: CancelReason.Superseded })
-  assert.equal(paused.published.length, 0, '要求已在交付期间结算，就不再收这一次结果')
+  assert.equal(paused.published.length, 0, '要求已在交付期间被撤销，就不再收这一次结果')
+})
+
+test('A12/A14 交付回调里新登记的刷新要求由后继请求满足（refill）', async () => {
+  let calls = 0
+  const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
+  const core = newCore(2)
+  const paused = page(core, source, { enabled: false, every: 100_000 })
+  const delivered: RefreshDisplay<object, unknown>[] = []
+  const watcher = page(core, source, undefined, {
+    // 订阅页的交付回调里登记一次刷新：它不在这一批里，只能由后继请求满足。
+    publish: value => { delivered.push(value); paused.refresh() },
+  })
+
+  watcher.submit({ id: 1 })
+  paused.submit({ id: 1 })
+  await settle()
+
+  assert.equal(calls, 2, '交付期间登记的要求由后继请求满足')
+  assert.equal(paused.last?.data, 2, '暂停页拿到的是后继请求的结果')
+  assert.equal(delivered.length, 2, '订阅页两次交付都收到')
 })
 
 test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷新一次', async () => {
@@ -269,40 +284,48 @@ test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷
   assert.equal(calls, 1, '暂停后不再有周期请求')
   assert.equal(view.handle.subscription, null)
 
-  assert.deepEqual(await view.refresh(), { status: 'success' })
+  view.refresh()
+  await settle()
   assert.equal(calls, 2, '暂停页仍可刷新一次')
   await sleep(40)
   assert.equal(calls, 2, '刷新不会把暂停页变回订阅')
 })
 
-test('A04/A06 浏览器隐藏与组件失活都会当场结算未完成的刷新要求', async () => {
+test('A04/A06 浏览器隐藏与组件失活都会当场撤销未完成的刷新要求', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: () => new Promise<number>(() => {}) })
   const core = newCore(2)
   const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
-  const refreshing = view.refresh()
+  view.refresh()
   await settle()
+  assert.equal(core.snapshot().resources.length, 1, '刷新要求让实例留在册')
 
   core.setVisible(false)
-  assert.deepEqual(await refreshing, { status: 'cancelled', reason: 'unavailable' })
+  await settle()
   assert.equal(view.handle.subscription, null, '隐藏即退订')
-  assert.equal(await view.refresh().then(result => result.status), 'cancelled')
+  assert.equal(core.snapshot().resources.length, 0, '隐藏撤销未完成的刷新要求，实例随之释放')
+
+  view.refresh()
+  await settle()
+  assert.equal(core.snapshot().resources.length, 0, '隐藏期间刷新不产生实例，也不发请求')
 })
 
-test('A06 组件失活取消本页未完成的刷新要求，但不改变被暂停页的显式刷新能力', async () => {
+test('A06 组件失活撤销本页未完成的刷新要求，但不改变被暂停页的显式刷新能力', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: () => new Promise<number>(() => {}) })
   const core = newCore(2)
   const view = page(core, source)
 
   view.submit({ id: 1 })
   await settle()
-  const refreshing = view.refresh()
+  view.refresh()
   await settle()
 
   core.deactivate(view.handle)
-  assert.deepEqual(await refreshing, { status: 'cancelled', reason: 'unavailable' })
+  await settle()
+  assert.equal(view.handle.subscription, null, '失活即退订')
+  assert.equal(core.snapshot().resources.length, 0, '失活撤销未完成的刷新要求')
 })
 
 test('A06 最后一个需求退出：在途请求被 abort，实例与结果一并消失', async () => {
@@ -320,7 +343,6 @@ test('A06 最后一个需求退出：在途请求被 abort，实例与结果一�
 
   core.removeHandle(view.handle)
   assert.equal(signal?.aborted, true)
-  assert.equal(core.readSnapshot(quote, { id: 1 }), undefined)
   assert.equal(core.snapshot().resources.length, 0)
 })
 
@@ -348,7 +370,7 @@ test('A06/A11 恢复：实例还在就立即交付历史结果，不重复取数
 
   core.removeHandle(view.handle)
   core.removeHandle(other.handle)
-  assert.equal(core.readSnapshot(quote, { id: 1 }), undefined)
+  assert.equal(core.snapshot().resources.length, 0, '最后一个需求退出后实例与结果一起消失')
 })
 
 test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', async () => {
@@ -380,19 +402,18 @@ test('A05 暂停只退订：已发起的刷新要求继续等当前请求的结�
 
   view.submit({ id: 1 })
   await settle()
-  const refreshing = view.refresh()
+  view.refresh()
   await settle()
 
   view.set({ enabled: false, every: 100_000 })
   await settle()
   assert.equal(view.handle.subscription, null, '暂停即退订')
-  assert.equal(core.snapshot().resources.length, 1, '刷新要求还没结算，实例不释放、在途不取消')
+  assert.equal(core.snapshot().resources.length, 1, '刷新要求还没满足，实例不释放、在途不取消')
 
-  // 暂停不结算已发起的刷新要求：它由当前这个请求的结果结算，既不另发一次也不必等下个周期。
+  // 暂停不撤销已发起的刷新要求：它由当前这个请求的结果满足，既不另发一次也不必等下个周期。
   resolvers[0]?.(7)
   await settle()
   assert.equal(resolvers.length, 1, '暂停期间不追发请求，本次刷新用现有这一次')
-  assert.deepEqual(await refreshing, { status: 'success' })
   assert.equal(view.last?.data, 7, '暂停页仍然拿到这次结果')
   assert.equal(core.snapshot().resources.length, 0, '要求结算后没有需求，才释放实例')
   assert.equal(view.last?.data, 7, '释放共享实例不动页面自己的副本')
@@ -430,16 +451,29 @@ test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重
 
   view.submit({ id: 1 })
   await settle()
-  const refreshing = view.refresh()
+  view.refresh()
   await settle()
 
   rejecters[0]?.(new Error('down'))
   await settle()
-  const settled = await refreshing
-  assert.equal(settled.status, 'error')
-  assert.equal(settled.status === 'error' ? settled.origin : null, 'request')
+  assert.equal(view.errors.at(-1)?.origin, 'request', '失败经 onError 通知：刷新没有回执')
+  assert.equal(view.errors.at(-1)?.operationId, 1, '通知带上本页的声明代次')
   assert.notEqual(view.handle.subscription, null, '订阅与开启意愿都保留')
   assert.equal(resolvers.length, 1, '失败不自动重试')
+})
+
+test('A13/A14 暂停页显式刷新失败：没有回执，失败仍经 onError 通知', async () => {
+  const source = defineRefresh<{ id: number }, number>({ load: async () => { throw new Error('down') } })
+  const core = newCore(2)
+  const paused = page(core, source, { enabled: false, every: 100_000 })
+
+  paused.submit({ id: 1 })
+  paused.refresh()
+  await settle()
+
+  assert.equal(paused.errors.at(-1)?.origin, 'request', '未订阅页面只有 onError 这条失败通道')
+  assert.equal(paused.published.length, 0, '失败不交付')
+  assert.equal(core.snapshot().resources.length, 0, '失败撤销要求，实例随即释放')
 })
 
 test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结果', async () => {
@@ -561,31 +595,12 @@ test('A11 交付面：null 之外的任何结果都整体替换，且页面副�
   const copy = first?.data as { rows: number[] }
   copy.rows.push(2)
 
-  assert.deepEqual(core.readSnapshot(quote, { id: 1 }), { rows: [1] })
-  assert.equal(view.handle.parameters?.key, '{"id":1}')
-})
-
-test('A15 只读定位：无实例与编码不出的参数都返回 undefined，读到的是副本', async () => {
-  const source = defineRefresh<{ id: number }, { rows: number[] }>({ load: async () => ({ rows: [1] }) })
-  const quote = source
-  const core = newCore(1)
-
-  assert.equal(core.readSnapshot(quote, { id: 1 }), undefined)
-  // 编码不做合法性判断：这些根容器只是各自不同的键，没有实例就返回 undefined。
-  for (const other of [[1, 2], null, 7, 'x', new Date(0), { id: Number.NaN }]) {
-    assert.equal(core.readSnapshot(quote, other as object), undefined, `根容器 ${String(other)} 不该抛`)
-  }
-  // 编码不出身份的参数按「没有这个身份」处理：读取点不需要 try/catch。
-  const cyclic: Record<string, unknown> = {}
-  cyclic.self = cyclic
-  assert.equal(core.readSnapshot(quote, cyclic), undefined)
-
-  const view = page(core, quote)
-  view.submit({ id: 1 })
+  // 页面副本的篡改没有污染共享实例：后加入者按同一身份立即拿到原结果，不重新取数。
+  const late = page(core, quote)
+  late.submit({ id: 1 })
   await settle()
-  const found = core.readSnapshot(quote, { id: 1 }) as { rows: number[] }
-  found.rows.push(2)
-  assert.deepEqual(core.readSnapshot(quote, { id: 1 }), { rows: [1] })
+  assert.deepEqual(late.last?.data, { rows: [1] })
+  assert.equal(view.handle.parameters?.key, '{"id":1}')
 })
 
 test('A04/A17 两个协调者互不共享：同 Source 同参数各自取数', async () => {
@@ -620,7 +635,7 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   await settle()
 
   assert.equal(normal.last?.data, 3, '一个接收者失败不影响另一个')
-  assert.equal(core.readSnapshot(quote, { id: 1 }), 3)
+  assert.equal(core.snapshot().resources.length, 1, '页面回调失败不影响实例与结果')
 
   // 失败通知里的 onError 抛错同样被隔离，订阅与开启意愿都不受影响。
   let notified = 0
@@ -634,7 +649,7 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   assert.equal(victim.handle.subscription?.resource.subscribers.size, 1)
 })
 
-test('A15/A17 销毁：幂等，之后所有入口都返回 cancelled/disposed，未结束的执行不再写事实', async () => {
+test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的执行不再写事实', async () => {
   const resolvers: Array<(value: number) => void> = []
   const source = defineRefresh<{ id: number }, number>({
     load: () => new Promise<number>(resolve => resolvers.push(resolve)),
@@ -646,15 +661,14 @@ test('A15/A17 销毁：幂等，之后所有入口都返回 cancelled/disposed�
 
   view.submit({ id: 1 })
   await settle()
-  const refreshing = view.refresh()
+  view.refresh()
   await settle()
 
   core.dispose()
   assert.equal(core.isDisposed(), true)
   assert.equal(cleaned, 1)
-  assert.deepEqual(await refreshing, { status: 'cancelled', reason: 'disposed' })
   assert.deepEqual(view.submit({ id: 2 }), { status: 'cancelled', reason: CancelReason.Disposed })
-  assert.equal(await view.refresh().then(result => result.status), 'cancelled')
+  view.refresh()
   const empty = core.snapshot()
   assert.deepEqual([empty.handles.length, empty.resources.length, empty.queued.length, empty.scheduled], [0, 0, 0, false])
 
@@ -666,7 +680,7 @@ test('A15/A17 销毁：幂等，之后所有入口都返回 cancelled/disposed�
   core.dispose()
 })
 
-test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 configuration 结算', async () => {
+test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 configuration 通知', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(2)
   const view = page(core, source, null)
@@ -676,19 +690,20 @@ test('A04/A05 配置非法时不订阅也不刷新，刷新入口按 configurati
   assert.equal(view.handle.subscription, null)
   assert.equal(view.published.length, 0)
 
-  const result = await view.refresh()
-  assert.equal(result.status, 'error')
-  assert.equal(result.status === 'error' ? result.origin : null, ErrorOrigin.Configuration)
+  view.refresh()
+  assert.equal(view.errors.at(-1)?.origin, ErrorOrigin.Configuration, '显式刷新在配置非法时经 onError 通知')
 })
 
-test('A05/A14 未声明身份时刷新结算 unavailable，不产生请求', async () => {
+test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return 1 } })
   const core = newCore(2)
   const view = page(core, source)
 
-  assert.deepEqual(await view.refresh(), { status: 'cancelled', reason: 'unavailable' })
+  view.refresh()
+  await settle()
   assert.equal(calls, 0)
+  assert.equal(view.errors.length, 0, '页面自己知道还没有身份，不重复通知')
 })
 
 test('A18 参数编码与声明代次上界：键按 JSON 语义稳定排序，代次到达上界后停在原地', async () => {
@@ -721,11 +736,11 @@ test('A18 参数编码与声明代次上界：键按 JSON 语义稳定排序，�
 })
 
 /**
- * 这一条是「调用方不用写 try/catch」的总账：三条公开入口都只能给出返回值或 `onError`。
+ * 这一条是「调用方不用写 try/catch」的总账：公开入口只给返回值、`onError`，或者什么都不给。
  * 唯一会同步抛错的是装配误用（`useRefresh` 不在 setup、没有协调者、`maxConcurrent` 非法、安装冲突），
  * 那些在 `vue.test.ts` 里各有一条，且都发生在第一次运行就能看见的固定位置。
  */
-test('边界总账：运行期失败只走返回值或 onError，三类公开入口都不抛错', async () => {
+test('边界总账：运行期失败只走返回值或 onError，公开入口都不抛错', async () => {
   // 取数侧：结果非法（`undefined`）与结果不可复制都只是后台失败，槽位当场交还。
   for (const source of [
     defineRefresh<{ id: number }, number>({ load: async () => undefined as unknown as number }),
@@ -762,8 +777,7 @@ test('边界总账：运行期失败只走返回值或 onError，三类公开入
   assert.ok(view.errors.every(error => error.origin === 'validation'))
   assert.equal(core.snapshot().resources.length, 0)
 
-  // 读取侧：编码不出的参数返回 `undefined`；显式刷新永不 reject。
-  assert.doesNotThrow(() => { core.readSnapshot(source, cyclic) })
-  assert.equal(core.readSnapshot(source, cyclic), undefined)
-  await assert.doesNotReject(async () => { await view.refresh() })
+  // 刷新侧：入口状态不成立（这里是没有身份）时直接返回，不抛错、不需要 try/catch。
+  assert.doesNotThrow(() => { view.refresh() })
+  assert.equal(core.snapshot().resources.length, 0, '未声明身份的刷新不产生实例或请求')
 })

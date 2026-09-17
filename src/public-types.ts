@@ -25,12 +25,11 @@ export const ErrorOrigin = {
 } as const
 export type ErrorOrigin = (typeof ErrorOrigin)[keyof typeof ErrorOrigin]
 
-/** 取消原因。`enabled` 关闭与失去存在对调用方的可执行含义相同，因此不再拆成两个取值。 */
+/**
+ * 取消原因。显式刷新不再有回执（ADR-46），因此只剩 `submit` 的一个可达取值：
+ * 它不检查可见性与开启意愿（不会被「失去存在」取消），也不取消自己（换身份只是撤销本页未完成的刷新要求）。
+ */
 export const CancelReason = {
-  /** 被同一句柄的新声明替代。 */
-  Superseded: 'superseded',
-  /** 失去存在：失活或浏览器隐藏。 */
-  Unavailable: 'unavailable',
   /** 句柄或协调者已销毁。 */
   Disposed: 'disposed',
 } as const
@@ -61,22 +60,13 @@ export interface RefreshError {
 
 /**
  * `submit` 的同步结果。`accepted` 只表示身份已被记录，不代表请求成功。
- * 取消原因是可达成员的联合，只有一个成员 `disposed`：声明不检查可见性与开启意愿（不会被 `unavailable` 取消），
- * 声明新身份也不取消自己（`superseded` 只结算本页已发出的刷新要求，走 `refresh` 的返回值）。
+ * 取消原因是可达成员的联合，只有一个成员 `disposed`：声明不检查可见性与开启意愿，换身份也只是撤销本页
+ * 未完成的刷新要求（那些要求没有回执，见 `refresh`）。
  */
 export type SubmitResult =
   | { readonly status: 'accepted' }
   | { readonly status: 'rejected'; readonly error: unknown }
   | { readonly status: 'cancelled'; readonly reason: typeof CancelReason.Disposed }
-
-/**
- * `refresh` 的结算结果。取消立即结算，不等底层请求真正结束。
- * 它只报「这次刷新有没有拿到新结果」，不携带 DTO：数据仍只经 `display` 交付。
- */
-export type RefreshResult =
-  | { readonly status: 'success' }
-  | { readonly status: 'error'; readonly origin: typeof ErrorOrigin.Request | typeof ErrorOrigin.Configuration; readonly error: unknown }
-  | { readonly status: 'cancelled'; readonly reason: CancelReason }
 
 /** 交付面：参数、数据与结果产生时间同次整体发布。 */
 export interface RefreshDisplay<P extends object, T> {
@@ -105,19 +95,22 @@ export interface RefreshHandle<P extends object, T> {
   readonly display: Readonly<ShallowRef<RefreshDisplay<P, T> | null>>
   /** 声明或更新订阅身份；相同身份重复声明幂等，不隐含刷新。 */
   submit(args: P): SubmitResult
-  /** 显式刷新当前身份；与自动刷新共用同一条获取与交付路径。 */
-  refresh(): Promise<RefreshResult>
+  /**
+   * 显式刷新当前身份；与自动刷新共用同一条获取与交付路径。
+   *
+   * 只登记一次要求，**没有回执**：成功只经 `display`，失败只经 `onError`（与自动刷新同一条通道）。
+   */
+  refresh(): void
 }
 
-/** 应用级协调者：安装、只读快照与销毁。 */
+/**
+ * 应用级协调者：安装与销毁。
+ *
+ * **它不提供读取**（ADR-46）：共享结果只经页面自己的 `display` 交付，需要落在业务 Store 里的页面在自己
+ * 的适配层写；框架不做第二个数据出口，也不承担「业务最新数据」这个角色。
+ */
 export interface RefreshManager {
   /** 安装到应用：注册可见性监听并在卸载时释放。**需要浏览器环境**（本库只服务 SPA）。 */
   install(app: App): void
-  /**
-   * 按参数值定位共享结果并返回独立副本；不创建实例、不延长生存期，无结果返回 `undefined`。
-   * 只有该 Source 仍有活跃实例（存在订阅或未结算的刷新要求）时才可能查到结果。
-   * 参数编码不出身份（循环引用等）同样返回 `undefined`：读取不抛错，坏参数由 `submit` 拒绝并通知。
-   */
-  readSnapshot<P extends object, T>(source: RefreshSource<P, T>, args: P): ReadonlySnapshot<T> | undefined
   dispose(): void
 }

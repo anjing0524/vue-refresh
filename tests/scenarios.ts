@@ -35,7 +35,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await d.refresh('甲', 'OTHER')
     await until(async () => (await d.requests()).length === 2, 'refresh request')
     await d.release((await d.requests())[1]!.id)
-    await until(async () => (await d.snapshot()).queryResults['甲']?.status === 'success', 'refresh settles')
+    await until(async () => (await d.snapshot()).pages['甲']?.args.symbol === 'OTHER', 'refresh settles')
     const state = await d.snapshot()
     check(state.pages['甲']!.args.symbol === 'OTHER' && state.pages['甲']!.manual, 'display contains refreshed parameters and the page knows it was its own refresh')
     check(state.pages['乙'] === null, 'paused page without a refresh requirement receives nothing')
@@ -51,12 +51,12 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await sleep(200)
     const blocked = await d.snapshot()
     check(blocked.running === 1 && blocked.calls.length === 1 && blocked.queued === 1, 'refresh must queue behind the full slot')
-    check(blocked.queryResults['甲'] === null, 'refresh has not settled while queued')
+    check(blocked.pages['甲'] === null, 'refresh has not settled while queued')
     await d.release((await d.requests())[0]!.id)
     await until(async () => (await d.requests()).length === 2, 'queued refresh starts once the slot is really free')
     await d.release((await d.requests())[1]!.id)
-    await until(async () => (await d.snapshot()).queryResults['甲']?.status === 'success', 'refresh settles after the slot frees')
-    check(await d.price('甲') === String(100 + 2), 'refresh delivered the shared result to the initiating paused page')
+    await until(async () => await d.price('甲') === String(100 + 2), 'refresh settles after the slot frees')
+    check((await d.snapshot()).pages['甲']!.manual, 'page knows the result came after its own refresh')
   } },
 
   { name: 'A02/A06 真实HTTP：共享、单页冻结、最后取消、恢复', async run(d) {

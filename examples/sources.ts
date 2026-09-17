@@ -5,7 +5,7 @@
  * 身份、共享、调度、取消与有效结果交付都由框架负责；参数与 DTO 的运行时校验属于 HTTP 边界。
  */
 import { defineRefresh } from '../src/source'
-import type { RefreshManager, RefreshSource } from '../src/public-types'
+
 
 export type SortField = 'price' | 'change' | 'volume'
 
@@ -97,18 +97,6 @@ export const quoteSource = defineRefresh<QuoteParams, QuoteResult>({
   validate: p => p.account.length > 0 && p.symbol.length > 0,
   load: runQuote,
 })
-
-let installed: RefreshManager | null = null
-
-/** 外壳安装完成后写入；页面只用公开入口读共享结果。 */
-export function bindManager(manager: RefreshManager): void {
-  installed = manager
-}
-
-/** 只读共享快照：不创建实例、不延长生存期，无结果返回 undefined。返回类型由包自己的签名推断。 */
-export function readShared<P extends object, T>(source: RefreshSource<P, T>, args: P) {
-  return installed?.readSnapshot(source, args)
-}
 
 /** 相对时间按当前时刻重算（随交付重渲染）；页面不为此自建 Timer。 */
 export function ageLine(updatedAt: number): string {
