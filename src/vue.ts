@@ -82,7 +82,7 @@ export function useRefresh<P extends object, T>(
     core.reconcile(handle)
   }, { flush: 'sync', immediate: true })
 
-  if (handle.disposed || core.isDisposed()) stopWatching()
+  if (core.isDisposed()) stopWatching()
   else handle.cleanup = stopWatching
 
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。

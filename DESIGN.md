@@ -62,7 +62,7 @@ Resource.publish → 有效订阅 ∪ 未结算的刷新要求，各一份独立
 readSnapshot → 算键 → 查实例 → 独立副本（不建实例、不保活）
 ```
 
-实例与核心的边界只有三个入口：`enqueue`（排一次请求）、`registered`（是否仍在册）、`releaseIfUnused`
+实例与核心的边界只有两个入口：`enqueue`（排一次请求）、`releaseIfUnused`（没需求了就回收）
 （没人要了就注销）。实例持有核心本身，但只用这三个入口；核心其余成员全部 `private`。
 
 需求侧对应：`U01`–`U03` → `submit` 与 `resourceFor`；`U04`–`U06` → `coordinate`、`unsubscribe`、`releaseIfUnused`；
@@ -94,7 +94,7 @@ flowchart LR
 没有第二个对象描述同一条关系，因此不存在「两侧一致」这类需要维护的不变量。
 
 `Resource` 是**类**而不是字段集合：一个身份内的转换都定义在它自己身上，核心不替它做决定；两者之间只有
-三个入口（`enqueue` / `registered` / `releaseIfUnused`）——核心因此不再需要中间接口，实例直接调它（ADR-42）。
+两个入口（`enqueue` / `releaseIfUnused`）——核心因此不再需要中间接口，实例直接调它（ADR-42、ADR-44）。
 
 ### 3.2 身份与版本域
 
@@ -118,7 +118,7 @@ flowchart LR
 | Task | `resource`、`version`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
 | Waiter | `handle`、`settle` | `refresh` 创建并挂到实例的 `waiters` 上；原生 Promise 首次结算生效；由当前那个请求的结果结算（没有请求时由本次要求当场登记的任务结算）；失败/失去存在/销毁时结算 |
 | Entry | `version`、`data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
-| RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `readSnapshot` / `snapshot` / `isDisposed` / `dispose`），**另加三个给实例用的入口** `enqueue` / `registered` / `releaseIfUnused`（public，但不在包契约内，见 ADR-42），其余内部转换全部 `private`；`dispose` 先失效再清理 |
+| RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `readSnapshot` / `snapshot` / `isDisposed` / `dispose`），**另加两个给实例用的入口** `enqueue` / `releaseIfUnused`（public，但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理 |
 | 配置快照与通知状态 | `snapshot`（初值非法）、`reported` | 名字见 `vue.ts`；只在适配闭包内，随组件作用域释放。快照同时是 `Handle.config` 返回的唯一事实，核心不重新调用 getter |
 
 `snapshot()` 是给演示面板与集成测试的只读计数投影（集合是副本，元素仍是核心对象），
@@ -132,7 +132,7 @@ flowchart LR
 | 配置变化 | 适配层先写快照，核心按资格接入或退订 | `onError` / abort 可能重入；资格判断本身无副作用 |
 | 隐藏 / 失活 | 结算本页未完成的刷新要求为 `unavailable`，退订 | 取消立即结算，不等底层结束 |
 | `refresh` 接纳 | 登记刷新要求，并在没有当前请求时登记一次任务 | 有请求就直接用它的结果；与自动刷新同一条路径；不复制第二份 DTO |
-| 后台成功 | 记结算时刻与结果、逐页独立副本、结算这一批未结算的要求 | 每次外部写入后复核任务归属；结算在交付之后 |
+| 后台成功 | 记结算时刻与结果、逐页独立副本、结算这一批未结算的要求 | 每次外部写入后复核任务归属；**每个接收者在交付点复核归属**；结算在交付之后 |
 | 后台失败 | 记结算时刻、通知仍有效的订阅者、结算全部未完成要求 | 保留画面与需求，下个周期继续 |
 | 上限到期 | 先撤销在册身份再 abort 与结算 | 迟到的结束因身份已失效被完全忽略 |
 | 最后退出 | 删除注册、结果、排队项并 abort 在途 | 真实结束的任务在自己的 `finally` 里释放槽位 |
@@ -153,6 +153,7 @@ flowchart LR
 9. 订阅成立后 `handle.parameters === resource.parameters`：一个身份只保留一份参数对象，后加入者采用实例已持有的那一份。（`coordinate` 接入时改写句柄字段）
 10. `dispose` 后句柄、注册表、队列、结果、Timer 与监听已清；未结束的执行到真实结束才移除。（`dispose` → 逐个 `removeHandle` → `buckets.clear`）
 11. 框架上限由「开始执行时登记的一次性计时」表达；到期先撤销在册身份，之后任何迟到的结束都不再写事实。（`runTask` 的 `setTimeout` 与 `expire`）
+12. 注销只发生在订阅与要求都空时，且空实例再也拿不到新的边：新订阅只能落在 `resourceFor` 当前返回的实例上，新要求也一样。（`releaseIfUnused` 是唯一注销点；`coordinate` 与 `refresh` 都经 `resourceFor`）
 
 ### 3.6 刷新要求的唯一更新表
 
@@ -224,10 +225,11 @@ ADR-43 把它一并删掉。
 - `runTask` 的 `finally` 调 `Resource.refill`：仍有未结算要求且没有当前任务时补一次请求；这就是「唯一例外」的落地；
 - 结算放在全部交付**之后**，所以 `await refresh()` 拿到 `success` 时，本页 `display` 已经是这次的结果。
 
-**二、最后退出与迟到的结束（`releaseIfUnused` 为什么还要再核一次在册）**
+**二、最后退出与迟到的结束（`releaseIfUnused` 凭什么只判「都空」）**
 需求变空只有两个入口：`unsubscribe`（退订）与 `Resource.settleWaiter`（要求结算完），`submit` / 隐藏 / 卸载
-都经由它们。两者都调 `releaseIfUnused`，它先看 `subscribers` / `waiters` 是否真的都空，**再看实例是否仍在册**——
-这次复核是必需的：调用点可能发生在交付回调里，而那个回调已经把同一个实例注销过了。注销做四件事：删注册、
+都经由它们。两者都调 `releaseIfUnused`，它只判 `subscribers` / `waiters` 是否真的都空，然后注销这个键——
+不再另判「实例是否仍在册」：「都空」已经蕴含「在册」，因为注销是唯一的删除路径，而空实例再也拿不到新的边
+（§3.5 第 12 条；ADR-44 删掉那次在册复核的依据）。注销做四件事：删注册、
 清 `entry`、清 `task`、`abort` 在途；还在排队的任务同时从 `queue` 移除。
 `abort` 不承诺底层立刻结束，所以迟到的 `load` 返回由 `runTask` 的身份复核（`resource.task !== task`）判为无效：
 不写结果、不交付、不二次通知；它的 `finally` 只清自己的计时与槽位。

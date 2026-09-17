@@ -77,12 +77,12 @@ export interface Entry {
 /**
  * 一个「Source ＋ 参数值」的共享实例：同一个身份的**全部状态与全部操作都在这个类里**。
  *
- * 越过实例边界的事（版本序号、FIFO 队列、并发槽、注册表注销）只调核心的三个入口
- * （`enqueue` / `registered` / `releaseIfUnused`），所以「一个身份的一生」可以只读这一个类：
- * 接入 → 到期 → 执行 → 交付或失败 → 结算要求 → 回收。核心剩下的部分是跨实例的：注册表、调度与并发。
+ * 越过实例边界的事（FIFO 队列、并发槽、注册表注销）只调核心的两个入口（`enqueue` / `releaseIfUnused`），
+ * 所以「一个身份的一生」可以只读这一个类：接入 → 到期 → 执行 → 交付或失败 → 结算要求 → 回收。
+ * 核心剩下的部分是跨实例的：注册表、调度与并发。
  */
 export class Resource {
-  /** 实例只经核心的三个入口请求跨实例动作；这三个入口是核心唯一的公开内部面（ADR-42）。 */
+  /** 实例只经核心的两个入口请求跨实例动作；这两个入口是核心唯一的公开内部面（ADR-42、ADR-44）。 */
   private readonly core: RefreshCore
   readonly source: RefreshSource<object, unknown>
   readonly parameters: Parameters
@@ -107,8 +107,9 @@ export class Resource {
   shortestEvery(): number {
     let every = Infinity
     for (const handle of this.subscribers) {
+      // `subscribers` 与句柄的 `subscription` 成对写入（§3.5 第 1 条），因此这里只需要判空。
       const subscription = handle.subscription
-      if (subscription && subscription.resource === this) every = Math.min(every, subscription.every)
+      if (subscription) every = Math.min(every, subscription.every)
     }
     return every
   }
@@ -142,7 +143,11 @@ export class Resource {
       this.deliverTo(handle, entry)
     }
     for (const handle of refreshing) {
-      if (!delivered.has(handle)) this.deliverTo(handle, entry)
+      if (delivered.has(handle)) continue
+      // 与订阅者同口径的复核：交付回调可能已经把这个句柄的要求结算掉（换身份、失活、卸载），
+      // 它就不再是「未结算的刷新要求」，不该收这一次的结果。
+      if (!satisfied.some(waiter => waiter.handle === handle && this.waiters.has(waiter))) continue
+      this.deliverTo(handle, entry)
     }
     // 结算在交付之后：`await refresh()` 返回 success 时本页 display 已经是这次的结果。
     for (const waiter of satisfied) this.settleWaiter(waiter, { status: 'success' })
@@ -171,12 +176,11 @@ export class Resource {
   }
 
   /**
-   * 任务结束后仍有未完成的要求时补一次请求。唯一来源是交付回调里的重入：`publish` 先算好这一批要结算的
-   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求结算。
+   * 任务结束后仍有未完成的要求时补一次请求。唯一来源是交付回调里的重入：`publish` 先定下这一批要结算的
+   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求结算。有要求就必然在册（§3.5 第 12 条）。
    */
   refill(): void {
     if (this.waiters.size === 0 || this.task !== null) return
-    if (!this.core.registered(this)) return
     this.core.enqueue(this)
   }
 
@@ -269,8 +273,8 @@ export class RefreshCore {
     this.cleanup = cleanup
   }
 
+  /** 登记一个句柄并协调它。调用方保证协调者尚未销毁：`useRefresh` 在造出句柄之前就查过 `isDisposed`。 */
   addHandle(handle: Handle): void {
-    if (this.disposed) return
     this.handles.add(handle)
     this.reconcile(handle)
   }
@@ -374,7 +378,7 @@ export class RefreshCore {
    * 不该逼每个读取点写 `try/catch`；同一个参数对象交给 `submit` 会得到 `rejected` 与通知。
    */
   readSnapshot(source: RefreshSource<object, unknown>, args: object): unknown {
-    if (this.disposed) return undefined
+    // 已销毁时注册表已清空（`dispose` 的末行），因此不必单独判 `disposed`。
     const key = parameterKey(args)
     if (key === null) return undefined
     const resource = this.buckets.get(source)?.get(key)
@@ -484,11 +488,6 @@ export class RefreshCore {
     return parameters ? this.buckets.get(handle.source)?.get(parameters.key) : undefined
   }
 
-  /** 实例仍注册在自己的参数键上。**实例入口**，不属于包契约。 */
-  registered(resource: Resource): boolean {
-    return this.buckets.get(resource.source)?.get(resource.parameters.key) === resource
-  }
-
   private unsubscribe(handle: Handle): void {
     const subscription = handle.subscription
     if (!subscription) return
@@ -497,10 +496,12 @@ export class RefreshCore {
     this.releaseIfUnused(subscription.resource)
   }
 
-  /** 没有订阅者也没有刷新要求：删实例与排队任务，abort 在途；迟到的结束在任务身份复核处失效。**实例入口**。 */
+  /**
+   * 没有订阅者也没有刷新要求：删实例与排队任务，abort 在途；迟到的结束在任务身份复核处失效。**实例入口**。
+   * 只判「都空」就够：注销是唯一的删除路径，此刻这个键指向的必定是它自己（§3.5 第 12 条）。
+   */
   releaseIfUnused(resource: Resource): void {
     if (resource.subscribers.size > 0 || resource.waiters.size > 0) return
-    if (!this.registered(resource)) return
     const bucket = this.buckets.get(resource.source)
     bucket?.delete(resource.parameters.key)
     if (bucket?.size === 0) this.buckets.delete(resource.source)

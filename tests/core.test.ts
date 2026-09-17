@@ -231,6 +231,28 @@ test('A14 排队未启动的任务同样直接满足本次刷新', async () => {
   assert.equal(view.last?.data, 2)
 })
 
+test('A12 交付期间被结算的刷新要求不再收这一次结果：交付点与订阅者同口径复核', async () => {
+  let calls = 0
+  const source = defineRefresh<{ id: number }, number>({ load: async args => { calls++; return args.id } })
+  const core = newCore(2)
+  const paused = page(core, source, { enabled: false, every: 100_000 })
+  const delivered: RefreshDisplay<object, unknown>[] = []
+  const watcher = page(core, source, undefined, {
+    // 订阅页的交付回调里同步把暂停页换成另一个身份：这会当场结算掉它的刷新要求。
+    publish: value => { delivered.push(value); paused.submit({ id: 2 }) },
+  })
+
+  watcher.submit({ id: 1 })
+  paused.submit({ id: 1 })
+  const pending = paused.refresh()
+  await settle()
+
+  assert.equal(calls, 1, '暂停页的刷新要求由这一个在途请求结算，不追发第二次')
+  assert.equal(delivered.length, 1)
+  assert.deepEqual(await pending, { status: 'cancelled', reason: CancelReason.Superseded })
+  assert.equal(paused.published.length, 0, '要求已在交付期间结算，就不再收这一次结果')
+})
+
 test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷新一次', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({ load: async () => { calls++; return calls } })
