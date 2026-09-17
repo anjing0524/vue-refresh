@@ -50,7 +50,7 @@ await task.refresh()
 两项配置都是 `Ref`：改 `enabled.value` / `every.value` 就是改配置，框架立刻按新配置重新协调；
 可运行的例子见 `examples/pages/shared-pair.ts`（「暂停本页」就是切 `options.enabled.value`）。
 
-- 参数根是普通对象，允许嵌套普通对象与数组；可选字段不用时省略，不能显式传 `undefined`。
+- 参数根是普通对象，允许嵌套普通对象与数组；可选字段不用时省略——显式传 `undefined` 会被按省略处理（与不传是同一个身份），推荐直接省略。嵌套字段请用 `type` 别名或内联对象字面量：具名 `interface` 没有隐式索引签名，会被声明点的值域约束打红（TS2344）。
 - 参数要传**普通对象**：Vue 的 `reactive()` / `ref().value` 是 Proxy，提交边界的复制会抛 `DataCloneError`，
   这类值提交时按 `rejected` 拒绝且不产生请求；需要时传 `toRaw(…)` 或自己新构造的普通对象。
 - Source 身份及全部参数字段值决定共享：对象字段顺序不影响共享，数组顺序影响共享；不提供另一个业务 key 回调。
