@@ -48,14 +48,13 @@ export interface RefreshSource<P extends object, T> {
 }
 
 /**
- * 错误通知值。`error` 是原始异常，供页面自行判断。
- * `operationId` 是产生这条错误的声明代次（框架生成、只用于认领）：一个页面里有两处
- * `useRefresh` 且共用同一个 `onError` 时，据此分辨这是谁的失败；尚无有效代次时字段缺席。
+ * 错误通知值。`error` 是原始异常，供页面自行判断；`origin` 说明是哪一步失败的。
+ * 不交付「由谁触发」：页面若有两处 `useRefresh` 共用同一个 `onError`，用各自闭包里的
+ * `display` 或自己的标记分辨即可（ADR-47）。
  */
 export interface RefreshError {
   readonly origin: ErrorOrigin
   readonly error: unknown
-  readonly operationId?: number
 }
 
 /**

@@ -84,7 +84,7 @@ test('A04/A05 配置非法：只报告一次并停止订阅，修正后按当前
   const quote = defineRefresh<{ symbol: string }, number>({ load: async () => { loads++; return 1 } })
   const manager = newManager({ maxConcurrent: 1 })
   const every = ref(100_000)
-  const errors: Array<{ origin: string; operationId?: number }> = []
+  const errors: Array<{ origin: string }> = []
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({

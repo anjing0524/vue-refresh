@@ -35,7 +35,6 @@ export interface HarnessBridge {
   enable(name: string, enabled: boolean): void
   resolve(id: number, price: number): void
   mutatePage(name: string, price: number): void
-  submit(name: string, args: QuoteParams): { readonly status: string } | undefined
   unmount(): void
 }
 
@@ -210,7 +209,6 @@ function mountHarness(): void {
       const data = components.get(name)!.task.display.value!.data as Quote
       data.quote.price = price
     },
-    submit(name: string, args: QuoteParams) { return components.get(name)!.task.submit(args) },
     nestedOuter(shown: boolean) { nestedOuterShown.value = shown },
     // 受控可见性：真实浏览器里覆写 document.hidden 并派发真正的 visibilitychange 事件，
     // 走的是 vue.ts 安装时注册的那条监听，而不是直接调用核心的 setVisible。

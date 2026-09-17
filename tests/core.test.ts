@@ -45,7 +45,6 @@ function page(
     publish: value => { if (hooks.publish) hooks.publish(value); else published.push(value) },
     onError: error => { if (hooks.onError) return hooks.onError(error); errors.push(error) },
     cleanup: null,
-    operationId: 0,
     parameters: null,
     subscription: null,
     active: false,
@@ -151,7 +150,7 @@ test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', a
   assert.equal(view.handle.subscription, subscription)
 })
 
-test('A03 参数被拒时返回 rejected，保留已有身份，并按 validation 通知（带声明代次）', async () => {
+test('A03 参数被拒时返回 rejected，保留已有身份，并按 validation 通知', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1, validate: args => args.id > 0 })
   const core = newCore(2)
   const view = page(core, source)
@@ -165,7 +164,6 @@ test('A03 参数被拒时返回 rejected，保留已有身份，并按 validatio
   assert.equal(view.handle.parameters, declared)
   assert.equal(view.handle.subscription, subscription)
   assert.equal(view.errors.at(-1)?.origin, 'validation')
-  assert.equal(view.errors.at(-1)?.operationId, 2)
   // 校验失败不改动任何状态：旧身份仍然在后台继续取数。
   assert.equal(view.errors.length, 1)
 
@@ -436,8 +434,7 @@ test('A13 共享请求失败：保留旧画面、通知页面、下个周期继�
   assert.ok(calls >= 2)
   assert.equal(view.last?.data, 5, '失败保留旧画面')
   assert.equal(view.errors.at(-1)?.origin, 'request')
-  assert.equal(view.errors.at(-1)?.operationId, 1)
-  assert.equal(view.handle.subscription?.resource.subscribers.size, 1, '需求与开启意愿都保留')
+  assert.equal(view.handle.subscription?.subscribers.size, 1, '需求与开启意愿都保留')
 })
 
 test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重试', async () => {
@@ -457,7 +454,6 @@ test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重
   rejecters[0]?.(new Error('down'))
   await settle()
   assert.equal(view.errors.at(-1)?.origin, 'request', '失败经 onError 通知：刷新没有回执')
-  assert.equal(view.errors.at(-1)?.operationId, 1, '通知带上本页的声明代次')
   assert.notEqual(view.handle.subscription, null, '订阅与开启意愿都保留')
   assert.equal(resolvers.length, 1, '失败不自动重试')
 })
@@ -646,7 +642,7 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   victim.submit({ id: 1 })
   await settle()
   assert.equal(notified, 1)
-  assert.equal(victim.handle.subscription?.resource.subscribers.size, 1)
+  assert.equal(victim.handle.subscription?.subscribers.size, 1)
 })
 
 test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的执行不再写事实', async () => {
@@ -706,7 +702,7 @@ test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => 
   assert.equal(view.errors.length, 0, '页面自己知道还没有身份，不重复通知')
 })
 
-test('A18 参数编码与声明代次上界：键按 JSON 语义稳定排序，代次到达上界后停在原地', async () => {
+test('A18 参数编码与守卫：键按 JSON 语义稳定排序，坏参数一律拒绝且不改动状态', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(1)
   const view = page(core, source)
@@ -727,10 +723,8 @@ test('A18 参数编码与声明代次上界：键按 JSON 语义稳定排序，�
   assert.equal(view.submit(cyclic).status, 'rejected')
   assert.equal(view.handle.parameters, null)
 
-  // 声明代次到达安全整数上界后停在原地：不销毁、不抛错，入口照常工作。
-  view.handle.operationId = Number.MAX_SAFE_INTEGER
+  // 编码得出身份的参数照常接纳并取数。
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
-  assert.equal(view.handle.operationId, Number.MAX_SAFE_INTEGER)
   await settle()
   assert.equal(view.last?.data, 1)
 })

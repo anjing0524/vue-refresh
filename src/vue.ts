@@ -62,7 +62,6 @@ export function useRefresh<P extends object, T>(
     publish: value => { display.value = value },
     onError: error => options.onError?.(error),
     cleanup: null,
-    operationId: 0,
     parameters: null,
     subscription: null,
     active: false,
@@ -76,7 +75,7 @@ export function useRefresh<P extends object, T>(
     if (config) reported = false
     else if (!reported) {
       reported = true
-      // 配置非法是本页自己的输入事实，不是某次取数的归属，因此不带声明代次。
+      // 配置非法是本页自己的输入事实，不是某次取数的归属。
       report(handle, { origin: ErrorOrigin.Configuration, error: new TypeError(INVALID_CONFIG_MESSAGE) })
     }
     core.reconcile(handle)

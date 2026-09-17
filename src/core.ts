@@ -38,12 +38,10 @@ export interface Handle<P extends object = object, T = unknown> {
   publish(display: RefreshDisplay<P, T>): void
   readonly onError: (error: RefreshError) => unknown
   cleanup: (() => void) | null
-  /** 最近一次声明尝试的代次；只用于错误的归属（`0` 表示还没有任何页面操作）。 */
-  operationId: number
   /** 已声明的身份；未声明时为 `null`。 */
   parameters: Parameters | null
-  /** 当前订阅（实例 ＋ 本页间隔）；资格成立时存在，暂停页刷新时为空。 */
-  subscription: { readonly resource: Resource; every: number } | null
+  /** 当前订阅到的共享实例；资格成立时存在，暂停页刷新时为空。本页间隔从配置快照现算，不另存副本。 */
+  subscription: Resource | null
   /** 组件是否挂载/激活。 */
   active: boolean
   disposed: boolean
@@ -73,7 +71,7 @@ export class Resource {
   private readonly core: RefreshCore
   readonly source: RefreshSource<object, unknown>
   readonly parameters: Parameters
-  /** 按周期订阅本实例的句柄；各自的间隔在它们自己的 `subscription` 上。 */
+  /** 按周期订阅本实例的句柄；各自的间隔从它们自己的配置快照现算。 */
   readonly subscribers = new Set<Handle>()
   /**
    * 仍想要一次取数的句柄（显式刷新登记的要求）。它是一个**标志**而不是队列：重复刷新同一个句柄只留一份，
@@ -95,9 +93,9 @@ export class Resource {
   shortestEvery(): number {
     let every = Infinity
     for (const handle of this.subscribers) {
-      // `subscribers` 与句柄的 `subscription` 成对写入（§3.5 第 1 条），因此这里只需要判空。
-      const subscription = handle.subscription
-      if (subscription) every = Math.min(every, subscription.every)
+      // 订阅成立 ⟹ 配置快照有效（§3.5 第 12 条），因此间隔现算，不在句柄或实例上另存一份。
+      const config = handle.config()
+      if (config) every = Math.min(every, config.every)
     }
     return every
   }
@@ -150,7 +148,7 @@ export class Resource {
     for (const handle of notified) {
       // 前一个页面的 `onError` 可能已经改身份或退订，因此每个通知点重新复核归属。
       if (!this.subscribers.has(handle) && !this.waiters.has(handle)) continue
-      report(handle, { origin: ErrorOrigin.Request, error, ...identity(handle) })
+      report(handle, { origin: ErrorOrigin.Request, error })
     }
     for (const handle of [...this.waiters]) this.clearRequest(handle)
   }
@@ -189,11 +187,6 @@ const LOAD_TIMEOUT_MS = 10_000
 /** `setTimeout` 的平台上限（约 24.8 天）；更远的到期分段等待。 */
 const MAX_TIMER_DELAY = 2_147_483_647
 
-/** 声明代次分配：安全整数区间内递增，到达上界后停在原地；不销毁、不抛错，也不给调用方第三种结果（ADR-23）。 */
-function nextSequence(previous: number): number {
-  return previous < Number.MAX_SAFE_INTEGER ? previous + 1 : previous
-}
-
 /** 调用页面提供的回调并隔离它的失败：同步抛错与异步拒绝都不改变框架状态。 */
 function isolate(effect: () => unknown): void {
   try {
@@ -207,11 +200,6 @@ function isolate(effect: () => unknown): void {
 /** 经 `onError` 通知页面。框架自身的失败不进这条通道（它没有页面可报）。 */
 export function report(handle: Handle, error: RefreshError): void {
   isolate(() => handle.onError(error))
-}
-
-/** 声明代次身份：`0` 不是有效代次，那一条通知就不带该字段（缺席表示不属于某次页面操作）。 */
-function identity(handle: Handle): { operationId?: number } {
-  return handle.operationId === 0 ? {} : { operationId: handle.operationId }
 }
 
 /** 结果边界：拒绝 `undefined`，其余原生复制；业务合法性由请求适配器负责。 */
@@ -311,14 +299,13 @@ export class RefreshCore {
   /** 声明或更新身份。相同参数值幂等；参数准备在身份被接纳之后才执行。 */
   submit(handle: Handle, prepare: () => Parameters): SubmitResult {
     if (this.disposed || handle.disposed) return { status: 'cancelled', reason: CancelReason.Disposed }
-    handle.operationId = nextSequence(handle.operationId)
 
     let parameters: Parameters
     try {
       parameters = prepare()
     } catch (error) {
       // 无效声明不改动任何状态：旧身份、订阅与未结算的刷新要求原样保留。
-      report(handle, { origin: ErrorOrigin.Validation, error, ...identity(handle) })
+      report(handle, { origin: ErrorOrigin.Validation, error })
       return { status: 'rejected', error }
     }
     const declared = handle.parameters
@@ -421,15 +408,12 @@ export class RefreshCore {
       if (subscribed) this.unsubscribe(handle)
       return
     }
-    if (subscribed) {
-      // 改频率只更新间隔：保留在途请求，由下一次调度按新间隔重算到期。
-      subscribed.every = config.every
-      return
-    }
+    // 已订阅：改频率不需要重建连接（间隔现算），在途请求也保留，下一次调度按新间隔重算到期。
+    if (subscribed) return
     const resource = this.resourceFor(handle.source, parameters)
     // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值，且已冻结）。
     handle.parameters = resource.parameters
-    handle.subscription = { resource, every: config.every }
+    handle.subscription = resource
     resource.subscribers.add(handle)
     resource.deliverLatest(handle)
   }
@@ -452,7 +436,7 @@ export class RefreshCore {
   /** 本页已声明身份所在的实例；只查不建（结算刷新要求时用）。 */
   private resourceOf(handle: Handle): Resource | undefined {
     const subscription = handle.subscription
-    if (subscription) return subscription.resource
+    if (subscription) return subscription
     const parameters = handle.parameters
     return parameters ? this.buckets.get(handle.source)?.get(parameters.key) : undefined
   }
@@ -461,8 +445,8 @@ export class RefreshCore {
     const subscription = handle.subscription
     if (!subscription) return
     handle.subscription = null
-    subscription.resource.subscribers.delete(handle)
-    this.releaseIfUnused(subscription.resource)
+    subscription.subscribers.delete(handle)
+    this.releaseIfUnused(subscription)
   }
 
   /**

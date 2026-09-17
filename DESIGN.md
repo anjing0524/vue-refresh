@@ -48,7 +48,7 @@ index.ts                   包入口（三个函数、三个状态常量对象�
 ```text
 useRefresh（组件 setup）
   ├─ 配置变化 → readConfig → Config 快照（非法为 null）→ RefreshCore.reconcile
-  ├─ submit   → 推进声明代次 → prepareParameters → 换身份 → reconcile
+  ├─ submit   → prepareParameters → 换身份 → reconcile
   ├─ refresh  → 入口闸（销毁／配置非法／失去存在／无身份）→ 实例 → 刷新要求
   │             → 有当前请求就直接用它的结果，没有才登记一次共享任务
   └─ 生命周期 → onMounted / onActivated → activate；onDeactivated → deactivate；onScopeDispose → removeHandle
@@ -66,7 +66,7 @@ Resource.publish → 有效订阅 ∪ 未结算的刷新要求，各一份独立
 
 需求侧对应：`U01`–`U03` → `submit` 与 `resourceFor`；`U04`–`U06` → `coordinate`、`unsubscribe`、`releaseIfUnused`；
 `U07`–`U10` → `Resource.dueAt`、`flush`、`runTask`、`expire`；`U11`–`U13` → `Resource.publish`、`Resource.fail`、`Resource.deliverTo`；
-`U14` → `refresh`、`Resource.clearRequest`、`clearRefreshes`、`Resource.refill`；`U15` → `prepareParameters`、`parameterKey`；`U16`–`U18` → `isolate`、`report`、`nextSequence`、`dispose`。
+`U14` → `refresh`、`Resource.clearRequest`、`clearRefreshes`、`Resource.refill`；`U15` → `prepareParameters`、`parameterKey`；`U16`–`U18` → `isolate`、`report`、`dispose`。
 
 ## 3. 数据模型
 
@@ -78,7 +78,7 @@ Resource.publish → 有效订阅 ∪ 未结算的刷新要求，各一份独立
 flowchart LR
   Source[Source 固定业务定义] --> Parameters[Parameters 快照与 key]
   Handle[Handle 页面需求] --> Params[parameters: 已声明身份]
-  Handle --> Sub[subscription: 实例 ＋ 间隔]
+  Handle --> Sub[subscription: 订阅到的实例]
   Handle --> Pub[publish 出口]
   Sub --> Resource[Resource 共享实例]
   Resource --> Subs[subscribers: Set 句柄]
@@ -95,13 +95,11 @@ flowchart LR
 `Resource` 是**类**而不是字段集合：一个身份内的转换都定义在它自己身上，核心不替它做决定；两者之间只有
 两个入口（`enqueue` / `releaseIfUnused`）——核心因此不再需要中间接口，实例直接调它（ADR-42、ADR-44）。
 
-### 3.2 身份与代次域
+### 3.2 身份
 
 - Source 对象身份 ＋ `Parameters.key` 定位实例；实例的生存期由订阅与刷新要求共同决定。
-- `Handle.operationId` 是**唯一的代次**：一个页面自己的声明序列，只用于错误的归属。
-- 代次只在同一个句柄内递增；实例、刷新要求与页面身份都不共用这个计数——任务与结果都不记版本（ADR-45）。
-- 代次域足够大（安全整数上界，单页每毫秒一次提交也要约 28.5 万年才到达）：到达上界后停在原地，
-  不销毁协调者、不抛错，也不给调用方第三种结果（ADR-23 的结论在 `nextSequence` 上保留）。
+- **没有第二套计数**：任务、结果与刷新要求都不记版本或代次，公开通知也不带「由谁触发」
+  （ADR-43 删掉等待者的版本下限、ADR-45 删掉任务版本、ADR-47 删掉声明代次）。
 
 ### 3.3 持久字段与唯一所有者
 
@@ -111,7 +109,7 @@ flowchart LR
 |---|---|---|
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；准备成功后只读 | 提交边界复制/冻结/编码；需求与实例释放后回收 |
-| Handle | `operationId=0`、`parameters=null`、`subscription=null`、`cleanup=null`、`active=false`、`disposed=false` | 全部写入都在 `core.ts` 内：声明与关系由核心写，生命周期走 `activate` / `deactivate`，`cleanup` 走句柄字段；适配层只读它们。`source` / `config` / `publish` / `onError` 是固定端口；`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
+| Handle | `parameters=null`、`subscription=null`、`cleanup=null`、`active=false`、`disposed=false` | 全部写入都在 `core.ts` 内：声明与关系由核心写，生命周期走 `activate` / `deactivate`，`cleanup` 走句柄字段；适配层只读它们。`source` / `config` / `publish` / `onError` 是固定端口；`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
 | Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值且已冻结，`deliverTo` 与 `load` 也只用这一份）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `clearRequest` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
 | Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
 | Entry | `data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
@@ -125,9 +123,9 @@ flowchart LR
 
 | 事件 | 同步转换 | 后续动作与重入边界 |
 |---|---|---|
-| `submit` 接纳 | 推进 `operationId`；参数通过后整体替换身份 | 参数被拒不改动任何状态；替换时先用旧身份结算刷新要求再退订 |
+| `submit` 接纳 | 参数通过后整体替换身份 | 参数被拒不改动任何状态；替换时先用旧身份结算刷新要求再退订 |
 | 配置变化 | 适配层先写快照，核心按资格接入或退订 | `onError` / abort 可能重入；资格判断本身无副作用 |
-| 隐藏 / 失活 | 结算本页未完成的刷新要求为 `unavailable`，退订 | 取消立即结算，不等底层结束 |
+| 隐藏 / 失活 | 撤销本页未完成的刷新要求（没有回执），退订 | 静默撤销，不等底层结束 |
 | `refresh` 接纳 | 把本句柄加进实例的要数集合，并在没有当前请求时登记一次任务 | 有请求就直接用它的结果；与自动刷新同一条路径；没有回执 |
 | 后台成功 | 记结算时刻与结果、逐页独立副本、满足这一批要求 | 每次外部写入后复核任务归属；**每个接收者在交付点复核归属**；结算在交付之后 |
 | 后台失败 | 记结算时刻、通知仍有效的订阅者、结算全部未完成要求 | 保留画面与需求，下个周期继续 |
@@ -139,9 +137,9 @@ flowchart LR
 
 每条都注明**由谁保证**：读代码时按这里的符号名定位，不必先自己反推。
 
-1. `subscription` 非空时，`handle.subscription.resource.subscribers` 一定含有该句柄；退订先把句柄字段清空再删集合成员。（`coordinate` 接入、`unsubscribe` 退出）
+1. `subscription` 非空时，它指向的实例的 `subscribers` 一定含有该句柄；退订先把句柄字段清空再删集合成员。（`coordinate` 接入、`unsubscribe` 退出）
 2. 注册表只指向当前生存期的实例；实例被删除后不再被 `flush` 遍历到，也不接受新的订阅。（`resourceFor` 建立、`releaseIfUnused` 删桶）
-3. 每次调度都用当前 `subscription.every` 的最小值现算到期，不缓存「下次到期」以外的派生值。（`Resource.dueAt` / `Resource.shortestEvery`）
+3. 每次调度都用各订阅**当前配置快照**里 `every` 的最小值现算到期，不缓存间隔，也不缓存「下次到期」以外的派生值。（`Resource.dueAt` / `Resource.shortestEvery`）
 4. 一个实例至多一个当前任务；任务至多在 `queue` / `running` 之一；abort 不释放槽位，`expire` 除外。（`enqueue` 与 `runTask` 的 `finally` / `expire`；`flush` 排空时丢弃 `resource.task` 已不指向它的过期任务）
 5. 结果只来自该实例的当前任务的成功；删除后旧请求不得重建该实例。（`runTask` 在 `await` 之后与复制结果之后各复核一次，`Resource.publish` 只被它调用）
 6. 只有共享路径写结果与交付 `display`；DTO 与结果之间无可变别名，每个接收者各一份副本。（`Resource.publish` → `deliverTo` 的 `structuredClone`）
@@ -150,6 +148,7 @@ flowchart LR
 9. `dispose` 后句柄、注册表、队列、结果、Timer 与监听已清；未结束的执行到真实结束才移除。（`dispose` → 逐个 `removeHandle` → `buckets.clear`）
 10. 框架上限由「开始执行时登记的一次性计时」表达；到期先撤销在册身份，之后任何迟到的结束都不再写事实。（`runTask` 的 `setTimeout` 与 `expire`）
 11. 注销只发生在订阅与要求都空时，且空实例再也拿不到新的边：新订阅只能落在 `resourceFor` 当前返回的实例上，新要求也一样。（`releaseIfUnused` 是唯一注销点；`coordinate` 与 `refresh` 都经 `resourceFor`）
+12. 订阅成立 ⟹ 配置快照有效：`enabled` 为真、`every` 是正安全整数，因此最短间隔可以直接从快照现算，不必在句柄或实例上另存一份。（`coordinate` 的入口条件）
 
 ### 3.6 刷新要求的唯一更新表
 
@@ -192,7 +191,7 @@ flowchart LR
 | 错误来源 | `request` / `validation` / `configuration` | `RefreshError.origin`；交付面不交付「由谁触发」，这是唯一的来源域（ADR-34） |
 | submit 取消原因 | 可达子集只有一个成员：`disposed` | `SubmitResult` 的 cancelled 分支 |
 | 刷新要求 | 无 / 待满足（`Set<Handle>`） | `Resource.waiters` |
-| 当前订阅 | 实例 ＋ 间隔 / `null` | `Handle.subscription` |
+| 当前订阅 | 实例 / `null`（间隔从配置快照现算） | `Handle.subscription` |
 | 配置快照 | 有效 / 非法（`null`） | 适配闭包 → `Handle.config` |
 | 组件激活、句柄已释放、浏览器可见、协调者已销毁 | true / false | `Handle.active` / `Handle.disposed` / `RefreshCore.visible` / `RefreshCore.disposed` |
 | 待唤醒调度 | 取消句柄 / `null`；已排 flush true / false | `RefreshCore.wakeup` / `flushing` |

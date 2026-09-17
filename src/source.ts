@@ -41,7 +41,7 @@ function deepFreeze(value: unknown): void {
  * 两个调用点各自决定怎么表达——读取点当成「查不到」，提交点当成非法参数拒绝。
  * 这样坏参数只有一个出口会变成错误（`submit` 的 `rejected` ＋ 通知），读取永远不需要 `try/catch`。
  */
-export function parameterKey(input: object): string | null {
+function parameterKey(input: object): string | null {
   try {
     return stringify(input)
   } catch {
