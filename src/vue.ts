@@ -13,8 +13,7 @@ import type {
  * Vue 适配层：把响应式配置与组件生命周期翻译成框架需求，并独立持有本页快照。
  *
  * 只跟踪 `enabled` 与 `every` 两项配置（都是 `Ref`），不跟踪参数、表单草稿或结果；
- * 参数只在 `submit` 时准备一次。核心只读适配层交出的配置快照，不重新调用业务 getter。
- * 本库是 SPA 单例：当前协调者放在模块级变量里，组件适配不经过 `provide` / `inject`（ADR-37）。
+ * 本库是 SPA 单例，组件适配不经过 `provide` / `inject`（ADR-37，见 DESIGN §6.3）。
  */
 
 /** 当前生效的协调者；`install` 写入，已销毁时可被下一个实例替换（HMR、会话切换）。 */
@@ -25,10 +24,7 @@ export function currentCore(): RefreshCore | null {
   return current
 }
 
-/**
- * 读三项配置。任一项读不出或值非法都按「配置非法」处理（返回 `null`）：页面可以用 `computed`
- * 表达暂态条件，框架下一轮再读，绝不把读不到的开关猜成关闭。
- */
+/** 读配置快照；任一项读不出或值非法都返回 `null`（为什么不猜成关闭见 DESIGN §6.1）。 */
 function readConfig(options: RefreshOptions): Config | null {
   try {
     const enabled: unknown = options.enabled.value
@@ -41,6 +37,11 @@ function readConfig(options: RefreshOptions): Config | null {
   }
 }
 
+/**
+ * 组件侧入口：登记本页需求句柄，跟踪配置与生命周期，返回只读交付面与两个动作。
+ *
+ * 必须在组件的 `setup` 中同步调用，且此前已安装一个存活的协调者。
+ */
 export function useRefresh<P extends object, T>(
   source: RefreshSource<P, T>,
   options: RefreshOptions,
@@ -89,8 +90,7 @@ export function useRefresh<P extends object, T>(
   }
 }
 
-/** 创建应用级协调者：注册可见性监听与卸载释放。**需要浏览器环境**（本库只服务 SPA）。 */
-/** 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限（显式刷新与自动刷新共用这些槽位）。 */
+/** 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限（显式刷新与自动刷新共用这些槽位）；需要浏览器环境。 */
 export function createRefreshManager(options: { readonly maxConcurrent: number }): RefreshManager {
   if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
     throw new TypeError('maxConcurrent 必须是正安全整数')
@@ -99,6 +99,7 @@ export function createRefreshManager(options: { readonly maxConcurrent: number }
   let installed: App | null = null
 
   return {
+    /** 安装到应用：接上可见性监听与卸载释放；同一实例只能装到一个 App。 */
     install(app) {
       if (core.isDisposed() || (installed !== null && installed !== app)) {
         throw new Error('刷新协调者安装冲突：同一个实例不能安装到两个 App，已销毁的实例也不能再安装')

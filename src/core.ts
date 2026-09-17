@@ -5,34 +5,19 @@ import type { Parameters } from './source.ts'
  * 共享取数与调度核心：**只管跨实例的事**——注册表、句柄名册、可见性与销毁、FIFO 队列、并发槽、
  * 唯一唤醒 Timer、只读投影。一个身份自己的全部状态与操作在 `Resource` 里。
  *
- * 一次取数与交付的完整链路（没有第二条路径）：
- *
- * ```text
- * submit ─ 准备参数 → 建立身份 → reconcile：资格成立就订阅，否则退订
- * refresh ─ 登记要求（直接用当前请求的结果）→ 没有请求就入队
- * flush  ─ 协调句柄 → 到期入队 → 按 FIFO 占槽启动 → 安排唯一唤醒 Timer
- * runTask ─ source.load → 复核任务身份 → Resource.publish（逐页独立副本 → 满足要求）
- * ```
- *
- * 交付、失败与取消都不另立镜像：句柄的「当前订阅」是它自己身上的一个字段，
- * 实例侧的集合里是同一些句柄本身；没有第二个对象去描述同一份关系。
+ * 一次取数与交付的链路（唯一路径）见 DESIGN §2.1；「同一份关系不另立镜像」的理由见 DESIGN §3.1。
  */
 
-/** 配置快照；读不出（getter 抛错或值非法）时为 `null`，此时既不订阅也不自动刷新。 */
+/** 配置快照：开启意愿与刷新间隔两项，由适配层现读；读不出时为 `null`（后果见 DESIGN §6.1）。 */
 export interface Config {
   readonly enabled: boolean
   readonly every: number
 }
 
 /**
- * 组件需求句柄：三种角色挂在一个对象上，读之前先分清是哪一组（完整所有权表见 DESIGN §3.3）。
- *
- * - **组 A｜端口（`source` / `config` / `publish` / `onError`）**：适配层创建时一次给全、此后只读，
- *   核心只调它们。这一组就是类型擦除边界——具体 `RefreshSource<P, T>` / `RefreshDisplay<P, T>` 靠
- *   **方法双变**进入同构的 `Set<Handle>` 槽位（ADR-24、ADR-35），`Resource` 侧只用这一组。
- * - **组 B｜状态（`parameters` / `subscription` / `active`）**：核心独占写入，适配层只给初值、从不读。
- *   其中 `subscription` 是**反向索引**（与 `Resource.subscribers` 的成员资格同源，成对写入，§3.5 第 1 条）。
- * - **组 C｜接驳（`cleanup`）**：唯一双向成员——适配层在 watcher 就绪后写一次，核心在 `removeHandle` 读、清、调。
+ * 组件需求句柄：三种角色挂在一个对象上，读之前先分清是哪一组——**组 A｜端口**（`source` / `config` /
+ * `publish` / `onError`）只读、**组 B｜状态**（`parameters` / `subscription` / `active`）由核心独占写入、
+ * **组 C｜接驳**（`cleanup`）双向。完整所有权表见 DESIGN §3.3。
  *
  * 「句柄是否已释放」不存字段：它就是 `RefreshCore.handles` 的名册成员资格（DESIGN §3.7）。
  */
@@ -41,16 +26,14 @@ export interface Handle<P extends object = object, T = unknown> {
   readonly source: RefreshSource<object, unknown>
   /** 最近一次配置快照。 */
   readonly config: () => Config | null
-  /**
-   * 本页交付出口。写成**方法**：方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入
-   * 擦除后的注册表槽位，适配层不必在创建点断言。
-   */
+  /** 本页交付出口；唯一调用者是 `Resource.deliverTo`。为什么写成方法见 DESIGN §3.3。 */
   publish(display: RefreshDisplay<P, T>): void
   readonly onError: (error: unknown) => unknown
+  /** 适配层的释放回调；`removeHandle` 读一次、清空，然后调用它。 */
   cleanup: (() => void) | null
   /** 已声明的身份；未声明时为 `null`。 */
   parameters: Parameters | null
-  /** 当前订阅到的共享实例；资格成立时存在，暂停页刷新时为空。本页间隔从配置快照现算，不另存副本。 */
+  /** 当前订阅到的共享实例；资格成立时存在，失活或隐藏时为空。本页间隔不在这里存副本（DESIGN §3.7）。 */
   subscription: Resource | null
   /** 组件是否挂载/激活。 */
   active: boolean
@@ -73,19 +56,15 @@ export interface Entry {
  *
  * 越过实例边界的事（FIFO 队列、并发槽、注册表注销）只调核心的两个入口（`enqueue` / `releaseIfUnused`），
  * 所以「一个身份的一生」可以只读这一个类：接入 → 到期 → 执行 → 交付或失败 → 结算要求 → 回收。
- * 核心剩下的部分是跨实例的：注册表、调度与并发。
  */
 export class Resource {
-  /** 实例只经核心的两个入口请求跨实例动作；这两个入口是核心唯一的公开内部面（ADR-42、ADR-44）。 */
+  /** 实例只经核心的两个入口请求跨实例动作（ADR-42、ADR-44）。 */
   private readonly core: RefreshCore
   readonly source: RefreshSource<object, unknown>
   readonly parameters: Parameters
   /** 按周期订阅本实例的句柄；各自的间隔从它们自己的配置快照现算。 */
   readonly subscribers = new Set<Handle>()
-  /**
-   * 仍想要一次取数的句柄（显式刷新登记的要求）。它是一个**标志**而不是队列：重复刷新同一个句柄只留一份，
-   * 由当前或本次登记的那个请求的结果满足，满足之后移除（ADR-46）。
-   */
+  /** 仍想要一次取数的句柄（显式刷新登记的要求）。它是**标志**而不是队列：重复刷新同一个句柄只留一份。 */
   readonly waiters = new Set<Handle>()
   entry: Entry | null = null
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
@@ -109,10 +88,7 @@ export class Resource {
     return every
   }
 
-  /**
-   * 该实例此刻的下次到期时刻：由「最近一次结算时刻 ＋ 当前最短间隔」现算，因此改频率立刻生效；
-   * 从未结算过的实例立即到期。取消不计时、不补跑漏掉的周期。
-   */
+  /** 该实例此刻的下次到期时刻：`settledAt ＋ 当前最短间隔`；从未结算过的实例立即到期。取消不计时不补跑。 */
   dueAt(now: number): number {
     return this.settledAt === null ? now : this.settledAt + this.shortestEvery()
   }
@@ -147,8 +123,8 @@ export class Resource {
   }
 
   /**
-   * 共享请求失败（含上限到期）：通知仍有效的订阅者、以及本次有未完成要求的页面（后者没有回执，这是它唯一的
-   * 失败通道），然后撤销本实例全部未完成的刷新要求。失败保留画面、需求与开启意愿，下个周期继续。
+   * 失败结算：通知仍有效的订阅者与本次有未完成要求的页面（后者没有回执，这是它唯一的失败通道），
+   * 然后撤销本实例全部未完成的刷新要求。
    */
   fail(error: unknown): void {
     this.settledAt = Date.now()
@@ -168,10 +144,7 @@ export class Resource {
     this.core.releaseIfUnused(this)
   }
 
-  /**
-   * 任务结束后仍有未完成的要求时补一次请求。唯一来源是交付回调里的重入：`publish` 先定下这一批要结算的
-   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求满足。有要求就必然在册（§3.5 第 11 条）。
-   */
+  /** 任务结束后仍有未完成的要求时补一次请求；唯一来源是交付回调里的重入（DESIGN §3.9 第一条）。 */
   refill(): void {
     if (this.waiters.size === 0 || this.task !== null) return
     this.core.enqueue(this)
@@ -214,6 +187,7 @@ function copyResult(input: unknown): unknown {
   return structuredClone(input)
 }
 
+/** 跨实例的协调者：实例注册表、句柄名册、FIFO 队列与并发槽、唯一唤醒 Timer、可见性与销毁。 */
 export class RefreshCore {
   private readonly maxConcurrent: number
   /** Source → 参数键 → 实例。 */
@@ -239,6 +213,7 @@ export class RefreshCore {
 
   // ══════════════════════════ 状态观测与生命周期 ══════════════════════════
 
+  /** 协调者是否已销毁；存活状态的唯一公开出口。 */
   isDisposed(): boolean {
     return this.disposed
   }
@@ -327,9 +302,7 @@ export class RefreshCore {
   /**
    * 显式刷新：有当前请求就直接用它的结果，没有就当场登记一次；不恢复自动刷新，也不改写调用方的开关。
    *
-   * **不回执**：成功只经 `display`（U11／U12），失败只经 `onError`（与自动刷新同一条通道，U13）。
-   * 入口条件不成立时直接返回、不产生副作用也不通知：已销毁、未声明身份、环境不允许、配置非法
-   * ——这些状态页面自己就能看到（ADR-51）。
+   * **不回执**：成功只经 `display`，失败只经 `onError`。入口条件不成立时直接返回、不产生副作用也不通知。
    */
   refresh(handle: Handle): void {
     if (this.disposed || !this.handles.has(handle)) return
@@ -348,12 +321,7 @@ export class RefreshCore {
 
   // ══════════════════════════ 观测面 ══════════════════════════
 
-  /**
-   * 只读计数投影：给演示面板与集成测试看状态。**不属于包契约**，也不提供改状态的入口；
-   * 集合是副本，元素仍是核心对象（比较身份是这些断言的要点），因此它是观察面而不是安全边界。
-   *
-   * 只放有消费者的字段：存活已有 `isDisposed()` 这个唯一出口，可见性只有写入口（ADR-39）。
-   */
+  /** 只读计数投影：给演示面板、基准脚本与集成测试看状态。**不属于包契约**，也不提供改状态的入口。 */
   snapshot(): {
     handles: readonly Handle[]
     resources: readonly Resource[]
@@ -443,6 +411,7 @@ export class RefreshCore {
     return parameters ? this.buckets.get(handle.source)?.get(parameters.key) : undefined
   }
 
+  /** 退订一个句柄；退订后若订阅与要求都空了，实例随之被回收。 */
   private unsubscribe(handle: Handle): void {
     const subscription = handle.subscription
     if (!subscription) return
@@ -479,6 +448,7 @@ export class RefreshCore {
     this.queue.add(task)
   }
 
+  /** 执行一次后台请求；成功、失败或被上限结算，都在 `finally` 释放槽位并补后继请求。 */
   private async runTask(task: Task): Promise<void> {
     const resource = task.resource
     // 上限从真正开始执行起算（排队不计入）：一个永不结束的 load 不能永久占住并发槽。
@@ -567,12 +537,14 @@ export class RefreshCore {
     if (this.queue.size === 0 && next < Infinity) this.setWakeup(next)
   }
 
+  /** 取消唯一唤醒 Timer；没有安排时什么也不做。 */
   private clearWakeup(): void {
     const cancel = this.wakeup
     this.wakeup = null
     if (cancel) cancel()
   }
 
+  /** 安排唯一唤醒 Timer；到期时刻超出平台上限时分段等待。 */
   private setWakeup(due: number): void {
     const delay = Math.min(MAX_TIMER_DELAY, Math.max(0, due - Date.now()))
     const timer = setTimeout(() => {

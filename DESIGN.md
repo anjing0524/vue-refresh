@@ -5,9 +5,8 @@
 本版是根契约重写后的实现（见 [ADR.md](./ADR.md) ADR-27）：设计按「一个概念一份事实」重排，
 不再是上一版的端口、投影与镜像字段。
 
-**读代码的顺序建议：** 先看 §2.1（一次取数与交付的完整链路）和 §3.1（对象关系），再按 §3.9 的三条走读代入最容易
-卡住的地方（交付重入、最后退出、上限到期），最后用 §3.3（所有权）与 §3.5（不变量，每条都注明**由谁保证**）核对细节。
-`src/core.ts` 的七个 `═══` 分段与 §2 的七个分段一一对应。
+**读代码从 §9 开始**：那里有三条进入路线、读之前先记住的四个词、每个符号的一句话作用，以及
+「遇到 `if` 时它在防什么」的对照表。`src/core.ts` 的七个 `═══` 分段与 §2 的七个分段一一对应。
 
 ## 1. 模块划分与依赖
 
@@ -109,7 +108,7 @@ flowchart LR
 |---|---|---|
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给每个消费者（`validate`／每轮 `load`／每个接收者的 `display`）时各复制一份；需求与实例释放后回收 |
-| Handle | 组 A 端口：`source` / `config` / `publish` / `onError`（创建时给全）；组 B 状态：`parameters=null`、`subscription=null`、`active=false`；组 C 接驳：`cleanup=null` | 三种角色分开看（`src/core.ts` 的接口注释是权威）：**组 A** 适配层一次给全、此后只读，核心只调它们；**组 B** 核心独占写入，适配层只给初值、从不读——其中 `subscription` 是**反向索引**（与 `Resource.subscribers` 的成员资格同源，成对写入，见 §3.5 第 1 条）；**组 C** `cleanup` 是唯一双向成员：适配层在 watcher 就绪后写一次（晚于 `addHandle` 才产生），核心在 `removeHandle` 读、清、调。「句柄是否已释放」不存字段，由 `RefreshCore.handles` 的名册成员资格决定（§3.7）。`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
+| Handle | 组 A 端口：`source` / `config` / `publish` / `onError`（创建时给全）；组 B 状态：`parameters=null`、`subscription=null`、`active=false`；组 C 接驳：`cleanup=null` | 三种角色分开看（**本表是这三组角色的权威定义**）：**组 A** 适配层一次给全、此后只读，核心只调它们；**组 B** 核心独占写入，适配层只给初值、从不读——其中 `subscription` 是**反向索引**（与 `Resource.subscribers` 的成员资格同源，成对写入，见 §3.5 第 1 条）；**组 C** `cleanup` 是唯一双向成员：适配层在 watcher 就绪后写一次（晚于 `addHandle` 才产生），核心在 `removeHandle` 读、清、调。「句柄是否已释放」不存字段，由 `RefreshCore.handles` 的名册成员资格决定（§3.7）。`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
 | Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `clearRequest` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
 | Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
 | Entry | `data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
@@ -368,3 +367,63 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 `pnpm complexity` 输出每文件与函数的行数、结构分支、圈复杂度和嵌套深度。
 实际执行环境与已通过项见 [README](./README.md)「实际验证与边界」。
 测试预期属于契约，修正测试前先确认契约。
+
+## 9. 读这个库的顺序
+
+本节是读代码的入口，替代「先通读注释」：**代码里的注释只写「做什么」，理由在本文与 [ADR.md](./ADR.md) 里。**
+先按 §9.1 选一个进入点，记住 §9.2 的四个词，用 §9.3 查符号，遇到 `if` 用 §9.4 对照。
+
+### 9.1 三条进入路线
+
+| 你想弄清 | 从这里开始 | 接着读 |
+|---|---|---|
+| 一次取数怎么走完 | `src/index.ts`（三个导出）→ `vue.ts` 的 `useRefresh` | §2.1 的链路，再看 `RefreshCore.submit` → `reconcile` → `flush` → `runTask` → `Resource.publish` |
+| 一个页面的需求怎么变成共享实例 | `RefreshCore.submit` → `RefreshCore.resourceFor` → `RefreshCore.coordinate` | §3.1 对象关系、§3.3 所有权表、§3.5 第 8／11 条 |
+| 隐藏、卸载、销毁之后还剩什么 | `RefreshCore.setVisible` / `RefreshCore.removeHandle` / `RefreshCore.dispose` | §3.6 更新表、§3.9 第一／二条、§3.5 第 9 条 |
+
+### 9.2 读代码前先记住的四个词
+
+| 词 | 一句话含义 | 谁保证它 |
+|---|---|---|
+| 在册 | 这个句柄还在名册里；**不在册就等于已释放** | `addHandle` / `removeHandle`（§3.7） |
+| 资格 | 存活 ＋ 已声明身份 ＋ 环境允许（激活且可见）＋ 配置开启且有周期，四组缺一不可 | `coordinate`（§3.5 第 12 条） |
+| 当前任务 | 一个实例至多一个任务，它至多在队列或在执行之一 | `RefreshCore.enqueue`、`runTask` 的 `finally`、`expire` |
+| 刷新要求 | 这个句柄此刻想要一次取数；是**标志不是队列**，没有回执 | `Resource.waiters`；`refresh` 登记、`Resource.clearRequest` 撤销 |
+
+### 9.3 每个符号做什么
+
+| 符号 | 做什么 |
+|---|---|
+| `defineRefresh` | 声明一种固定业务资源；定义必须是应用级常量 |
+| `useRefresh` | 组件侧入口：登记本页需求句柄，跟踪配置与生命周期，返回显示面与两个动作 |
+| `createRefreshManager` | 创建应用级协调者；`install` 接上可见性监听与卸载释放 |
+| `RefreshCore.isDisposed` | 协调者是否已销毁；存活状态的唯一公开出口 |
+| `RefreshCore.setVisible` | 浏览器可见性变化：隐藏时当场退订并立即结算 |
+| `RefreshCore.setCleanup` | 登记框架自身的释放回调（应用卸载时移除可见性监听），至多一个 |
+| `RefreshCore.addHandle` / `RefreshCore.removeHandle` | 登记一个句柄并协调它／释放一个句柄（结算要求、退订、停止接纳） |
+| `RefreshCore.activate` / `deactivate` | 恢复／撤销资格；两者可能交叠（KeepAlive），因此都幂等 |
+| `RefreshCore.reconcile` | 配置或生命周期变化后的唯一入口：先协调关系，再安排一次合并调度 |
+| `RefreshCore.submit` | 声明或更新身份；相同参数值幂等，参数准备在身份被接纳之后才执行 |
+| `RefreshCore.refresh` | 登记一次要数；有当前请求就直接用它的结果，不回执 |
+| `RefreshCore.snapshot` | 只读计数投影，给演示面板、基准脚本与测试看；不属于包契约 |
+| `RefreshCore.dispose` | 销毁：幂等、不可复用 |
+| `RefreshCore.enqueue` / `releaseIfUnused` | 给实例用的两个跨实例入口（排队／回收）；public 但不在包契约内 |
+| `Resource.dueAt` / `shortestEvery` | 下次到期时刻／当前有效最短间隔；都现算，不缓存 |
+| `Resource.publish` / `fail` | 一次请求的两种结局：交付，或失败结算 |
+| `Resource.clearRequest` / `refill` | 撤销一条要数／任务结束后补一次后继请求 |
+| `prepareParameters` | 提交边界只执行一次：复制 → 值域检查 → 编码身份键 → 可选业务校验 |
+
+### 9.4 遇到 `if` 时按什么读
+
+`core.ts` 里的守卫不是重复代码。它们只防三件事，读之前先认出是哪一件：
+
+| 防什么 | 长相 | 作用 |
+|---|---|---|
+| 已销毁或不在册 | 入口第一行的 `this.disposed` 检查，以及 `!this.handles.has(handle)` | 不在册的句柄按已释放处理，后续写入一概不发生 |
+| 任务已被替换 | `resource.task !== task`（也有 `=== task` 的反面） | 每个 `await` 与每次外部效果之后：丢弃迟到结束，不写结果、不交付、不二次通知 |
+| 回调里同步重入 | `!this.subscribers.has(handle)`、`!this.waiters.has(handle)` | 每个交付／通知点之前：前一个接收者的回调可能已经改身份、退订或卸载 |
+
+**这三组守卫是承重的，不是冗余。** 以 `RefreshCore.activate` 为例：它先查一次在册，再写激活状态——
+删掉那次查询，已释放的句柄就会被写上「已激活」；它随后调用的 `coordinate` 里还有第二道同样的查询，
+防的是另一次重入。两处看起来一样，各自防的东西不同（这次复核记在 ADR-55）。
+把这三组收成具名判定（让每个 `if` 读起来是一句话）是**尚未裁决**的下一步。

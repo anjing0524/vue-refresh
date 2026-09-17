@@ -13,14 +13,10 @@ export type ReadonlySnapshot<T> =
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
 
 /**
- * 固定资源定义：`P` 与 `T` 与 `load` 绑定。
+ * 固定资源定义：`P` 与 `T` 与 `load` 绑定；`validate` 可选，只在这个身份被提交时执行一次。
  *
- * 两个成员都写成**方法**：方法参数按双变比较，因此具体 Source 可以直接进入框架的擦除视图
- * （`RefreshSource<object, unknown>`）与异步注册表槽位，接收点不必保留类型断言。
- * 代价是「拿一个擦除后的 Source 当具体 Source 用」不再被编译器拦住——与 ADR-24 对 `publish` 的取舍一致。
- *
- * `P` 的值域在声明点由 `defineRefresh` 约束为 JSON 值：**对象型只能是普通对象或数组**（ADR-52）——
- * 其余对象型值的内容对身份编码不可见，会让两个不同查询塌成同一个身份。
+ * 两个成员都写成**方法**而不是函数属性：方法参数按双变比较，具体 Source 因此可以直接进入框架的
+ * 擦除视图，接收点不必留类型断言（代价见 ADR-24）。`P` 的值域约束见 DESIGN §4.1。
  */
 export interface RefreshSource<P extends object, T> {
   load(args: ReadonlySnapshot<P>, context: { readonly signal: AbortSignal }): Promise<T>
@@ -77,10 +73,8 @@ export interface RefreshHandle<P extends object, T> {
 }
 
 /**
- * 应用级协调者：安装与销毁。
- *
- * **它不提供读取**（ADR-46）：共享结果只经页面自己的 `display` 交付，需要落在业务 Store 里的页面在自己
- * 的适配层写；框架不做第二个数据出口，也不承担「业务最新数据」这个角色。
+ * 应用级协调者：安装与销毁。**它不提供读取**——共享结果只经页面自己的 `display` 交付，要落到业务 Store
+ * 里的页面在自己的适配层写（ADR-46）。
  */
 export interface RefreshManager {
   /** 安装到应用：注册可见性监听并在卸载时释放。**需要浏览器环境**（本库只服务 SPA）。 */
