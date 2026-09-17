@@ -63,7 +63,6 @@ export function useRefresh<P extends object, T>(
     parameters: null,
     subscription: null,
     active: false,
-    disposed: false,
   }
   core.addHandle(handle)
 

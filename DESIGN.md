@@ -109,7 +109,7 @@ flowchart LR
 |---|---|---|
 | Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给每个消费者（`validate`／每轮 `load`／每个接收者的 `display`）时各复制一份；需求与实例释放后回收 |
-| Handle | `parameters=null`、`subscription=null`、`cleanup=null`、`active=false`、`disposed=false` | 全部写入都在 `core.ts` 内：声明与关系由核心写，生命周期走 `activate` / `deactivate`，`cleanup` 走句柄字段；适配层只读它们。`source` / `config` / `publish` / `onError` 是固定端口；`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
+| Handle | 组 A 端口：`source` / `config` / `publish` / `onError`（创建时给全）；组 B 状态：`parameters=null`、`subscription=null`、`active=false`；组 C 接驳：`cleanup=null` | 三种角色分开看（`src/core.ts` 的接口注释是权威）：**组 A** 适配层一次给全、此后只读，核心只调它们；**组 B** 核心独占写入，适配层只给初值、从不读——其中 `subscription` 是**反向索引**（与 `Resource.subscribers` 的成员资格同源，成对写入，见 §3.5 第 1 条）；**组 C** `cleanup` 是唯一双向成员：适配层在 watcher 就绪后写一次（晚于 `addHandle` 才产生），核心在 `removeHandle` 读、清、调。「句柄是否已释放」不存字段，由 `RefreshCore.handles` 的名册成员资格决定（§3.7）。`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
 | Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `clearRequest` / `refill`（`deliverTo` 私有）；核心只在跨实例边界读写 `task` / `entry`——入队（`enqueue`）与注销（`releaseIfUnused`） |
 | Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；执行位置由 `queue` / `running` 决定；`finally` 释放真实槽位，`expire` 提前出册 |
 | Entry | `data`、`updatedAt` | 当前有效成功时整条替换，时间取提交那一刻的墙钟；实例销毁时随实例消失 |
@@ -177,6 +177,7 @@ flowchart LR
 - 下次到期时刻由 `settledAt ＋ 当前最短 every` 现算，因此改频率立刻生效；`settledAt` 本身是事实（最近一次正常结束）。
 - 有效最短间隔由各订阅的 `every` 现算，不缓存。
 - 资格由存活、已声明身份、生命周期与可见性、配置快照四组事实决定，不镜像 `enabled`。
+- 句柄是否已释放由 `RefreshCore.handles` 的名册成员资格决定，不存字段：`removeHandle` 先出名册再产生外部效果，因此「名册里没有它」就等于「已释放」（ADR-54）。
 - 不交付「正在刷新」这类实时状态：交付面只给结果与它的产生时间。
 
 ### 3.8 状态取值与存放
@@ -190,7 +191,7 @@ flowchart LR
 | 刷新要求 | 无 / 待满足（`Set<Handle>`） | `Resource.waiters` |
 | 当前订阅 | 实例 / `null`（间隔从配置快照现算） | `Handle.subscription` |
 | 配置快照 | 有效 / 非法（`null`） | 适配闭包 → `Handle.config` |
-| 组件激活、句柄已释放、浏览器可见、协调者已销毁 | true / false | `Handle.active` / `Handle.disposed` / `RefreshCore.visible` / `RefreshCore.disposed` |
+| 组件激活、句柄已释放、浏览器可见、协调者已销毁 | true / false | `Handle.active` / **推导**：`RefreshCore.handles` 的名册成员资格 / `RefreshCore.visible` / `RefreshCore.disposed` |
 | 待唤醒调度 | 取消句柄 / `null`；已排 flush true / false | `RefreshCore.wakeup` / `flushing` |
 | 资源已结算 | 时刻 / `null`（从未结算） | `Resource.settledAt` |
 | 当前后台任务 | Task / `null` | `Resource.task` |

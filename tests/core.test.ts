@@ -47,7 +47,6 @@ function page(
     parameters: null,
     subscription: null,
     active: false,
-    disposed: false,
   }
   core.addHandle(handle)
   core.activate(handle)

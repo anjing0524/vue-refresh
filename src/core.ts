@@ -24,7 +24,18 @@ export interface Config {
   readonly every: number
 }
 
-/** 组件需求句柄：本页声明的身份、当前订阅与交付出口。字段都由本文件写，适配层只读。 */
+/**
+ * 组件需求句柄：三种角色挂在一个对象上，读之前先分清是哪一组（完整所有权表见 DESIGN §3.3）。
+ *
+ * - **组 A｜端口（`source` / `config` / `publish` / `onError`）**：适配层创建时一次给全、此后只读，
+ *   核心只调它们。这一组就是类型擦除边界——具体 `RefreshSource<P, T>` / `RefreshDisplay<P, T>` 靠
+ *   **方法双变**进入同构的 `Set<Handle>` 槽位（ADR-24、ADR-35），`Resource` 侧只用这一组。
+ * - **组 B｜状态（`parameters` / `subscription` / `active`）**：核心独占写入，适配层只给初值、从不读。
+ *   其中 `subscription` 是**反向索引**（与 `Resource.subscribers` 的成员资格同源，成对写入，§3.5 第 1 条）。
+ * - **组 C｜接驳（`cleanup`）**：唯一双向成员——适配层在 watcher 就绪后写一次，核心在 `removeHandle` 读、清、调。
+ *
+ * 「句柄是否已释放」不存字段：它就是 `RefreshCore.handles` 的名册成员资格（DESIGN §3.7）。
+ */
 export interface Handle<P extends object = object, T = unknown> {
   /** 擦除后的固定定义：具体 Source 靠方法双变进入这里。 */
   readonly source: RefreshSource<object, unknown>
@@ -43,7 +54,6 @@ export interface Handle<P extends object = object, T = unknown> {
   subscription: Resource | null
   /** 组件是否挂载/激活。 */
   active: boolean
-  disposed: boolean
 }
 
 /** 一次后台执行；执行位置由 `queue` / `running` 的归属决定。 */
@@ -252,10 +262,9 @@ export class RefreshCore {
     this.reconcile(handle)
   }
 
-  /** 释放一个句柄：先结算它的刷新要求，再退订并停止接纳。 */
+  /** 释放一个句柄：先结算它的刷新要求，再退订并停止接纳。名册成员资格就是「是否已释放」。 */
   removeHandle(handle: Handle): void {
-    if (handle.disposed) return
-    handle.disposed = true
+    if (!this.handles.has(handle)) return
     this.handles.delete(handle)
     const cleanup = handle.cleanup
     handle.cleanup = null
@@ -268,14 +277,14 @@ export class RefreshCore {
 
   /** 挂载/激活：恢复资格。与 `deactivate` 存在交叠（KeepAlive），因此两个方向都必须幂等。 */
   activate(handle: Handle): void {
-    if (handle.disposed) return
+    if (!this.handles.has(handle)) return
     handle.active = true
     this.reconcile(handle)
   }
 
   /** 失活：撤销资格，并结算本页未完成的刷新要求。 */
   deactivate(handle: Handle): void {
-    if (handle.disposed) return
+    if (!this.handles.has(handle)) return
     handle.active = false
     this.reconcile(handle)
   }
@@ -294,7 +303,7 @@ export class RefreshCore {
 
   /** 声明或更新身份。相同参数值幂等；参数准备在身份被接纳之后才执行。 */
   submit(handle: Handle, prepare: () => Parameters): SubmitResult {
-    if (this.disposed || handle.disposed) return { status: 'cancelled' }
+    if (this.disposed || !this.handles.has(handle)) return { status: 'cancelled' }
 
     let parameters: Parameters
     try {
@@ -323,7 +332,7 @@ export class RefreshCore {
    * ——这些状态页面自己就能看到（ADR-51）。
    */
   refresh(handle: Handle): void {
-    if (this.disposed || handle.disposed) return
+    if (this.disposed || !this.handles.has(handle)) return
     if (handle.config() === null) return
     if (!(handle.active && this.visible)) return
     const parameters = handle.parameters
@@ -389,7 +398,7 @@ export class RefreshCore {
    * 刷新要求不参与资格：它由 `refresh` 的入口闸与 `waiters` 的归属表达，因此暂停页仍可刷新。
    */
   private coordinate(handle: Handle): void {
-    if (this.disposed || handle.disposed) return
+    if (this.disposed || !this.handles.has(handle)) return
     const present = handle.active && this.visible
     if (!present) this.clearRefreshes(handle)
 
