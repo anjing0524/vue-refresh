@@ -75,30 +75,15 @@ export interface Entry {
 }
 
 /**
- * 一个实例需要的**全部**跨实例动作，就这三件。
- *
- * 刻意不把核心交进来：实例因此能独立读完整条身份线（订阅、要求、结果、到期、失败、结算），
- * 而不必把 `buckets` / `queue` / `handles` 的知识搬到自己身上。
- */
-export interface ResourceHost {
-  /** 为它排一次请求；版本序号与并发槽由核心决定。 */
-  enqueue(resource: Resource): void
-  /** 它是否仍注册在自己的参数键上。 */
-  registered(resource: Resource): boolean
-  /** 它已经没有订阅也没有要求：注销、清结果、abort 在途。 */
-  releaseIfUnused(resource: Resource): void
-}
-
-/**
  * 一个「Source ＋ 参数值」的共享实例：同一个身份的**全部状态与全部操作都在这个类里**。
  *
- * 越过实例边界的事（版本序号、FIFO 队列、并发槽、注册表注销）只经 `host` 发生，
- * 所以「一个身份的一生」可以只读这一个类：
+ * 越过实例边界的事（版本序号、FIFO 队列、并发槽、注册表注销）只调核心的三个入口
+ * （`enqueue` / `registered` / `releaseIfUnused`），所以「一个身份的一生」可以只读这一个类：
  * 接入 → 到期 → 执行 → 交付或失败 → 结算要求 → 回收。核心剩下的部分是跨实例的：注册表、调度与并发。
  */
 export class Resource {
-  /** 实例只经这三个动作回调核心；见 `ResourceHost`。 */
-  private readonly host: ResourceHost
+  /** 实例只经核心的三个入口请求跨实例动作；这三个入口是核心唯一的公开内部面（ADR-42）。 */
+  private readonly core: RefreshCore
   readonly source: RefreshSource<object, unknown>
   readonly parameters: Parameters
   /** 按周期订阅本实例的句柄；各自的间隔在它们自己的 `subscription` 上。 */
@@ -112,8 +97,8 @@ export class Resource {
   issued = 0
   task: Task | null = null
 
-  constructor(host: ResourceHost, source: RefreshSource<object, unknown>, parameters: Parameters) {
-    this.host = host
+  constructor(core: RefreshCore, source: RefreshSource<object, unknown>, parameters: Parameters) {
+    this.core = core
     this.source = source
     this.parameters = parameters
   }
@@ -186,7 +171,7 @@ export class Resource {
   settleWaiter(waiter: Waiter, result: RefreshResult): void {
     if (!this.waiters.delete(waiter)) return
     waiter.settle(result)
-    this.host.releaseIfUnused(this)
+    this.core.releaseIfUnused(this)
   }
 
   /**
@@ -195,8 +180,8 @@ export class Resource {
    */
   refill(): void {
     if (this.waiters.size === 0 || this.task !== null) return
-    if (!this.host.registered(this)) return
-    this.host.enqueue(this)
+    if (!this.core.registered(this)) return
+    this.core.enqueue(this)
   }
 
   /** 交付一份独立副本。 */
@@ -248,8 +233,6 @@ function copyResult(input: unknown): unknown {
 
 export class RefreshCore {
   private readonly maxConcurrent: number
-  /** 实例回调核心的三件跨实例动作；见 `ResourceHost`。 */
-  private readonly host: ResourceHost
   /** Source → 参数键 → 实例。 */
   private readonly buckets = new Map<RefreshSource<object, unknown>, Map<string, Resource>>()
   /** 全部页面句柄；可见性变化时按它们重新协调。 */
@@ -269,12 +252,6 @@ export class RefreshCore {
 
   constructor(maxConcurrent: number) {
     this.maxConcurrent = maxConcurrent
-    // 实例只经这三个箭头回调核心，核心的方法因此保持 private（所有权见 DESIGN §3.3）。
-    this.host = {
-      enqueue: resource => { this.enqueue(resource) },
-      registered: resource => this.registered(resource),
-      releaseIfUnused: resource => { this.releaseIfUnused(resource) },
-    }
   }
 
   // ══════════════════════════ 状态观测与生命周期 ══════════════════════════
@@ -497,7 +474,7 @@ export class RefreshCore {
     const existing = bucket.get(parameters.key)
     if (existing) return existing
 
-    const resource = new Resource(this.host, source, parameters)
+    const resource = new Resource(this, source, parameters)
     bucket.set(parameters.key, resource)
     return resource
   }
@@ -510,8 +487,8 @@ export class RefreshCore {
     return parameters ? this.buckets.get(handle.source)?.get(parameters.key) : undefined
   }
 
-  /** 实例仍注册在自己的参数键上。 */
-  private registered(resource: Resource): boolean {
+  /** 实例仍注册在自己的参数键上。**实例入口**，不属于包契约。 */
+  registered(resource: Resource): boolean {
     return this.buckets.get(resource.source)?.get(resource.parameters.key) === resource
   }
 
@@ -523,8 +500,8 @@ export class RefreshCore {
     this.releaseIfUnused(subscription.resource)
   }
 
-  /** 没有订阅者也没有刷新要求：删实例与排队任务，abort 在途；迟到的结束在任务身份复核处失效。 */
-  private releaseIfUnused(resource: Resource): void {
+  /** 没有订阅者也没有刷新要求：删实例与排队任务，abort 在途；迟到的结束在任务身份复核处失效。**实例入口**。 */
+  releaseIfUnused(resource: Resource): void {
     if (resource.subscribers.size > 0 || resource.waiters.size > 0) return
     if (!this.registered(resource)) return
     const bucket = this.buckets.get(resource.source)
@@ -542,8 +519,8 @@ export class RefreshCore {
 
   // ══════════════════════════ 后台执行 ══════════════════════════
 
-  /** 分配版本并登记一次后台执行；全部调用点都先确认没有当前任务，因此不替换、不 abort 在途。 */
-  private enqueue(resource: Resource): void {
+  /** 分配版本并登记一次后台执行；全部调用点都先确认没有当前任务，因此不替换、不 abort 在途。**实例入口**。 */
+  enqueue(resource: Resource): void {
     const version = nextSequence(resource.issued)
     resource.issued = version
     const task: Task = { resource, version, controller: new AbortController() }
