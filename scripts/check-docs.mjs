@@ -264,7 +264,7 @@ for (const file of ['/README.md', '/DESIGN.md']) {
 //     The anchor list must be literal `U…` ids, so a sentence *about* citations (`§3（U…）`) is not one.
 const TOPIC_CITATIONS = [
   { claim: '配置非法的通知', anchor: 'U05', phrase: '配置快照读不出' },
-  { claim: '参数非法时的抛错', anchor: 'U15', phrase: '参数非法' },
+  { claim: '参数编码', anchor: 'U15', phrase: '不同的值不会得到同一个键' },
 ]
 for (const line of design.split('\n')) {
   const citation = /^(.+?)的行为规则见 §3（(U\d{1,3}(?:、U\d{1,3})*)）/.exec(line)

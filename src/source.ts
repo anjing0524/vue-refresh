@@ -4,8 +4,12 @@ import type { ReadonlySnapshot, RefreshLoadContext, RefreshSource } from './publ
  * 参数边界：固定资源定义与提交边界的一次准备。
  *
  * 根需求只有两条：**身份稳定**（同样参数值共享同一次请求）与**快照隔离**（页面改草稿不影响已提交的身份）。
- * 因此这里只有两个各做一件事的函数：`canonical` 是纯编码（对象键排序、数组保序、值域与深度守卫都在它里面），
- * `deepFreeze` 是唯一一处副作用（冻结框架自己持有的那份副本）。
+ * 因此这里只有两个各做一件事的函数：`canonical` 是纯编码，`deepFreeze` 是唯一一处副作用。
+ *
+ * 编码**不判断值合法不合法**——那是调用方的责任。它只保证不同的值不会得到同一个键：
+ * `-0` 与 `0` 是同一个数（同一个键）；`NaN` / `Infinity` / `undefined` / 函数 / `BigInt` 各自成键；
+ * 非普通记录对象（`Date` / `Map` / 类实例）带上构造器名，不与空记录合并。
+ * 循环引用让递归耗尽调用栈，引擎抛出的 `RangeError` 由调用方处理。
  */
 
 /** 一次已准备的请求参数。 */
@@ -37,24 +41,18 @@ export function sourceRuntime(source: object): SourceRuntime {
 }
 
 /**
- * 稳定编码：对象键排序、数组保序；值域非法即抛。**纯函数**，不改动输入。
+ * 稳定编码：对象键排序、数组保序。**纯函数**，不改动输入。
  *
- * `JSON.stringify` 无法重排对象键，所以排序只能自己走一遍；值域守卫顺路做完，
- * 因此这一趟同时承担「值域守卫 ＋ 稳定编码」。不设深度上限：循环引用会让递归耗尽调用栈，
- * 引擎抛出的 `RangeError` 与其它非法参数一样处理。
+ * `JSON.stringify` 无法重排对象键，所以排序只能自己走一遍——这就是它存在的全部理由。
+ * 超出 JSON 值域的输入也各自得到自己的键（见文件头），因此不需要任何合法性判断。
  */
 function canonical(value: unknown): string {
   if (value === null) return 'null'
   if (typeof value === 'string') return JSON.stringify(value)
   if (typeof value === 'boolean') return value ? 'true' : 'false'
-  if (typeof value === 'number') return canonicalNumber(value)
-  if (typeof value !== 'object') throw new TypeError('Parameters require JSON data')
+  if (typeof value === 'number') return String(value)
+  if (typeof value !== 'object') return `${typeof value}:${String(value)}`
   return Array.isArray(value) ? canonicalArray(value) : canonicalRecord(value as Record<string, unknown>)
-}
-
-function canonicalNumber(value: number): string {
-  if (!Number.isFinite(value) || Object.is(value, -0)) throw new TypeError('Parameters require JSON data')
-  return String(value)
 }
 
 function canonicalArray(value: unknown[]): string {
@@ -63,16 +61,15 @@ function canonicalArray(value: unknown[]): string {
   return `[${items.join(',')}]`
 }
 
+/** 非普通记录对象带上构造器名：不拒绝（那是调用方的事），也不与空记录静默合并。 */
 function canonicalRecord(value: Record<string, unknown>): string {
-  const prototype = Object.getPrototypeOf(value)
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new TypeError('Parameters require JSON records or arrays')
-  }
+  const prototype = Object.getPrototypeOf(value) as { constructor?: { name?: string } } | null
+  const tag = prototype === null || prototype === Object.prototype ? '' : `${prototype.constructor?.name ?? 'Object'}:`
   const entries: string[] = []
   for (const key of Object.keys(value).sort()) {
     entries.push(`${JSON.stringify(key)}:${canonical(value[key])}`)
   }
-  return `{${entries.join(',')}}`
+  return `${tag}{${entries.join(',')}}`
 }
 
 /** 冻结框架自己持有的副本（`structuredClone` 的产物，只有普通对象与数组）；调用方原对象不冻结。 */
@@ -82,25 +79,18 @@ function deepFreeze(value: unknown): void {
   for (const child of Object.values(value)) deepFreeze(child)
 }
 
-/** 根容器必须是一个普通记录：数组、`null`、原始值都按非法参数拒绝（U15）。 */
-function requireRecord(input: object): Record<string, unknown> {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    throw new TypeError('Parameters must be a JSON record')
-  }
-  return input as Record<string, unknown>
-}
-
 /** 只读定位：只编码，不复制、不冻结、不执行 `validate`。 */
 export function parameterKey(input: object): string {
-  return canonical(requireRecord(input))
+  return canonical(input)
 }
 
 /**
- * 提交边界只执行一次：复制 → 稳定编码（顺路守卫值域）→ 冻结副本 → 可选业务校验。
- * 任何一步失败都按非法参数拒绝，不产生实例或后台任务。
+ * 提交边界只执行一次：复制 → 稳定编码 → 冻结副本 → 可选业务校验。
+ * `validate` 返回假值或抛错、复制失败（例如传了 Proxy）、循环引用都会让本次声明按非法参数拒绝，
+ * 不产生实例或后台任务。
  */
 export function prepareParameters(input: object, validate?: (args: object) => boolean): Parameters {
-  const args: object = structuredClone(requireRecord(input))
+  const args: object = structuredClone(input)
   const key = canonical(args)
   deepFreeze(args)
   if (validate) {

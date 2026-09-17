@@ -343,6 +343,36 @@ test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', asyn
   core.setVisible(false)
 })
 
+test('A05 暂停只退订：已发起的刷新要求继续等结果，实例不因暂停而释放', async () => {
+  const resolvers: Array<(value: number) => void> = []
+  const source = defineRefresh<{ id: number }, number>({
+    load: () => new Promise<number>(resolve => resolvers.push(resolve)),
+  })
+  const core = newCore(2)
+  const view = page(core, sourceRuntime(source))
+
+  view.submit({ id: 1 })
+  await settle()
+  const refreshing = view.refresh()
+  await settle()
+
+  view.set({ enabled: false, every: null, visible: true })
+  await settle()
+  assert.equal(view.handle.subscription, null, '暂停即退订')
+  assert.equal(core.snapshot().resources.length, 1, '刷新要求还没结算，实例不释放、在途不取消')
+
+  // 在途任务不算「动作之后启动」：它结束后照常补一次后继请求——暂停不影响已发起的要求。
+  resolvers[0]?.(1)
+  await settle()
+  assert.equal(resolvers.length, 2, '暂停期间后继请求照常发出')
+  resolvers[1]?.(7)
+  await settle()
+  assert.deepEqual(await refreshing, { status: 'success' })
+  assert.equal(view.last?.data, 7, '暂停页仍然拿到这次结果')
+  assert.equal(core.snapshot().resources.length, 0, '要求结算后没有需求，才释放实例')
+  assert.equal(view.last?.data, 7, '释放共享实例不动页面自己的副本')
+})
+
 test('A13 共享请求失败：保留旧画面、通知页面、下个周期继续', async () => {
   let fail = false
   let calls = 0
@@ -510,18 +540,20 @@ test('A11 交付面：null 之外的任何结果都整体替换，且页面副�
   assert.equal(view.handle.parameters?.key, '{"id":1}')
 })
 
-test('A15 只读定位：无实例返回 undefined，参数非法抛给调用者，读到的是副本', async () => {
+test('A15 只读定位：无实例返回 undefined，读到的是副本，循环引用由调用者接住', async () => {
   const source = defineRefresh<{ id: number }, { rows: number[] }>({ load: async () => ({ rows: [1] }) })
   const quote = sourceRuntime(source)
   const core = newCore(1)
 
   assert.equal(core.readSnapshot(quote, { id: 1 }), undefined)
-  assert.throws(() => { core.readSnapshot(quote, { id: Number.NaN }) }, TypeError)
-  assert.throws(() => { core.readSnapshot(quote, { id: -0 }) }, TypeError)
-  // 根容器必须是普通记录：数组、null、原始值都拒绝，且与此刻有没有活跃实例无关。
-  for (const illegal of [[1, 2], null, 7, 'x', new Date(0)]) {
-    assert.throws(() => { core.readSnapshot(quote, illegal as object) }, TypeError, `根容器 ${String(illegal)} 应被拒`)
+  // 编码不做合法性判断：这些根容器只是各自不同的键，没有实例就返回 undefined。
+  for (const other of [[1, 2], null, 7, 'x', new Date(0), { id: Number.NaN }]) {
+    assert.equal(core.readSnapshot(quote, other as object), undefined, `根容器 ${String(other)} 不该抛`)
   }
+  // 只有循环引用会让递归耗尽调用栈，由读取者接住。
+  const cyclic: Record<string, unknown> = {}
+  cyclic.self = cyclic
+  assert.throws(() => { core.readSnapshot(quote, cyclic) }, RangeError)
 
   const view = page(core, quote)
   view.submit({ id: 1 })
@@ -634,16 +666,21 @@ test('A05/A14 未声明身份时刷新结算 unavailable，不产生请求', asy
   assert.equal(calls, 0)
 })
 
-test('A18 参数守卫与序号上界：非 JSON 值与病态嵌套被拒，序号到达上界后停在原地', async () => {
+test('A18 参数编码与序号上界：不同值不同键、相同值同键，序号到达上界后停在原地', async () => {
   const source = defineRefresh<{ id: number }, number>({ load: async () => 1 })
   const core = newCore(1)
   const view = page(core, sourceRuntime(source))
 
-  // 非 JSON 值、非法根容器、循环与病态嵌套都在提交边界被拒，且不产生任何状态改动。
-  for (const illegal of [[1, 2], null, 7, 'x', new Date(0)]) {
-    assert.equal(view.submit(illegal as object).status, 'rejected', `根容器 ${String(illegal)} 应被拒`)
-  }
-  assert.equal(view.submit({ id: -0 }).status, 'rejected')
+  // 编码不做合法性判断（那是调用方的责任），只保证不同的值不会得到同一个键。
+  assert.equal(prepareParameters({ id: -0 }).key, prepareParameters({ id: 0 }).key, '-0 与 0 是同一个数')
+  assert.equal(prepareParameters({ b: 1, a: 2 }).key, prepareParameters({ a: 2, b: 1 }).key, '字段顺序不影响身份')
+  assert.notEqual(prepareParameters({ id: Number.NaN }).key, prepareParameters({ id: null }).key, 'NaN 不与 null 合并')
+  assert.notEqual(prepareParameters({ id: Infinity }).key, prepareParameters({ id: null }).key, 'Infinity 不与 null 合并')
+  assert.notEqual(prepareParameters({ id: undefined }).key, prepareParameters({}).key, '显式 undefined 不与缺字段合并')
+  assert.notEqual(prepareParameters({ at: new Date(0) }).key, prepareParameters({}).key, '非普通记录不与空记录合并')
+  assert.notEqual(prepareParameters({ tags: ['a', 'b'] }).key, prepareParameters({ tags: ['b', 'a'] }).key, '数组顺序影响身份')
+
+  // 循环引用让递归耗尽调用栈：按非法参数拒绝，且不改动任何状态。
   const cyclic: Record<string, unknown> = {}
   cyclic.self = cyclic
   assert.equal(view.submit(cyclic).status, 'rejected')
