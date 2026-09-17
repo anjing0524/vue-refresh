@@ -4,11 +4,8 @@ import { parameterKey } from './source.ts'
 import type { Parameters } from './source.ts'
 
 /**
- * 共享取数与调度核心。**全部运行时状态都在本文件**，只有三件事：
- *
- * - `buckets`：`Source → 参数键 → Resource`，一个「相同 Source ＋ 相同参数值」的共享实例；
- * - `Resource` 上的 `subscribers` 与 `waiters`：谁在按周期订阅它、谁在等一次显式刷新；
- * - `Resource.task` ＋ `queue`/`running`：它当前的一次后台执行、排队位置与真实并发槽。
+ * 共享取数与调度核心：**只管跨实例的事**——注册表、句柄名册、可见性与销毁、FIFO 队列、并发槽、
+ * 唯一唤醒 Timer、只读投影。一个身份自己的全部状态与操作在 `Resource` 里。
  *
  * 一次取数与交付的完整链路（没有第二条路径）：
  *
@@ -16,10 +13,10 @@ import type { Parameters } from './source.ts'
  * submit ─ 准备参数 → 建立身份 → reconcile：资格成立就订阅，否则退订
  * refresh ─ 登记要求（直接用当前请求的结果）→ 没有请求就入队
  * flush  ─ 协调句柄 → 到期入队 → 按 FIFO 占槽启动 → 安排唯一唤醒 Timer
- * runTask ─ source.load → 复核任务身份 → 记结果 → publish（逐页独立副本 → 结算 waiter）
+ * runTask ─ source.load → 复核任务身份 → Resource.publish（逐页独立副本 → 结算要求）
  * ```
  *
- * 交付、失败与取消都只改这三件事，不另立镜像：句柄的「当前订阅」是它自己身上的一个字段，
+ * 交付、失败与取消都不另立镜像：句柄的「当前订阅」是它自己身上的一个字段，
  * 实例侧的集合里是同一些句柄本身；没有第二个对象去描述同一份关系。
  */
 
@@ -77,20 +74,139 @@ export interface Entry {
   readonly updatedAt: number
 }
 
-/** 一个「Source ＋ 参数值」的共享实例。 */
-export interface Resource {
+/**
+ * 一个实例需要的**全部**跨实例动作，就这三件。
+ *
+ * 刻意不把核心交进来：实例因此能独立读完整条身份线（订阅、要求、结果、到期、失败、结算），
+ * 而不必把 `buckets` / `queue` / `handles` 的知识搬到自己身上。
+ */
+export interface ResourceHost {
+  /** 为它排一次请求；版本序号与并发槽由核心决定。 */
+  enqueue(resource: Resource): void
+  /** 它是否仍注册在自己的参数键上。 */
+  registered(resource: Resource): boolean
+  /** 它已经没有订阅也没有要求：注销、清结果、abort 在途。 */
+  releaseIfUnused(resource: Resource): void
+}
+
+/**
+ * 一个「Source ＋ 参数值」的共享实例：同一个身份的**全部状态与全部操作都在这个类里**。
+ *
+ * 越过实例边界的事（版本序号、FIFO 队列、并发槽、注册表注销）只经 `host` 发生，
+ * 所以「一个身份的一生」可以只读这一个类：
+ * 接入 → 到期 → 执行 → 交付或失败 → 结算要求 → 回收。核心剩下的部分是跨实例的：注册表、调度与并发。
+ */
+export class Resource {
+  /** 实例只经这三个动作回调核心；见 `ResourceHost`。 */
+  private readonly host: ResourceHost
   readonly source: RefreshSource<object, unknown>
   readonly parameters: Parameters
   /** 按周期订阅本实例的句柄；各自的间隔在它们自己的 `subscription` 上。 */
-  readonly subscribers: Set<Handle>
+  readonly subscribers = new Set<Handle>()
   /** 尚未结算的刷新要求。 */
-  readonly waiters: Set<Waiter>
-  entry: Entry | null
+  readonly waiters = new Set<Waiter>()
+  entry: Entry | null = null
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
-  settledAt: number | null
+  settledAt: number | null = null
   /** 最后一个已分配的任务版本。 */
-  issued: number
-  task: Task | null
+  issued = 0
+  task: Task | null = null
+
+  constructor(host: ResourceHost, source: RefreshSource<object, unknown>, parameters: Parameters) {
+    this.host = host
+    this.source = source
+    this.parameters = parameters
+  }
+
+  /** 有效间隔现算：所有订阅的最小值，不缓存。 */
+  shortestEvery(): number {
+    let every = Infinity
+    for (const handle of this.subscribers) {
+      const subscription = handle.subscription
+      if (subscription && subscription.resource === this) every = Math.min(every, subscription.every)
+    }
+    return every
+  }
+
+  /**
+   * 该实例此刻的下次到期时刻：由「最近一次结算时刻 ＋ 当前最短间隔」现算，因此改频率立刻生效；
+   * 从未结算过的实例立即到期。取消不计时、不补跑漏掉的周期。
+   */
+  dueAt(now: number): number {
+    return this.settledAt === null ? now : this.settledAt + this.shortestEvery()
+  }
+
+  /** 刚接入的句柄拿已有结果（不重复取数）；还没有结果就什么也不做，交给这一轮 `flush` 的到期遍历首查。 */
+  deliverLatest(handle: Handle): void {
+    if (this.entry) this.deliverTo(handle, this.entry)
+  }
+
+  /** 后台成功：收货方一次收齐（有效订阅 ∪ 满足版本门槛的刷新要求），同一句柄只交付一次。 */
+  publish(entry: Entry): void {
+    // 结算时刻先于交付：交付回调里看到的调度状态已经是「这一次已经结束」。
+    this.settledAt = Date.now()
+    this.entry = entry
+    const satisfied: Waiter[] = []
+    const refreshing = new Set<Handle>()
+    for (const waiter of [...this.waiters]) {
+      if (waiter.min > entry.version) continue
+      satisfied.push(waiter)
+      refreshing.add(waiter.handle)
+    }
+    const delivered = new Set<Handle>()
+    for (const handle of [...this.subscribers]) {
+      // 前一个接收者的回调可能已经改身份或退订，因此每个交付点重新复核归属。
+      if (!this.subscribers.has(handle)) continue
+      delivered.add(handle)
+      this.deliverTo(handle, entry)
+    }
+    for (const handle of refreshing) {
+      if (!delivered.has(handle)) this.deliverTo(handle, entry)
+    }
+    // 结算在交付之后：`await refresh()` 返回 success 时本页 display 已经是这次的结果。
+    for (const waiter of satisfied) this.settleWaiter(waiter, { status: 'success' })
+  }
+
+  /**
+   * 共享请求失败（含上限到期）：通知仍有效的订阅者，并按同一失败结算本实例全部未完成的要求。
+   * 失败保留画面、需求与开启意愿，下个周期继续。
+   */
+  fail(error: unknown): void {
+    this.settledAt = Date.now()
+    for (const handle of [...this.subscribers]) {
+      if (!this.subscribers.has(handle)) continue
+      report(handle, { origin: ErrorOrigin.Request, error, ...identity(handle) })
+    }
+    for (const waiter of [...this.waiters]) {
+      this.settleWaiter(waiter, { status: 'error', origin: ErrorOrigin.Request, error })
+    }
+  }
+
+  /** 结算一个要求；它可能是本实例的最后一个需求，因此顺手让核心判断要不要回收这个实例。 */
+  settleWaiter(waiter: Waiter, result: RefreshResult): void {
+    if (!this.waiters.delete(waiter)) return
+    waiter.settle(result)
+    this.host.releaseIfUnused(this)
+  }
+
+  /**
+   * 任务结束后仍有未完成的要求时补一次请求。唯一来源是交付回调里的重入：`publish` 先算好这一批要结算的
+   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求结算。
+   */
+  refill(): void {
+    if (this.waiters.size === 0 || this.task !== null) return
+    if (!this.host.registered(this)) return
+    this.host.enqueue(this)
+  }
+
+  /** 交付一份独立副本。 */
+  private deliverTo(handle: Handle, entry: Entry): void {
+    isolate(() => handle.publish({
+      args: this.parameters.args,
+      data: structuredClone(entry.data),
+      updatedAt: entry.updatedAt,
+    }))
+  }
 }
 
 /** 框架侧单次 `load` 的上限（毫秒）：从真正开始执行起算，排队等待不计入（数值与依据见 ADR-20）。 */
@@ -132,6 +248,8 @@ function copyResult(input: unknown): unknown {
 
 export class RefreshCore {
   private readonly maxConcurrent: number
+  /** 实例回调核心的三件跨实例动作；见 `ResourceHost`。 */
+  private readonly host: ResourceHost
   /** Source → 参数键 → 实例。 */
   private readonly buckets = new Map<RefreshSource<object, unknown>, Map<string, Resource>>()
   /** 全部页面句柄；可见性变化时按它们重新协调。 */
@@ -151,6 +269,12 @@ export class RefreshCore {
 
   constructor(maxConcurrent: number) {
     this.maxConcurrent = maxConcurrent
+    // 实例只经这三个箭头回调核心，核心的方法因此保持 private（所有权见 DESIGN §3.3）。
+    this.host = {
+      enqueue: resource => { this.enqueue(resource) },
+      registered: resource => this.registered(resource),
+      releaseIfUnused: resource => { this.releaseIfUnused(resource) },
+    }
   }
 
   // ══════════════════════════ 状态观测与生命周期 ══════════════════════════
@@ -360,8 +484,7 @@ export class RefreshCore {
     handle.parameters = resource.parameters
     handle.subscription = { resource, every: config.every }
     resource.subscribers.add(handle)
-    // 已有结果立即交付（恢复时拿历史结果，不重复取数）；没有结果时交给这一轮 flush 的到期遍历首查。
-    if (resource.entry) this.deliverTo(handle, resource, resource.entry)
+    resource.deliverLatest(handle)
   }
 
   /** 按「Source 身份 ＋ 完整参数值稳定键」查找，没有就建立实例。 */
@@ -374,10 +497,7 @@ export class RefreshCore {
     const existing = bucket.get(parameters.key)
     if (existing) return existing
 
-    const resource: Resource = {
-      source, parameters, subscribers: new Set(), waiters: new Set(),
-      entry: null, settledAt: null, issued: 0, task: null,
-    }
+    const resource = new Resource(this.host, source, parameters)
     bucket.set(parameters.key, resource)
     return resource
   }
@@ -440,15 +560,14 @@ export class RefreshCore {
       if (resource.task !== task) return
       const entry: Entry = { version: task.version, data: copyResult(raw), updatedAt: Date.now() }
       if (resource.task !== task) return
-      resource.settledAt = Date.now()
-      this.publish(resource, entry)
+      resource.publish(entry)
     } catch (error) {
-      if (resource.task === task) this.fail(resource, error)
+      if (resource.task === task) resource.fail(error)
     } finally {
       clearTimeout(timer)
       this.running.delete(task)
       if (resource.task === task) resource.task = null
-      this.refill(resource)
+      resource.refill()
       this.flushSoon()
     }
   }
@@ -463,75 +582,9 @@ export class RefreshCore {
     resource.task = null
     this.running.delete(task)
     task.controller.abort()
-    this.fail(resource, new Error(`load 未在框架上限 ${LOAD_TIMEOUT_MS} 毫秒内结束`))
-    this.refill(resource)
+    resource.fail(new Error(`load 未在框架上限 ${LOAD_TIMEOUT_MS} 毫秒内结束`))
+    resource.refill()
     this.flushSoon()
-  }
-
-  /**
-   * 该实例此刻的下次到期时刻：由「最近一次结算时刻 ＋ 当前最短间隔」现算，因此改频率立刻生效；
-   * 从未结算过的实例立即到期。取消不计时、不补跑漏掉的周期。
-   */
-  private dueAt(resource: Resource, now: number): number {
-    return resource.settledAt === null ? now : resource.settledAt + this.shortestEvery(resource)
-  }
-
-  /** 有效间隔现算：所有订阅的最小值，不缓存。 */
-  private shortestEvery(resource: Resource): number {
-    let every = Infinity
-    for (const handle of resource.subscribers) {
-      const subscription = handle.subscription
-      if (subscription && subscription.resource === resource) every = Math.min(every, subscription.every)
-    }
-    return every
-  }
-
-  /**
-   * 共享请求失败（含上限到期）：通知仍有效的订阅者，并按同一失败结算该实例全部未完成的要求。
-   * 失败保留画面、需求与开启意愿，下个周期继续。
-   */
-  private fail(resource: Resource, error: unknown): void {
-    resource.settledAt = Date.now()
-    for (const handle of [...resource.subscribers]) {
-      if (!resource.subscribers.has(handle)) continue
-      report(handle, { origin: ErrorOrigin.Request, error, ...identity(handle) })
-    }
-    for (const waiter of [...resource.waiters]) {
-      this.settleWaiter(resource, waiter, { status: 'error', origin: ErrorOrigin.Request, error })
-    }
-  }
-
-  /** 后台成功：收货方一次收齐（有效订阅 ∪ 满足版本门槛的刷新要求），同一句柄只交付一次。 */
-  private publish(resource: Resource, entry: Entry): void {
-    resource.entry = entry
-    const satisfied: Waiter[] = []
-    const refreshing = new Set<Handle>()
-    for (const waiter of [...resource.waiters]) {
-      if (waiter.min > entry.version) continue
-      satisfied.push(waiter)
-      refreshing.add(waiter.handle)
-    }
-    const delivered = new Set<Handle>()
-    for (const handle of [...resource.subscribers]) {
-      // 前一个接收者的回调可能已经改身份或退订，因此每个交付点重新复核归属。
-      if (!resource.subscribers.has(handle)) continue
-      delivered.add(handle)
-      this.deliverTo(handle, resource, entry)
-    }
-    for (const handle of refreshing) {
-      if (!delivered.has(handle)) this.deliverTo(handle, resource, entry)
-    }
-    // 结算在交付之后：`await refresh()` 返回 success 时本页 display 已经是这次的结果。
-    for (const waiter of satisfied) this.settleWaiter(resource, waiter, { status: 'success' })
-  }
-
-  /** 交付一份独立副本。 */
-  private deliverTo(handle: Handle, resource: Resource, entry: Entry): void {
-    isolate(() => handle.publish({
-      args: resource.parameters.args,
-      data: structuredClone(entry.data),
-      updatedAt: entry.updatedAt,
-    }))
   }
 
   // ══════════════════════════ 刷新要求 ══════════════════════════
@@ -541,24 +594,8 @@ export class RefreshCore {
     const resource = this.resourceOf(handle)
     if (!resource) return
     for (const waiter of [...resource.waiters]) {
-      if (waiter.handle === handle) this.settleWaiter(resource, waiter, { status: 'cancelled', reason })
+      if (waiter.handle === handle) resource.settleWaiter(waiter, { status: 'cancelled', reason })
     }
-  }
-
-  private settleWaiter(resource: Resource, waiter: Waiter, result: RefreshResult): void {
-    if (!resource.waiters.delete(waiter)) return
-    waiter.settle(result)
-    this.releaseIfUnused(resource)
-  }
-
-  /**
-   * 任务结束后仍有未完成的要求时补一次请求。唯一来源是交付回调里的重入：`publish` 先算好这一批要结算的
-   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求结算。
-   */
-  private refill(resource: Resource): void {
-    if (resource.waiters.size === 0 || resource.task !== null) return
-    if (!this.registered(resource)) return
-    this.enqueue(resource)
   }
 
   // ══════════════════════════ 调度 ══════════════════════════
@@ -586,7 +623,7 @@ export class RefreshCore {
     for (const bucket of this.buckets.values()) {
       for (const resource of bucket.values()) {
         if (resource.task || resource.subscribers.size === 0) continue
-        const due = this.dueAt(resource, now)
+        const due = resource.dueAt(now)
         if (due <= now) this.enqueue(resource)
         else next = Math.min(next, due)
       }
