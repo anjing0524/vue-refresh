@@ -14,7 +14,7 @@ public-types.ts            公共类型的唯一代码定义与状态取值常�
 source.ts                  固定资源定义、提交边界准备与稳定键、只读定位
 core.ts                    全部运行时状态：共享实例、订阅、刷新要求、调度、交付与失败
 vue.ts                     组件适配与安装：配置快照、句柄、生命周期、可见性、只读入口
-index.ts                   包入口（只导出三个正式函数与公共类型）
+index.ts                   包入口（三个正式函数、三个状态常量对象与公共类型）
 ```
 
 依赖方向单向：`public-types` ← `source` ← `core` ← `vue` ← `index`。
@@ -33,7 +33,7 @@ index.ts                   包入口（只导出三个正式函数与公共类�
 | `source.ts` | `defineRefresh`、`Parameters` 与 `SourceRuntime`、`prepareParameters`（复制 → 守卫/冻结/稳定编码 → 可选校验）、只读定位 `parameterKey` |
 | `core.ts` | `RefreshCore`：实例注册表、句柄关系、刷新要求、唯一 Timer 与 FIFO 队列、并发槽、交付与失败、只读计数投影 |
 | `vue.ts` | `useRefresh`（配置快照、句柄、Display、生命周期）、`createRefreshManager`（安装、可见性监听、只读入口、销毁）、注入槽位 |
-| `index.ts` | 包导出（逐个列出类型，不用 `export type *`） |
+| `index.ts` | 包导出：三个函数、三个状态常量对象、逐个列出的公共类型（不用 `export type *`） |
 
 ### 2.1 调用链路
 
