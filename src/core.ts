@@ -14,7 +14,7 @@ import type { Parameters } from './source.ts'
  *
  * ```text
  * submit ─ 准备参数 → 建立身份 → reconcile：资格成立就订阅，否则退订
- * refresh ─ 登记 waiter（版本下限）→ 没有当前任务就入队
+ * refresh ─ 登记要求（直接用当前请求的结果）→ 没有请求就入队
  * flush  ─ 协调句柄 → 到期入队 → 按 FIFO 占槽启动 → 安排唯一唤醒 Timer
  * runTask ─ source.load → 复核任务身份 → 记结果 → publish（逐页独立副本 → 结算 waiter）
  * ```
@@ -60,7 +60,10 @@ export interface Task {
   readonly controller: AbortController
 }
 
-/** 一次显式刷新尚未满足的要求：结果版本必须不低于 `min`。 */
+/**
+ * 一次显式刷新尚未满足的要求：由版本不低于 `min` 的那个请求结算。
+ * `min` 取登记时的 `issued`——也就是当前请求（排队或已在执行）的版本，因此刷新直接用它的结果。
+ */
 export interface Waiter {
   readonly handle: Handle
   readonly min: number
@@ -239,7 +242,7 @@ export class RefreshCore {
     return { status: 'accepted' }
   }
 
-  /** 显式刷新：为当前身份登记一个「不低于某版本」的要求；不恢复自动刷新，也不改写调用方的开关。 */
+  /** 显式刷新：有当前请求就直接用它的结果，没有就登记一次；不恢复自动刷新，也不改写调用方的开关。 */
   refresh(handle: Handle): Promise<RefreshResult> {
     const immediate = (result: RefreshResult): Promise<RefreshResult> => Promise.resolve(result)
     if (this.disposed || handle.disposed) return immediate({ status: 'cancelled', reason: CancelReason.Disposed })
@@ -257,7 +260,8 @@ export class RefreshCore {
     const resource = this.resourceFor(handle.source, parameters)
     let settle!: (result: RefreshResult) => void
     const result = new Promise<RefreshResult>(resolve => { settle = resolve })
-    resource.waiters.add({ handle, min: this.floor(resource), settle })
+    // 有请求就直接用：`issued` 就是当前请求（排队或已在执行）的版本；没有请求时由本次登记的任务满足。
+    resource.waiters.add({ handle, min: resource.issued, settle })
     if (!resource.task) this.enqueue(resource)
     this.flushSoon()
     return result
@@ -532,16 +536,6 @@ export class RefreshCore {
 
   // ══════════════════════════ 刷新要求 ══════════════════════════
 
-  /**
-   * 本次要求的下限：排队未启动的任务算「动作之后启动」，可以直接满足它；
-   * 已在执行的任务不算，本次刷新等它结束后补一次后继请求。
-   */
-  private floor(resource: Resource): number {
-    const task = resource.task
-    if (!task) return resource.issued
-    return this.running.has(task) ? task.version + 1 : task.version
-  }
-
   /** 结算一个句柄未完成的要求（失去存在、身份被替代、卸载、销毁都由它收尾）。 */
   private settleRefreshes(handle: Handle, reason: CancelReason): void {
     const resource = this.resourceOf(handle)
@@ -557,7 +551,10 @@ export class RefreshCore {
     this.releaseIfUnused(resource)
   }
 
-  /** 任务结束后仍有未完成的要求、又没有当前任务时，补一次后继请求。 */
+  /**
+   * 任务结束后仍有未完成的要求时补一次请求。唯一来源是交付回调里的重入：`publish` 先算好这一批要结算的
+   * 要求再交付，交付期间新登记的要求不在那一批里，只能由后继请求结算。
+   */
   private refill(resource: Resource): void {
     if (resource.waiters.size === 0 || resource.task !== null) return
     if (!this.registered(resource)) return

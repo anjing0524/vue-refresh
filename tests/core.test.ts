@@ -182,7 +182,7 @@ test('A03 参数被拒时返回 rejected，保留已有身份，并按 validatio
   assert.equal(victim.errors.at(-1)?.origin, 'validation')
 })
 
-test('A12/A14 在途任务不满足本次刷新：它结束后补一次后继请求，结算在交付之后', async () => {
+test('A14 在途任务直接满足本次刷新：不追发第二次，结算在交付之后', async () => {
   const resolvers: Array<(value: number) => void> = []
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({
@@ -195,19 +195,16 @@ test('A12/A14 在途任务不满足本次刷新：它结束后补一次后继请
   await settle()
   const refreshing = view.refresh()
   await settle()
+  assert.equal(calls, 1, '有请求就直接用它，不再发第二次')
 
   resolvers[0]?.(100)
   await settle()
-  assert.equal(view.last?.data, 100)
-  assert.equal(calls, 2, '在途任务不算「动作之后启动」，必须补一次后继请求')
-
-  resolvers[1]?.(200)
-  await settle()
+  assert.equal(resolvers.length, 1, '在途任务直接结算本次刷新，不追发后继请求')
   assert.deepEqual(await refreshing, { status: 'success' })
-  assert.equal(view.last?.data, 200)
+  assert.equal(view.last?.data, 100, '结算在交付之后：返回 success 时本页 display 已是这次结果')
 })
 
-test('A14 排队未启动的任务已经算「动作之后启动」，直接满足本次刷新', async () => {
+test('A14 排队未启动的任务同样直接满足本次刷新', async () => {
   const resolvers: Array<(value: number) => void> = []
   let calls = 0
   const source = defineRefresh<{ id: number }, number>({
@@ -351,7 +348,7 @@ test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', asyn
   core.setVisible(false)
 })
 
-test('A05 暂停只退订：已发起的刷新要求继续等结果，实例不因暂停而释放', async () => {
+test('A05 暂停只退订：已发起的刷新要求继续等当前请求的结果，实例不因暂停而释放', async () => {
   const resolvers: Array<(value: number) => void> = []
   const source = defineRefresh<{ id: number }, number>({
     load: () => new Promise<number>(resolve => resolvers.push(resolve)),
@@ -369,12 +366,10 @@ test('A05 暂停只退订：已发起的刷新要求继续等结果，实例不�
   assert.equal(view.handle.subscription, null, '暂停即退订')
   assert.equal(core.snapshot().resources.length, 1, '刷新要求还没结算，实例不释放、在途不取消')
 
-  // 在途任务不算「动作之后启动」：它结束后照常补一次后继请求——暂停不影响已发起的要求。
-  resolvers[0]?.(1)
+  // 暂停不结算已发起的刷新要求：它由当前这个请求的结果结算，既不另发一次也不必等下个周期。
+  resolvers[0]?.(7)
   await settle()
-  assert.equal(resolvers.length, 2, '暂停期间后继请求照常发出')
-  resolvers[1]?.(7)
-  await settle()
+  assert.equal(resolvers.length, 1, '暂停期间不追发请求，本次刷新用现有这一次')
   assert.deepEqual(await refreshing, { status: 'success' })
   assert.equal(view.last?.data, 7, '暂停页仍然拿到这次结果')
   assert.equal(core.snapshot().resources.length, 0, '要求结算后没有需求，才释放实例')
@@ -402,7 +397,7 @@ test('A13 共享请求失败：保留旧画面、通知页面、下个周期继�
   assert.equal(view.handle.subscription?.resource.subscribers.size, 1, '需求与开启意愿都保留')
 })
 
-test('A13/A14 失败结算该实例全部未完成的刷新要求（不为更高的下限保留后继）', async () => {
+test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重试', async () => {
   const resolvers: Array<(value: number) => void> = []
   const rejecters: Array<(reason: unknown) => void> = []
   const source = defineRefresh<{ id: number }, number>({
