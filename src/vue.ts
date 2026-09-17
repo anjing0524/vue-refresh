@@ -98,7 +98,7 @@ export function useRefresh<P extends object, T>(
   }
 }
 
-/** 创建应用级协调者：注册可见性监听与卸载释放；SSR 下不发请求。 */
+/** 创建应用级协调者：注册可见性监听与卸载释放。**需要浏览器环境**（本库只服务 SPA）。 */
 /** 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限（显式刷新与自动刷新共用这些槽位）。 */
 export function createRefreshManager(options: { readonly maxConcurrent: number }): RefreshManager {
   if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
@@ -128,9 +128,10 @@ export function createRefreshManager(options: { readonly maxConcurrent: number }
       app.onUnmount(() => core.dispose())
     },
 
-    readSnapshot(source, args) {
+    readSnapshot<P extends object, T>(source: RefreshSource<P, T>, args: P): ReadonlySnapshot<T> | undefined {
       // 只计算参数键并直读实例；不准备参数、不校验、不创建实例。
-      return core.readSnapshot(source, args) as ReadonlySnapshot<never> | undefined
+      // 断言是诚实的：核心返回的是该来源 `load` 结果的独立副本，编译期无法证明它就是 `T`。
+      return core.readSnapshot(source, args) as ReadonlySnapshot<T> | undefined
     },
 
     dispose: () => core.dispose(),

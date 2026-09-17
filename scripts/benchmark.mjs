@@ -3,7 +3,7 @@
 // 框架自身的可测代理量——共享收敛、真实在途峰值、事件循环延迟、释放后残留。
 //
 // 边界，先说清楚：
-// - 只走公开入口（`createRefreshManager` + `useRefresh`）与真实 Vue/Pinia；`load` 只让出一个
+// - 只走公开入口（`createRefreshManager` + `useRefresh`）与真实 Vue；`load` 只让出一个
 //   微任务，因此**不含浏览器渲染、真实网络与真实业务数据**。真实流量口径由接入方实测（§5 G04）。
 // - 堆增量未强制 GC，只是粗代理；事件循环延迟由 `monitorEventLoopDelay` 给出。
 // - **不设性能阈值**。脚本只在契约被破坏时以非零码退出：真实在途峰值超过 `maxConcurrent`，
@@ -12,7 +12,10 @@
 // 用法：node scripts/benchmark.mjs [--duration 2000] [--subscriptions 24] [--identities 8]
 //                                [--every 25] [--runs 3]
 import { monitorEventLoopDelay } from 'node:perf_hooks'
-import { createRenderer, defineComponent, h, onMounted } from 'vue'
+
+// 最小浏览器环境：install 会注册可见性监听（本库只服务 SPA）。
+globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} }
+import { createRenderer, defineComponent, h, onMounted, ref } from 'vue'
 import { createRefreshManager, currentCore } from '../src/vue.ts'
 import { defineRefresh } from '../src/source.ts'
 import { useRefresh } from '../src/vue.ts'
@@ -77,10 +80,10 @@ async function measure() {
     props: { identity: { type: Number, required: true } },
     setup(props) {
       core = currentCore()
-      // Node 没有 `document`，安装时会按 SSR 处理为不可见；这里显式声明可见，
+      // 本库只服务 SPA：Node 里跑基准要先给出最小浏览器环境，再显式声明可见，
       // 与 tests/vue.test.ts 的做法一致（自定义渲染器不冒充浏览器可见性测试）。
       core.setVisible(true)
-      const task = useRefresh(source, { enabled: true, every, onError: () => { failures += 1 } })
+      const task = useRefresh(source, { enabled: ref(true), every: ref(every), onError: () => { failures += 1 } })
       onMounted(() => task.submit({ symbol: `S${props.identity}` }))
       return () => h('span', String(task.display.value?.data.price ?? ''))
     },

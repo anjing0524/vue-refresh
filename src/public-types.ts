@@ -110,6 +110,7 @@ export interface RefreshHandle<P extends object, T> {
 
 /** 应用级协调者：安装、只读快照与销毁。 */
 export interface RefreshManager {
+  /** 安装到应用：注册可见性监听并在卸载时释放。**需要浏览器环境**（本库只服务 SPA）。 */
   install(app: App): void
   /**
    * 按参数值定位共享结果并返回独立副本；不创建实例、不延长生存期，无结果返回 `undefined`。

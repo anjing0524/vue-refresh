@@ -6,7 +6,7 @@ import { defineRefresh } from '../src/source.ts'
 import type { RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
 import type { Ref } from 'vue'
 
-/** 这几个用例验证浏览器路径：`install` 靠 `typeof document` 区分 SSR，因此先提供最小替身。 */
+/** 这几个用例验证浏览器路径：`install` 无条件注册可见性监听（本库只服务 SPA），因此先提供最小替身。 */
 Object.defineProperty(globalThis, 'document', {
   configurable: true,
   value: { hidden: false, addEventListener() {}, removeEventListener() {} },
