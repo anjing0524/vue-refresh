@@ -322,10 +322,10 @@ for (const form of new Set(allForms)) {
   check(count === 1, '统一刷新管理.md §0', `vocabulary form "${form}" is registered ${count} times`)
 }
 // Field names owned by DESIGN §3.3. Add one here when that table gains a persistent field; leaving it
-// out would only weaken (c), never fail it.
+// out would only weaken (c), never fail it. `active` was missing until 2026-09-17 (ADR-50).
 const INTERNAL_FIELDS = ['parameters', 'subscription', 'subscribers', 'waiters',
   'settledAt', 'entry', 'task', 'controller', 'wakeup', 'flushing', 'cleanup', 'disposed',
-  'visible', 'buckets', 'handles', 'queue', 'running', 'reported', 'snapshot', 'settle']
+  'visible', 'buckets', 'handles', 'queue', 'running', 'reported', 'snapshot', 'settle', 'active']
 for (const field of INTERNAL_FIELDS) {
   check(!vocabulary.includes(field), '统一刷新管理.md §0',
     `§0 states outward meaning only, but names the internal field ${field} (DESIGN §3.3)`)
