@@ -153,18 +153,15 @@ export class Resource {
   }
 
   /**
-   * 成功结算：记下结算时刻，并标上「这一轮的结果已经产出」。
+   * 结算一次执行：记下结算时刻，并标上「这一轮的结果已经产出」。
+   *
+   * **成功与失败都走它**（失败也算结算，因此不自动重试——A13）：两者的区别只在核心写结果表的哪个
+   * 动作，实例侧没有任何差别，所以这里只有一个方法。
    *
    * 必须在写表**之前**调用：写表会同步触发页面代码（例如 `flush: 'sync'` 的 watcher），它可能当场
    * `refresh()`——有了这个标记，核心才知道那一刻点的是**下一轮**（DESIGN §3.9 第一条）。
    */
   settle(at: number): void {
-    this.settledAt = at
-    this.produced = true
-  }
-
-  /** 失败结算：与 `settle` 同形（失败也算结算，因此不自动重试——A13）；失败记录由核心写。 */
-  fail(at: number): void {
     this.settledAt = at
     this.produced = true
   }
@@ -259,7 +256,8 @@ export class RefreshCore {
   /**
    * 声明或更新身份；相同身份幂等。
    *
-   * **参数先由适配层准备好再交进来**——复制、值域检查、身份键编码与 `validate` 都在提交边界完成（ADR-64）。
+   * **参数先由适配层准备好再交进来**——复制、值域检查与身份键编码都在提交边界完成，框架不跑任何
+   * 调用方回调（ADR-64、ADR-74）。
    * 换身份＝把这份配置从旧实例的 `declarers` 里摘掉、挂到新实例上；旧实例若因此没人要了就地回收。
    */
   submit(config: Config, url: string, parameters: Parameters): SubmitResult {
@@ -426,11 +424,6 @@ export class RefreshCore {
     if (position !== 'queued' && position !== 'running') resource.controller = null
   }
 
-  /** 登记一次后台执行；全部调用点都先确认没有当前执行，因此不替换、不 abort 在途。 */
-  private enqueue(resource: Resource): void {
-    this.place(resource, 'queued')
-  }
-
   /**
    * 插到队头：手动刷新是一次「人正等着」的取数，应当排在周期取数前面。
    *
@@ -477,29 +470,21 @@ export class RefreshCore {
       const data = copyResult(response.data)
       if (!resource.isCurrent(controller)) return
       const at = Date.now()
+      // 先记结算时刻（上面那条同步重入靠它区分「这一轮」与「下一轮」），再写这一格。
       resource.settle(at)
-      this.writeResult(resource, data, at)
+      this.sink.write(resource.url, resource.parameters.key, data, at)
     } catch (error) {
       if (!resource.isCurrent(controller)) return
       const at = Date.now()
-      resource.fail(at)
-      this.writeFailure(resource, error, at)
+      // 失败也是这一轮的结算，只是写的是同一格的另一对字段（`sink.fail` 保留已有数据与时间）。
+      resource.settle(at)
+      this.sink.fail(resource.url, resource.parameters.key, error, at)
     } finally {
       this.place(resource, 'idle')
       resource.produced = false
       this.refill(resource)
       this.flushSoon()
     }
-  }
-
-  /** 把一次成功写进结果表（表在 `sink` 手上，实例不碰它）。 */
-  private writeResult(resource: Resource, data: unknown, updatedAt: number): void {
-    this.sink.write(resource.url, resource.parameters.key, data, updatedAt)
-  }
-
-  /** 把一次失败写进结果表同一格（数据保留）。与 `writeResult` 对称。 */
-  private writeFailure(resource: Resource, error: unknown, failedAt: number): void {
-    this.sink.fail(resource.url, resource.parameters.key, error, failedAt)
   }
 
   // ══════════════════════════ 调度 ══════════════════════════
@@ -529,7 +514,8 @@ export class RefreshCore {
       if (resource.hasExecution()) continue
       const due = resource.dueAt(now, this.visible)
       // `Infinity` ＝ 这个身份没有有资格的声明者：不取数，也不参与唤醒时刻。
-      if (due <= now) this.enqueue(resource)
+      // 这里已经跳过有当前执行的实例，所以入队只可能是「从没有执行到在队」，不替换、也不 abort 在途。
+      if (due <= now) this.place(resource, 'queued')
       else next = Math.min(next, due)
     }
     return next

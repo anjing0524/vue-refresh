@@ -26,8 +26,8 @@ const QuoteCard = defineComponent({
       // 频率是响应式输入：改动它就走配置变化路径，由框架替换当前任务。
       every: computed(() => props.every),
     })
-    // 失败不再由框架推送：交付面上出现**新的失败对象**就计一次。默认 flush 是 pre 且首次不触发；
-    // 每次失败都是一个新对象（成功会把 failure 清成 null），所以按引用变化计数即可。
+    // 失败不再由框架推送：交付面上出现**新的失败时刻**就计一次。默认 flush 是 pre 且首次不触发；
+    // 成功会把失败位清回 `null`，所以只在非空的一笔上计数即可。
     watch(() => task.display.value?.failedAt, failedAt => {
       if (failedAt === null) return
       failures.value += 1

@@ -43,7 +43,7 @@ export const QueryListPage = defineComponent({
       every: ref(1_500),
     })
     // 框架只把失败写进交付面、从不写 enabled；「失败关闭」是页面从交付面读到新失败后的自己的决定。
-    // 默认 flush 是 pre 且首次不触发；成功会把 failure 清成 null，所以只认非空的新对象。
+    // 默认 flush 是 pre 且首次不触发；成功会把失败位清回 null，所以只在非空的一笔上计数。
     watch(() => task.display.value?.failedAt, failedAt => {
       if (failedAt === null) return
       enabled.value = false
@@ -73,7 +73,7 @@ export const QueryListPage = defineComponent({
       h('label', { class: 'field' }, [label, input() as never])
 
     return () => {
-      // 首查就失败时 display 不是 null，而是 `data: null, failure: {...}`：空态按 data／updatedAt 判。
+      // 首查就失败时 display 不是 null，而是 `data: null` ＋ `failedAt` 有值：空态按 data 判。
       const data = task.display.value?.data ?? null
       const updatedAt = task.display.value?.updatedAt ?? null
       const rows = data?.rows ?? []

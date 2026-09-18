@@ -20,22 +20,25 @@ import type {
  * 本库是 SPA 单例，组件适配不经过 `provide` / `inject`（ADR-37，见 DESIGN §6.3）。
  */
 
-/** 当前生效的协调者；`install` 写入，已销毁时可被下一个实例替换（HMR、会话切换）。 */
-let current: RefreshCore | null = null
-
-/** 当前生效的结果表（与协调者同源）；读的一侧从这里取，写的一侧由内核的 sink 写入。 */
-let currentStore: ReturnType<typeof useRefreshStore> | null = null
+/**
+ * 当前安装的协调者与它的结果表。**两者同源**——`install` 一起写入，因此只有一个绑定：分成两个
+ * 变量就要额外维护「它们指着同一个实例」这条不变量。
+ *
+ * 已销毁时**不置空**：`useRefresh` 与 `currentCore()` 都靠它读到「已销毁」这个事实（HMR、会话
+ * 切换时就地替换），也因此不必再有一份「当前是谁」的名册。
+ */
+let installed: { readonly core: RefreshCore; readonly store: ReturnType<typeof useRefreshStore> } | null = null
 
 /** 读当前生效的协调者；给演示面板与基准脚本用，不在包导出面里。 */
 export function currentCore(): RefreshCore | null {
-  return current
+  return installed?.core ?? null
 }
 
 /**
  * 读这一页的两个 `Ref` ＋ 生命周期，作为 watch 的取值函数；任一项读不出或抛错都回 `[undefined, undefined, active]`
  * （为什么读不出不猜成关闭见 DESIGN §6.1）。返回数组只为让 watch 拿到一份可比较的值，不做别的用。
  */
-function readConfig(options: RefreshOptions, active: boolean): readonly [unknown, unknown, boolean] {
+function readConfig(options: RefreshOptions, active: boolean): readonly [enabled: unknown, every: unknown, active: boolean] {
   try {
     return [options.enabled.value, options.every.value, active]
   } catch {
@@ -50,8 +53,8 @@ function readConfig(options: RefreshOptions, active: boolean): readonly [unknown
  * 全靠「中间不调用任何会回到框架的东西」。非法时只翻 `every`——`isPresent` 先看它，
  * 因此 `enabled`／`active` 的旧值在非法期间不会被信任。
  */
-function applyConfig(target: Config, read: readonly [unknown, unknown, boolean]): void {
-  const [enabled, every, active] = read
+function applyConfig(target: Config, values: readonly [enabled: unknown, every: unknown, active: boolean]): void {
+  const [enabled, every, active] = values
   if (typeof enabled !== 'boolean' || typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) {
     target.every = null
     return
@@ -72,10 +75,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
 ): RefreshHandle<P, T> {
   if (url.length === 0) throw new TypeError('useRefresh 需要一个非空的 URL：它是身份的一半')
   if (!getCurrentInstance()) throw new Error('useRefresh 必须在组件的 setup 中同步调用')
-  if (!current || current.isDisposed()) throw new Error('需要先安装一个存活的刷新协调者')
-  const core = current
-  const store = currentStore
-  if (!store) throw new Error('需要先安装一个存活的刷新协调者')
+  if (!installed || installed.core.isDisposed()) throw new Error('需要先安装一个存活的刷新协调者')
+  const { core, store } = installed
 
   /**
    * 这一页在核心里的**全部内容**：一页一份配置快照，原地改写，按身份挂在实例的 `declarers` 里。
@@ -99,10 +100,10 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   /**
    * 本页看到的画面：**由写入事件驱动、按本页 `every` 节流抄来的一份副本**。
    *
-   * - **读者才跟随**：这一页有资格（`core.isEligible`），或它**点过一次刷新、还没看到那一拍**（`pending`）
+   * - **读者才跟随**：这一页有资格（`core.isEligible`），或它**还没有读取时间**（`lastReadAt === null`）
    *   且此刻浏览器可见时抄；失活、隐藏、卸载中都不是读者，画面**冻结在最后一帧**。暂停页自己 `refresh()`
-   *   那一次由 `pending` 放行，而且那一次不等节流，所以照样更新画面（A05、G6）；**没点过刷新的暂停页
-   *   什么都不抄**——包括它从未上过屏时到达的第一份结果（真 Chrome 的 A11 用例钉住了）。
+   *   那一次由第二项放行，而且那一次不等节流，所以照样更新画面（A05、G6）；**还没读到过的暂停页**会跟着
+   *   第一份到达的数据上屏一次，此后它有了上次读取时间就冻住（真 Chrome 的 A11 用例钉住了这一帧，ADR-72）。
    * - **按 `updatedAt` 时间差节流**：新格的 `updatedAt` 距展示中那份满一个本页 `every` 才换画面——
    *   慢页面主动要的就是「不跟着快页面跳」。写端稀于本页 `every` 时写入即抄（比固定拍更及时）；
    *   写端密且 `every` 非整数倍时实际更新周期被量化到写入网格（ADR-67 接受的代价）。
@@ -110,8 +111,9 @@ export function useRefresh<P extends JsonParameters<P>, T>(
    *   清掉——「没有读取时间就直接读」（所以它们不必再各带一个标志）。
    * - **没东西可抄时保留上一次画面**：条目随实例释放即删（A06 在结果表这一层不变），
    *   而页面上「刚才那份数据」不该因为没人订阅了就变空。
-   * - **先无条件读结果表**（在任何 `return` 之前）：否则这个副作用记不住对结果表的依赖，
-   *   之后的写入唤不醒它（浏览器用例抓到过这个真实缺陷）。
+   * - **必须先读结果表、再判任何闸门**：否则这个副作用记不住对那一格的依赖，之后的写入唤不醒它
+   *   （浏览器用例抓到过这个真实缺陷）。身份还没落定时没有格可读，直接返回——**不能拿一个假键去查表**，
+   *   结果表的 `read` 是「取或建」，假键会在里面留下一格永远不会有人写、也永远不会被删的垃圾。
    *
    * 依赖粒度：`store.read(url, key)` 现在返回的是那一个 cell ref 的 `.value`，副作用收在那一个 ref 上；
    * 写别的格不会唤醒这个副作用。**唤醒它的只有两件事：这一格被写入、这一页换了身份**（`identity`）——
@@ -129,9 +131,12 @@ export function useRefresh<P extends JsonParameters<P>, T>(
 
   watchEffect(() => {
     const key = identity.value
-    const cell = store.read(url, key ?? '')
+    // 身份还没落定：没有可抄的格，也没有依赖可登记——设 `identity` 的那一处会再叫醒这个副作用。
+    if (key === null) return
+    // 第一件事就是读那一格：这一次读同时登记依赖，写这一格才唤得醒这个副作用。
+    const cell = store.read(url, key)
     // 从来没有写过这一格：没有可抄的东西，画面停在上一帧（不发布空副本）。
-    if (key === null || cell === undefined) return
+    if (cell === undefined) return
     // 读闸门：有资格（声明着它、配置有效、开启、激活且浏览器可见），或**还没读取过**（第一次，或
     // 刚点过刷新）且此刻浏览器可见。第二项就是「没有读取时间就直接读」——它是暂停页自己点刷新那
     // 一次能上屏的唯一机制（A05、G6）。入口闸在点的那一刻已经判过环境，所以这里不补 `active`。
@@ -163,8 +168,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   // 唯一的配置写入口：两个 `Ref` ＋ 这一页的激活状态写进同一份槽，再让核心重算一次调度。
   // 非法配置不通知——它是本页自己的输入事实，页面读自己的 refs 就知道；框架只负责不取数、
   // 不刷新，修正后自动恢复（ADR-51）。`active` 也在依赖里，所以挂载/激活/失活只需改它。
-  const stopWatching = watch(() => readConfig(options, active.value), read => {
-    applyConfig(config, read)
+  const stopWatching = watch(() => readConfig(options, active.value), values => {
+    applyConfig(config, values)
     core.reconcile()
     // 重新成为读者（激活、开起来、修好配置）：把上次读取时间置 `null`，**下一份写入**因此不等窗口。
     // **失去资格那一侧（暂停、失活、隐藏）不动**——那一侧若也置 `null`，读闸门第二项就会把整个
@@ -174,16 +179,12 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     if (changed !== null && core.isEligible(config, url, changed)) lastReadAt = null
   }, { flush: 'sync', immediate: true })
 
-  // 拆卸由这一层自己做：核心不再持有任何回调配额，所以释放时是这里主动停表、再把它摘出名册。
-  if (core.isDisposed()) {
-    stopWatching()
-  }
-
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。
   // 只改 `active`：快照与协调由上面那个 `flush: 'sync'` 的 watcher 完成（单一写入口）。
   onMounted(() => { active.value = true })
   onActivated(() => { active.value = true })
   onDeactivated(() => { active.value = false })
+  // 拆卸由这一层自己做：核心不持有任何回调，所以释放时是这里主动停表、再把它摘出名册。
   onScopeDispose(() => {
     released = true
     stopWatching()
@@ -227,7 +228,7 @@ export function useRefresh<P extends JsonParameters<P>, T>(
 
 /**
  * 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限（显式刷新与自动刷新共用这些槽位）；
- * `axios` 是取数用的实例——框架按资源定义里的 URL 发 `post(url, 参数值, { signal })`，
+ * `axios` 是取数用的实例——框架对页面给的 URL 发 `post(url, 参数值的一份副本, { signal })`，
  * 所以你配好的 baseURL／拦截器／鉴权头都照旧生效；`pinia` 是你 `app.use()` 的那个实例，
  * 结果表挂在它上面（库不代装）；需要浏览器环境。
  */
@@ -240,31 +241,27 @@ export function createRefreshManager(options: {
     throw new TypeError('maxConcurrent 必须是正安全整数')
   }
   const store = useRefreshStore(options.pinia)
-  // 内核只经这四个动作碰结果表：成功写、失败写、释放删、观测列举。
-  const core = new RefreshCore(options.maxConcurrent, options.axios, {
-    write: (url, key, data, updatedAt) => { store.write(url, key, data, updatedAt) },
-    fail: (url, key, error, failedAt) => { store.fail(url, key, error, failedAt) },
-    remove: (url, key) => { store.remove(url, key) },
-    list: () => store.list(),
-  })
-  let installed: App | null = null
+  // 结果表**本身就是**核心要的那个端口：`write`／`fail`／`remove`／`list` 四个动作的签名一致，
+  // 所以直接把 store 交进去——多一层转发不改行为，只多一份要跟端口同步的签名。
+  const core = new RefreshCore(options.maxConcurrent, options.axios, store)
+  /** 这个协调者装到了哪个 App；同一个实例只能装一个。 */
+  let boundApp: App | null = null
   /** 摘掉可见性监听；装上过一次之后才有。核心不再持有任何回调，所以这由适配层自己收尾（ADR-64）。 */
   let stopWatchingVisibility: (() => void) | null = null
 
   return {
     /** 安装到应用：接上可见性监听与卸载释放；同一实例只能装到一个 App。 */
     install(app) {
-      if (core.isDisposed() || (installed !== null && installed !== app)) {
+      if (core.isDisposed() || (boundApp !== null && boundApp !== app)) {
         throw new Error('刷新协调者安装冲突：同一个实例不能安装到两个 App，已销毁的实例也不能再安装')
       }
-      if (installed === app) return // 同实例同 App 重复安装无副作用。
+      if (boundApp === app) return // 同实例同 App 重复安装无副作用。
       // 单例：现有协调者还活着就拒绝；已销毁（HMR、会话切换）就直接替换。
-      if (current !== null && !current.isDisposed() && current !== core) {
+      if (installed !== null && !installed.core.isDisposed() && installed.core !== core) {
         throw new Error('刷新协调者安装冲突：同一进程里已有一个存活的实例')
       }
-      current = core
-      currentStore = store
-      installed = app
+      installed = { core, store }
+      boundApp = app
 
       // 浏览器可见性由框架自己监听；本库是 SPA，不再有 SSR 分支。
       const onVisibilityChange = (): void => core.setVisible(!document.hidden)
