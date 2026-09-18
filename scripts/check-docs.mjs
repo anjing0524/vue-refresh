@@ -182,7 +182,7 @@ for (const prefix of OWNERSHIP) {
 //    the members of one layer are counted, so the distinction stays visible instead of silent.
 //    Layer numbers follow the README 「依赖方向单向」 line.
 const LAYERS = {
-  'public-types.ts': 0, 'source.ts': 1, 'core.ts': 2, 'vue.ts': 3, 'index.ts': 4,
+  'public-types.ts': 0, 'source.ts': 1, 'core.ts': 2, 'store.ts': 3, 'vue.ts': 4, 'index.ts': 5,
 }
 // The root-contract rewrite left no same-layer or upward runtime edge: every module only imports
 // from a lower layer, so the acknowledged list is empty on purpose (ADR-27).

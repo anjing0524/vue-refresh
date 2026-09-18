@@ -166,7 +166,7 @@ test('行情面板：无查询按钮、一次提交、响应式频率、显示�
   expect(resumed).toBeGreaterThan(0)
 })
 
-test('双组件共享：1s/5s 同参共享、单页暂停、重新进入交付已有结果、切换品种、全部退订、快照隔离', async ({ page, request }) => {
+test('双组件共享：1s/5s 同参共享、单页暂停后跟随共享结果、重新进入读回已有结果、切换品种、全部退订、结果共享', async ({ page, request }) => {
   await page.goto('/?page=shared-pair')
   await expect(page.getByTestId('page-shared-pair')).toBeVisible()
 
@@ -185,7 +185,8 @@ test('双组件共享：1s/5s 同参共享、单页暂停、重新进入交付�
   expect(inFlight.status).toBe('pending')
   await release(request, second)
   await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + second}.00`)
-  await expect(page.getByTestId('sp-price-甲')).toHaveText(`${100 + first}.00`)
+  // 暂停只表示「不由这一页驱动取数」：画面按已声明身份读共享结果表，所以暂停页也读到最新值（ADR-59）。
+  await expect(page.getByTestId('sp-price-甲')).toHaveText(`${100 + second}.00`)
 
   // 重新进入：卸载甲后乙仍持有实例；重新挂载把已有结果直接交付给新订阅，不强制新请求。
   await page.getByTestId('sp-unmount-a').click()
@@ -195,11 +196,12 @@ test('双组件共享：1s/5s 同参共享、单页暂停、重新进入交付�
   await expect(page.getByTestId('sp-request-甲')).toContainText(`来自请求 ${second} · DEMO`)
   expect((await state(request)).length).toBe(beforeReenter)
 
-  // 画面副本隔离：页面副本被篡改不影响另一页。
+  // 数据是**共享对象**（ADR-59）：篡改甲读到的 data 就是改结果表里那一份，所以两页**都读到 999**——
+  // 这一句由页面自己重算两份读出的值来证明（不是靠卡片重渲染：就地改普通对象不触发响应式更新，
+  // 卡片里已渲染的文字仍是旧值，这正是「要改自己复制」的代价）。
   await page.getByTestId('sp-mutate-a').click()
   await expect(page.getByTestId('sp-copies')).toContainText('甲 999.00')
-  await expect(page.getByTestId('sp-copies')).toContainText(`乙 ${100 + second}.00`)
-  await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + second}.00`)
+  await expect(page.getByTestId('sp-copies')).toContainText('乙 999.00')
 
   // 切换品种：新参数即新身份，两页一起换到新实例。
   await page.getByTestId('sp-symbol').selectOption('DEMO2')

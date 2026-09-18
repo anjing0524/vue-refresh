@@ -1,4 +1,5 @@
 import { createApp, defineComponent, h, KeepAlive, onMounted, ref } from 'vue'
+import { createPinia } from 'pinia'
 import type { Component } from 'vue'
 import { defineRefresh } from '../src/source'
 import type { RefreshHandle } from '../src/public-types'
@@ -176,7 +177,9 @@ function mountHarness(): void {
       h('p', { class: 'note' }, '固定业务参数接口 · 共享刷新与显式刷新 · 验证范围见运行记录。'),
     ]),
   })
-  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2, axios: http })
+  const pinia = createPinia()
+  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2, axios: http, pinia })
+  app.use(pinia)
   app.use(refresh)
   if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
   app.mount('#app')
@@ -193,9 +196,8 @@ function mountHarness(): void {
           const display = c.task.display.value
           return [name, display === null ? null : { ...structuredClone(display), manual: display.updatedAt >= (manualAt[name] ?? Infinity) }]
         })),
-        entries: Object.fromEntries(view.resources
-          .filter(resource => resource.entry !== null)
-          .map(resource => [resource.parameters.key, { data: resource.entry!.data as Quote }])),
+        entries: Object.fromEntries(view.results
+          .map(row => [row.key, { data: row.entry.data as Quote }])),
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,
         timer: view.scheduled, pending: view.flushing,
@@ -239,7 +241,8 @@ const VIEWS: Array<{ id: string; label: string; component: Component }> = [
  * 因此每个视图的共享事实只由它自己的组件决定。
  */
 function mountShell(): void {
-  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2, axios: demoHttp })
+  const pinia = createPinia()
+  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2, axios: demoHttp, pinia })
   const active = ref(params.get('page') ?? VIEWS[0]!.id)
   let core: RefreshCore | null = null
   const current = (): { id: string; label: string; component: Component } =>
@@ -262,6 +265,7 @@ function mountShell(): void {
     },
   })
   const app = createApp(Shell)
+  app.use(pinia)
   app.use(refresh)
   if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
   app.mount('#app')
@@ -271,7 +275,7 @@ function mountShell(): void {
       const view = core!.snapshot()
       return {
         resources: view.resources.length, handles: view.handles.length,
-        entries: view.resources.filter(resource => resource.entry !== null).length,
+        entries: view.results.length,
         running: view.running.length, queued: view.queued.length, scheduled: view.scheduled,
       }
     },

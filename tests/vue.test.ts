@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose, ref } from 'vue'
+import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import type { RefreshHttp } from '../src/core.ts'
 import { defineRefresh } from '../src/source.ts'
@@ -39,8 +40,9 @@ function fakeHttp(post: FakePost): RefreshHttp {
 }
 
 const managers: RefreshManager[] = []
+/** 每个用例一个 Pinia 实例：结果表挂在它上面，用例之间因此互不可见。 */
 function newManager(maxConcurrent: number, post: FakePost = async () => undefined): RefreshManager {
-  const manager = createRefreshManager({ maxConcurrent, axios: fakeHttp(post) })
+  const manager = createRefreshManager({ maxConcurrent, axios: fakeHttp(post), pinia: createPinia() })
   managers.push(manager)
   return manager
 }
@@ -66,7 +68,8 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
     setup() {
       api = useRefresh(quote, { enabled, every: ref(100_000) })
       onScopeDispose(() => { released++ })
-      return () => h('div')
+      // 真实组件会渲染画面；画面保留要成立，前提是页面确实显示过它。
+      return () => h('div', String(api.display.value?.data ?? ''))
     },
   }))
   app.use(manager)
@@ -82,6 +85,7 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
   enabled.value = false
   await tick()
   await tick()
+  // 【同 A05：最后一个需求退出即删结果 ⇒ 画面读回 null；keep-last 之前这条会红】
   assert.equal(api.display.value?.data, 42, '暂停保留画面')
   assert.equal(loads, 1, '暂停后不再取数')
 
@@ -136,7 +140,7 @@ test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接
   const app = renderer.createApp(defineComponent({
     setup() {
       api = useRefresh(quote, { enabled, every })
-      return () => h('div')
+      return () => h('div', String(api.display.value?.data ?? ''))
     },
   }))
   app.use(manager)
@@ -148,6 +152,7 @@ test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接
 
   enabled.value = false
   await tick()
+  // 【同 A05：最后一个需求退出即删结果 ⇒ 画面读回 null；keep-last 之前这条会红】
   assert.equal(api.display.value?.data, 7, '暂停保留画面')
   assert.equal(currentCore()?.snapshot().resources.length, 0, '失去最后一个需求即清实例')
 
@@ -167,7 +172,7 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
   const Inner = defineComponent({
     setup() {
       api = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
-      return () => h('div')
+      return () => h('div', String(api.display.value?.data ?? ''))
     },
   })
   const app = renderer.createApp(defineComponent({
@@ -185,6 +190,7 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
   shown.value = false
   await tick()
   await tick()
+  // 【同 A05：最后一个需求退出即删结果 ⇒ 画面读回 null；keep-last 之前这条会红】
   assert.equal(api.display.value?.data, 1, '失活保留画面')
   assert.equal(loads, 1, '失活后不再取数')
 

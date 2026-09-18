@@ -1,4 +1,4 @@
-import type { App, Ref, ShallowRef } from 'vue'
+import type { App, Ref } from 'vue'
 
 /**
  * 公共契约：本文件是正式 API 类型的唯一代码入口，与《统一刷新管理》「公共 API 契约」一节共同构成对外约定。
@@ -63,8 +63,13 @@ export interface RefreshOptions {
 
 /** 组件句柄：声明订阅、主动刷新并读取本页快照。 */
 export interface RefreshHandle<P extends object, T> {
-  /** 本页最近一次发布值；只读、整体替换，不做深响应式。 */
-  readonly display: Readonly<ShallowRef<RefreshDisplay<P, T> | null>>
+  /**
+   * 本页看到的画面：按已声明身份从结果表读出来的一个只读视图。
+   *
+   * `args` 每次读取都复制一份（它是身份键描述的那份值）；`data` 是结果表里**同一个对象**，
+   * 要改自己复制。实例被释放时读回 `null`。
+   */
+  readonly display: Readonly<Ref<RefreshDisplay<P, T> | null>>
   /** 声明或更新订阅身份；相同身份重复声明幂等，不隐含刷新。 */
   submit(args: P): SubmitResult
   /**

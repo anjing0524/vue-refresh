@@ -1,4 +1,4 @@
-import type { RefreshDisplay, RefreshSource, SubmitResult } from './public-types.ts'
+import type { RefreshSource, SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
 
 /**
@@ -16,7 +16,7 @@ export interface Config {
 
 /**
  * 组件需求句柄：三种角色挂在一个对象上，读之前先分清是哪一组——**组 A｜端口与配置**（`source` / `config` /
- * `publish` / `onError`）由适配层给、核心只读、**组 B｜状态**（`parameters` / `active`）由核心独占写入、
+ * `onError`）由适配层给、核心只读、**组 B｜状态**（`parameters` / `active`）由核心独占写入、
  * **组 C｜接驳**（`cleanup`）双向。完整所有权表见 DESIGN §3.3。
  *
  * 两件事不存字段：**是否已释放**是 `RefreshCore.handles` 的名册成员资格（DESIGN §3.7），
@@ -27,8 +27,6 @@ export interface Handle<P extends object = object, T = unknown> {
   readonly source: RefreshSource<object, unknown>
   /** 最近一次配置快照；适配层每读到新值就改写，核心只读。 */
   config: Config | null
-  /** 本页交付出口；唯一调用者是 `Resource.deliverTo`。为什么写成方法见 DESIGN §3.3。 */
-  publish(display: RefreshDisplay<P, T>): void
   readonly onError: (error: unknown) => unknown
   /** 适配层的释放回调；`removeHandle` 读一次、清空，然后调用它。 */
   cleanup: (() => void) | null
@@ -44,10 +42,29 @@ export interface Task {
   readonly controller: AbortController
 }
 
-/** 实例最近一次有效结果。 */
+/** 一次有效取数的结果；写进结果表后就当**不可变**用（整条替换，不就地改）。 */
 export interface Entry {
   readonly data: unknown
   readonly updatedAt: number
+}
+
+/** 结果表的一行。 */
+export interface ResultRow {
+  readonly url: string
+  readonly key: string
+  readonly entry: Entry
+}
+
+/**
+ * 结果表：**结果的唯一真值**，按「URL → 参数键」两级分组。
+ *
+ * 内核只经这三个动作碰它：成功时 `write`、实例释放时 `remove`、只读投影时 `list`。
+ * 适配层把它接到 Pinia（`src/store.ts`），因此 `core.ts` 仍然零运行时依赖。
+ */
+export interface ResultSink {
+  write(url: string, key: string, entry: Entry): void
+  remove(url: string, key: string): void
+  list(): readonly ResultRow[]
 }
 
 /**
@@ -65,7 +82,6 @@ export class Resource {
   readonly subscribers = new Set<Handle>()
   /** 仍想要一次取数的句柄（显式刷新登记的要求）。它是**标志**而不是队列：重复刷新同一个句柄只留一份。 */
   readonly waiters = new Set<Handle>()
-  entry: Entry | null = null
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
   settledAt: number | null = null
   task: Task | null = null
@@ -92,32 +108,18 @@ export class Resource {
     return this.settledAt === null ? now : this.settledAt + this.shortestEvery()
   }
 
-  /** 刚接入的句柄拿已有结果（不重复取数）；还没有结果就什么也不做，交给这一轮 `flush` 的到期遍历首查。 */
-  deliverLatest(handle: Handle): void {
-    if (this.entry) this.deliverTo(handle, this.entry)
-  }
-
-  /** 后台成功：收货方一次收齐（有效订阅 ∪ 本次要满足的刷新要求），同一句柄只交付一次。 */
-  publish(entry: Entry): void {
-    // 满足时刻先于交付：交付回调里看到的调度状态已经是「这一次已经结束」。
+  /**
+   * 成功结算：记结算时刻、把结果写进结果表（唯一真值），再满足这一批刷新要求。
+   *
+   * 这里**没有交付循环**：谁在读、读几次、读到的是哪一版，都由读的人在结果表上自己取（ADR-59）。
+   * 顺序固定：先落定结果，再结算要求——要求结算可能让实例当场释放，而释放会把结果删掉（A06）。
+   */
+  settle(entry: Entry): void {
     this.settledAt = Date.now()
-    this.entry = entry
-    // 这一批要满足的要求先定下来再交付：交付回调里重入登记的要求不在这一批里，只能由 `refill` 的后继请求满足。
+    // 这一批要满足的要求**先定下来再写结果**：写结果表会同步触发页面代码（例如 `flush: 'sync'` 的 watcher），
+    // 它可能当场 `refresh()`；那条新要求不在这一批里，只能由 `refill` 的后继请求满足（§3.9 第一条）。
     const satisfied = [...this.waiters]
-    const delivered = new Set<Handle>()
-    for (const handle of [...this.subscribers]) {
-      // 前一个接收者的回调可能已经改身份或退订，因此每个交付点重新复核归属。
-      if (!this.subscribers.has(handle)) continue
-      delivered.add(handle)
-      this.deliverTo(handle, entry)
-    }
-    for (const handle of satisfied) {
-      if (delivered.has(handle)) continue
-      // 与订阅者同口径的复核：交付回调可能已经撤销这个句柄的要求（换身份、失活、卸载）。
-      if (!this.waiters.has(handle)) continue
-      this.deliverTo(handle, entry)
-    }
-    // 满足在交付之后：交付回调里重入登记的要求留给 `refill`，不会被这一批清掉。
+    this.core.writeResult(this, entry)
     for (const handle of satisfied) this.clearRequest(handle)
   }
 
@@ -149,14 +151,6 @@ export class Resource {
     this.core.enqueue(this)
   }
 
-  /** 交付一份独立副本：数据与参数同口径，两者都各复制一份（ADR-52）。 */
-  private deliverTo(handle: Handle, entry: Entry): void {
-    isolate(() => handle.publish({
-      args: structuredClone(this.parameters.args),
-      data: structuredClone(entry.data),
-      updatedAt: entry.updatedAt,
-    }))
-  }
 }
 
 /** 框架侧单次取数的上限（毫秒）：从真正开始执行起算，排队等待不计入（数值与依据见 ADR-20）。 */
@@ -196,6 +190,8 @@ export class RefreshCore {
   private readonly maxConcurrent: number
   /** 取数用的 axios 实例；内核只调它的 `post`，因此 core.ts 仍然零运行时依赖。 */
   private readonly http: RefreshHttp
+  /** 结果表：结果的唯一真值，适配层接在 Pinia 上（`src/store.ts`）。 */
+  private readonly sink: ResultSink
   /** URL → 参数键 → 实例。 */
   private readonly buckets = new Map<string, Map<string, Resource>>()
   /** 全部页面句柄；可见性变化时按它们重新协调。 */
@@ -213,9 +209,10 @@ export class RefreshCore {
   private cleanup: (() => void) | null = null
   private disposed = false
 
-  constructor(maxConcurrent: number, http: RefreshHttp) {
+  constructor(maxConcurrent: number, http: RefreshHttp, sink: ResultSink) {
     this.maxConcurrent = maxConcurrent
     this.http = http
+    this.sink = sink
   }
 
   // ══════════════════════════ 状态观测与生命周期 ══════════════════════════
@@ -333,6 +330,7 @@ export class RefreshCore {
   snapshot(): {
     handles: readonly Handle[]
     resources: readonly Resource[]
+    results: readonly ResultRow[]
     queued: readonly Task[]
     running: readonly Task[]
     scheduled: boolean
@@ -345,6 +343,7 @@ export class RefreshCore {
     return {
       handles: [...this.handles],
       resources,
+      results: this.sink.list(),
       queued: [...this.queue],
       running: [...this.running],
       scheduled: this.wakeup !== null,
@@ -394,7 +393,6 @@ export class RefreshCore {
     // 外发给每个消费者（`validate`／每轮请求体／每个接收者的 `display`）时各复制一份（ADR-52）。
     handle.parameters = target.parameters
     target.subscribers.add(handle)
-    target.deliverLatest(handle)
   }
 
   /** 按「URL ＋ 完整参数值稳定键」查找，没有就建立实例。 */
@@ -436,12 +434,18 @@ export class RefreshCore {
     if (bucket?.size === 0) this.buckets.delete(resource.source.name)
 
     const task = resource.task
-    resource.entry = null
+    // 结果随实例释放即删：结果表里没有「没人要的」条目，读的人也就不会读到过期数据。
+    this.sink.remove(resource.source.name, resource.parameters.key)
     if (task) {
       // 在跑的那次不能当场交还槽位：它仍占着并发账本，必须等迟到的结束自己交还（`detached`）。
       this.placeTask(task, this.running.has(task) ? 'detached' : 'settled')
       task.controller.abort()
     }
+  }
+
+  /** 把一次成功写进结果表。**实例入口**：结果住结果表，实例只在成功这一刻与它打交道。 */
+  writeResult(resource: Resource, entry: Entry): void {
+    this.sink.write(resource.source.name, resource.parameters.key, entry)
   }
 
   // ══════════════════════════ 后台执行 ══════════════════════════
@@ -485,7 +489,7 @@ export class RefreshCore {
       if (resource.task !== task) return
       const entry: Entry = { data: copyResult(response.data), updatedAt: Date.now() }
       if (resource.task !== task) return
-      resource.publish(entry)
+      resource.settle(entry)
     } catch (error) {
       if (resource.task === task) resource.fail(error)
     } finally {

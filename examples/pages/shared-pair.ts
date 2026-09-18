@@ -1,9 +1,9 @@
 /**
  * 代表页面 3 · 双组件共享（附「无启停按钮」的 B09 组合，单独成视图）。
  *
- * 展示：1s/5s 同参共享、切换品种、单页暂停、全部退订、重新进入、Store 快照隔离。
+ * 展示：1s/5s 同参共享、切换品种、单页暂停（只停驱动、画面仍读共享结果）、全部退订、重新进入、结果共享。
  * 「暂停本页」演示改 "enabled.value"：两项配置都是 Ref，改值即改配置。
- * 页面不判断共享：两份快照显示同一个请求号，就是框架把一次 load 交付给了两个订阅。
+ * 页面不判断共享：两份画面显示同一个请求号，就是两个订阅读到了同一份共享结果。
  */
 import { computed, defineComponent, h, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRefresh } from '../../src/vue'
@@ -84,7 +84,7 @@ export const SharedPairPage = defineComponent({
 
     return () => h('section', { class: 'page', 'data-testid': 'page-shared-pair' }, [
       h('h2', '双组件共享'),
-      h('p', { class: 'intro' }, '两个组件同参、频率不同（1 秒 / 5 秒）；共享时取最小间隔，一次 load 交付给两个订阅。暂停一页不影响另一页；全部退订后实例与分区一起消失。'),
+      h('p', { class: 'intro' }, '两个组件同参、频率不同（1 秒 / 5 秒）；共享时取最小间隔，一次取数的结果写进同一张结果表。暂停只停「由这一页驱动取数」，画面仍然读共享值；全部退订后实例与结果表条目一起消失。'),
       h('div', { class: 'actions' }, [
         h('label', { class: 'field' }, ['品种', h('select', {
           'data-testid': 'sp-symbol', value: symbol.value,
@@ -102,14 +102,14 @@ export const SharedPairPage = defineComponent({
           onClick: () => {
             const display = entries.value['甲']?.task.display.value
             if (!display) return
-            // 故意绕过 readonly，验证运行期所有权：页面副本与共享分区之间没有别名。
+            // 故意绕过 readonly，验证运行期所有权：结果是共享对象，改了它同身份的读者一起变（ADR-59）。
             ;(display.data as unknown as QuoteResult).quote.price = 999
             revision.value += 1
           },
-        }, '篡改甲的画面副本'),
+        }, '篡改甲的 data（共享对象）'),
       ]),
       h('p', { 'data-testid': 'sp-pair-state' }, state()),
-      h('p', { 'data-testid': 'sp-copies' }, `画面副本对照（第 ${revision.value} 次篡改后）：甲 ${copyPrice('甲')} ｜ 乙 ${copyPrice('乙')}`),
+      h('p', { 'data-testid': 'sp-copies' }, `共享结果对照（第 ${revision.value} 次篡改后）：甲 ${copyPrice('甲')} ｜ 乙 ${copyPrice('乙')}`),
       h('div', { class: 'cards' }, [
         showA.value
           ? h(PairCard, { key: '甲', label: '甲', symbol: symbol.value, every: 1_000, onReady: register, onGone: forget })

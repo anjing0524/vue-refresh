@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, mock, test } from 'node:test'
 import { RefreshCore } from '../src/core.ts'
-import type { Config, Handle, Resource } from '../src/core.ts'
+import type { Config, Entry, Handle, Resource, ResultRow, ResultSink } from '../src/core.ts'
 import { defineRefresh, prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
 import type { RefreshDisplay, RefreshSource, SubmitResult } from '../src/public-types.ts'
@@ -10,31 +10,75 @@ import type { RefreshDisplay, RefreshSource, SubmitResult } from '../src/public-
 const cores: RefreshCore[] = []
 
 /**
+ * 结果表替身：与 Pinia store 同形（整条替换、随实例释放即删），并记录写入次序供断言。
+ * `onWrite` 让用例模拟「写结果的那一刻页面代码同步重入」——旧契约里交付回调所在的位置。
+ */
+function newTable() {
+  const entries = new Map<string, Entry>()
+  const writes: Array<{ url: string; key: string; entry: Entry }> = []
+  const id = (url: string, key: string): string => `${url}\u0000${key}`
+  const table = {
+    sink: {
+      write(url: string, key: string, entry: Entry): void {
+        entries.set(id(url, key), entry)
+        writes.push({ url, key, entry })
+        table.onWrite?.()
+      },
+      remove(url: string, key: string): void { entries.delete(id(url, key)) },
+      list(): readonly ResultRow[] {
+        return [...entries].map(([raw, entry]) => {
+          const [url = '', key = ''] = raw.split('\u0000')
+          return { url, key, entry }
+        })
+      },
+    } satisfies ResultSink,
+    writes,
+    onWrite: null as (() => void) | null,
+    read(url: string, key: string): Entry | undefined { return entries.get(id(url, key)) },
+  }
+  return table
+}
+
+/** 每个核心一张结果表：`newCore` 建表并登记，`page()` 从这里取，因此调用点不用改。 */
+const tables = new WeakMap<RefreshCore, ReturnType<typeof newTable>>()
+
+/**
  * 每个用例一个假传输：返回值就是这次取数的结果（框架只取它的 `data`）。
  * 旧契约里写在定义上的 `load` 原样搬到这里——框架自己发 `post(url, 参数值的克隆, { signal })`。
  */
 type FakePost = (url: string, body: object, context: { readonly signal: AbortSignal }) => Promise<unknown>
 function newCore(maxConcurrent: number, post: FakePost = async () => undefined): RefreshCore {
+  const table = newTable()
   const core = new RefreshCore(maxConcurrent, {
     // 显式标注参数：`RefreshHttp.post` 的第二个参数是 `unknown`，这里要收窄回假传输的 `object`。
     post: async (url: string, body: object, context: { readonly signal: AbortSignal }) => ({
       data: await post(url, body, context),
     }),
-  })
+  }, table.sink)
+  tables.set(core, table)
   cores.push(core)
   return core
 }
+
+/** 取本核心的结果表；只有经 `newCore` 建立的核心才有。 */
+function tableOf(core: RefreshCore): ReturnType<typeof newTable> {
+  const table = tables.get(core)
+  assert.ok(table, '核心必须先经 newCore 建立结果表')
+  return table
+}
+
 afterEach(() => {
   for (const core of cores.splice(0)) core.dispose()
   mock.timers.reset()
 })
 
-/** 一页：句柄 ＋ 交付记录 ＋ 错误记录。与集成测试同一口径，直接驱动核心。 */
+/** 一页：句柄 ＋ 错误记录。与集成测试同一口径，直接驱动核心；画面按身份从结果表现读。 */
 interface Page {
   readonly handle: Handle
-  readonly published: RefreshDisplay<object, unknown>[]
   readonly errors: unknown[]
   readonly last: RefreshDisplay<object, unknown> | undefined
+  /** 本页**当前身份**被写进结果表几次（旧契约里的「交付次数」）；没有身份时为 0。 */
+  writes(): number
   submit(args: object): SubmitResult
   refresh(): void
   set(config: Config | null): void
@@ -44,14 +88,13 @@ function page(
   core: RefreshCore,
   source: RefreshSource<object, unknown>,
   config: Config | null = { enabled: true, every: 100_000 },
-  hooks: { publish?: (value: RefreshDisplay<object, unknown>) => void; onError?: (error: unknown) => unknown } = {},
+  hooks: { onError?: (error: unknown) => unknown } = {},
 ): Page {
-  const published: RefreshDisplay<object, unknown>[] = []
+  const table = tableOf(core)
   const errors: unknown[] = []
   const handle: Handle = {
     source,
     config,
-    publish: value => { if (hooks.publish) hooks.publish(value); else published.push(value) },
     onError: error => { if (hooks.onError) return hooks.onError(error); errors.push(error) },
     cleanup: null,
     parameters: null,
@@ -61,12 +104,23 @@ function page(
   core.activate(handle)
   return {
     handle,
-    published,
     errors,
+    writes(): number {
+      const parameters = handle.parameters
+      if (parameters === null) return 0
+      return table.writes.filter(write => write.url === handle.source.name && write.key === parameters.key).length
+    },
     submit: args => core.submit(handle, (): Parameters => prepareParameters(args, source)),
     refresh: () => core.refresh(handle),
     set(next) { handle.config = next; core.reconcile(handle) },
-    get last() { return published.at(-1) },
+    get last() {
+      const parameters = handle.parameters
+      if (parameters === null) return undefined
+      const entry = table.read(handle.source.name, parameters.key)
+      if (!entry) return undefined
+      // `display` 的形状：`args` 每次读取复制一份（身份键所描述的那份值），`data` 是结果表里同一个对象。
+      return { args: structuredClone(parameters.args), data: entry.data, updatedAt: entry.updatedAt }
+    },
   }
 }
 
@@ -92,7 +146,7 @@ const micro = async (rounds = 8): Promise<void> => {
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
-test('A01/A11 首次订阅立即取一次，并按整体发布交付参数、数据、来源与时间', async () => {
+test('A01/A11 首次订阅立即取一次，结果按 args／data／时间整体读出', async () => {
   const source = defineRefresh<{ symbol: string }, number>('/api/core/84')
   const core = newCore(2, async () => 7)
   const quote = source
@@ -101,7 +155,7 @@ test('A01/A11 首次订阅立即取一次，并按整体发布交付参数、数
   assert.equal(view.submit({ symbol: 'A' }).status, 'accepted')
   await settle()
 
-  assert.equal(view.published.length, 1)
+  assert.equal(view.writes(), 1)
   assert.deepEqual(view.last?.args, { symbol: 'A' })
   assert.equal(view.last?.data, 7)
   assert.equal(typeof view.last?.updatedAt, 'number')
@@ -120,13 +174,13 @@ test('A11/A02 同参数的两个组件共享同一次请求，各自拿到独立
   await settle()
 
   assert.equal(calls, 1)
-  assert.equal(first.published.length, 1)
-  assert.equal(second.published.length, 1)
+  assert.equal(first.writes(), 1)
+  assert.equal(second.writes(), 1)
 
-  // 改自己拿到的副本不影响共享实例，也不影响别人。
+  // 数据是共享对象：要改自己复制（ADR-59）。改到的就是结果表里那一份，所以另一个读者也看得到。
   const copy = first.last?.data as { list: number[] }
   copy.list.push(99)
-  assert.deepEqual(second.last?.data, { list: [1, 2] })
+  assert.deepEqual(second.last?.data, { list: [1, 2, 99] })
 })
 
 test('A02 身份是「URL ＋ 完整参数值」：字段顺序无关，数组顺序有关，不同参数各取一次', async () => {
@@ -148,7 +202,7 @@ test('A02 身份是「URL ＋ 完整参数值」：字段顺序无关，数组�
   assert.equal(calls, 2, '数组顺序影响身份')
 })
 
-test('A20 同一个 URL 在两处各声明一份定义仍然合并：只发一次取数，各自交付', async () => {
+test('A20 同一个 URL 在两处各声明一份定义仍然合并：只发一次取数，两个读者读到同一份结果', async () => {
   let calls = 0
   // 两份定义：URL 相同，validate 是各自写的箭头函数（它跟参数走，不参与身份）。
   const firstSource = defineRefresh<{ id: number }, number>('/api/core/identity', { validate: p => p.id > 0 })
@@ -162,8 +216,8 @@ test('A20 同一个 URL 在两处各声明一份定义仍然合并：只发一�
   await settle()
 
   assert.equal(calls, 1, 'URL 与参数值相同就是同一个共享实例')
-  assert.equal(first.published.length, 1)
-  assert.equal(second.published.length, 1)
+  assert.equal(first.writes(), 1)
+  assert.equal(second.writes(), 1)
   assert.equal(core.snapshot().resources.length, 1)
 
   // 反向：URL 不同就是不同身份，即便参数值一模一样。
@@ -261,16 +315,14 @@ test('A14 排队未启动的任务同样直接满足本次刷新', async () => {
   assert.equal(view.last?.data, 2)
 })
 
-test('A12 交付期间被结算的刷新要求不再收这一次结果：交付点与订阅者同口径复核', async () => {
+test('A12 结果写入期间被撤销的刷新要求不再由这一次结果满足：写入点与订阅者同口径复核', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>('/api/core/233')
   const core = newCore(2, async (_url, body) => { calls++; return (body as { id: number }).id })
   const paused = page(core, source, { enabled: false, every: 100_000 })
-  const delivered: RefreshDisplay<object, unknown>[] = []
-  const watcher = page(core, source, undefined, {
-    // 订阅页的交付回调里同步把暂停页换成另一个身份：这会当场结算掉它的刷新要求。
-    publish: value => { delivered.push(value); paused.submit({ id: 2 }) },
-  })
+  const watcher = page(core, source)
+  // 结果写入的那一刻页面代码同步重入：把暂停页换成另一个身份，这会当场结算掉它的刷新要求。
+  tableOf(core).onWrite = () => { paused.submit({ id: 2 }) }
 
   watcher.submit({ id: 1 })
   paused.submit({ id: 1 })
@@ -278,28 +330,26 @@ test('A12 交付期间被结算的刷新要求不再收这一次结果：交付�
   await settle()
 
   assert.equal(calls, 1, '暂停页的刷新要求由这一个在途请求满足，不追发第二次')
-  assert.equal(delivered.length, 1)
-  assert.equal(paused.published.length, 0, '要求已在交付期间被撤销，就不再收这一次结果')
+  assert.equal(watcher.writes(), 1)
+  assert.equal(paused.writes(), 0, '要求已在结果写入期间被撤销，这一次结果不再轮到它')
 })
 
-test('A12/A14 交付回调里新登记的刷新要求由后继请求满足（refill）', async () => {
+test('A12/A14 结果写入期间新登记的刷新要求由后继请求满足（refill）', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>('/api/core/254')
   const core = newCore(2, async () => { calls++; return calls })
   const paused = page(core, source, { enabled: false, every: 100_000 })
-  const delivered: RefreshDisplay<object, unknown>[] = []
-  const watcher = page(core, source, undefined, {
-    // 订阅页的交付回调里登记一次刷新：它不在这一批里，只能由后继请求满足。
-    publish: value => { delivered.push(value); paused.refresh() },
-  })
+  const watcher = page(core, source)
+  // 结果写入的那一刻登记一次刷新：它不在这一批里，只能由后继请求满足。
+  tableOf(core).onWrite = () => { paused.refresh() }
 
   watcher.submit({ id: 1 })
   paused.submit({ id: 1 })
   await settle()
 
-  assert.equal(calls, 2, '交付期间登记的要求由后继请求满足')
+  assert.equal(calls, 2, '结果写入期间登记的要求由后继请求满足')
   assert.equal(paused.last?.data, 2, '暂停页拿到的是后继请求的结果')
-  assert.equal(delivered.length, 2, '订阅页两次交付都收到')
+  assert.equal(watcher.writes(), 2, '订阅页两次写入都读到')
 })
 
 test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷新一次', async () => {
@@ -378,7 +428,7 @@ test('A06 最后一个需求退出：在途请求被 abort，实例与结果一�
   assert.equal(core.snapshot().resources.length, 0)
 })
 
-test('A06/A11 恢复：实例还在就立即交付历史结果，不重复取数；最后一个需求退出则连实例一起销毁', async () => {
+test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数；最后一个需求退出则连实例一起销毁', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>('/api/core/352')
   const core = newCore(2, async () => { calls++; return calls })
@@ -393,12 +443,12 @@ test('A06/A11 恢复：实例还在就立即交付历史结果，不重复取数
 
   core.deactivate(view.handle)
   await settle()
-  const published = view.published.length
+  const written = view.writes()
   core.activate(view.handle)
   await settle()
-  assert.equal(view.published.length, published + 1)
+  assert.equal(view.writes(), written, '恢复不产生新的写入：读的是结果表里已有的那份')
   assert.equal(view.last?.data, 1)
-  assert.equal(calls, 1, '恢复交付历史结果，不重复取数')
+  assert.equal(calls, 1, '恢复读到历史结果，不重复取数')
 
   core.removeHandle(view.handle)
   core.removeHandle(other.handle)
@@ -444,9 +494,11 @@ test('A05 暂停只退订：已发起的刷新要求继续等当前请求的结�
   resolvers[0]?.(7)
   await settle()
   assert.equal(resolvers.length, 1, '暂停期间不追发请求，本次刷新用现有这一次')
-  assert.equal(view.last?.data, 7, '暂停页仍然拿到这次结果')
+  // 要求被这一次结果满足；实例随后释放，结果表条目随之消失（A06）。「页面画面保留」是适配层的事——
+  // `display` 保留最后一次读到的画面（keep-last），由 tests/vue.test.ts 验证；核心这一层能断言的是结果表的事实。
+  assert.equal(core.snapshot().results.length, 0, '释放共享实例即清掉结果表条目（A06）')
+  assert.equal(view.last, undefined, '核心这一层：条目没了，按身份读回空')
   assert.equal(core.snapshot().resources.length, 0, '要求结算后没有需求，才释放实例')
-  assert.equal(view.last?.data, 7, '释放共享实例不动页面自己的副本')
 })
 
 test('A13 共享请求失败：保留旧画面、通知页面、下个周期继续', async () => {
@@ -496,7 +548,7 @@ test('A13/A14 暂停页显式刷新失败：没有回执，失败仍经 onError 
   await settle()
 
   assert.equal(paused.errors.length, 1, '未订阅页面只有 onError 这条失败通道')
-  assert.equal(paused.published.length, 0, '失败不交付')
+  assert.equal(paused.writes(), 0, '失败不写结果')
   assert.equal(core.snapshot().resources.length, 0, '失败撤销要求，实例随即释放')
 })
 
@@ -508,7 +560,7 @@ test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结�
   empty.submit({ id: 1 })
   await settle()
   assert.equal(empty.errors.length, 1)
-  assert.equal(empty.last, undefined, '空结果不交付')
+  assert.equal(empty.last, undefined, '空结果不写结果')
 
   mode = 'null'
   const view = page(core, source)
@@ -593,13 +645,13 @@ test('A10 上限到期：挂死的 load 出册并交还槽位，迟到的结束�
   assert.equal(core.snapshot().resources[0]?.task, null)
   assert.equal(view.errors.length, 1, '上限到期按请求失败通知一次')
 
-  const delivered = view.published.length
+  const delivered = view.writes()
   resolvers[0]?.(99)
   await micro()
-  assert.equal(view.published.length, delivered, '迟到的结束不交付')
+  assert.equal(view.writes(), delivered, '迟到的结束不写结果')
 })
 
-test('A11 交付面：null 之外的任何结果都整体替换，且页面副本与共享副本互不影响', async () => {
+test('A11 交付面：null 之外的任何结果都整体替换，读者拿到的是结果表里同一个对象（要改自己复制）', async () => {
   const source = defineRefresh<{ id: number }, { rows: number[] }>('/api/core/587')
   const quote = source
   const core = newCore(2, async () => ({ rows: [1] }))
@@ -611,11 +663,13 @@ test('A11 交付面：null 之外的任何结果都整体替换，且页面副�
   const copy = first?.data as { rows: number[] }
   copy.rows.push(2)
 
-  // 页面副本的篡改没有污染共享实例：后加入者按同一身份立即拿到原结果，不重新取数。
+  // 数据是共享对象：要改自己复制（ADR-59）。这里改的就是结果表里那一份，后加入者读到的是同一个对象，
+  // 而且它是按同一身份现读的——没有为它再取数。
   const late = page(core, quote)
   late.submit({ id: 1 })
   await settle()
-  assert.deepEqual(late.last?.data, { rows: [1] })
+  assert.deepEqual(late.last?.data, { rows: [1, 2] })
+  assert.equal(late.last?.data, view.last?.data, '两个读者拿到的是结果表里同一个对象')
   assert.equal(view.handle.parameters?.key, '{"id":1}')
 })
 
@@ -643,28 +697,30 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   // 同一个核心只有一个传输，因此按 URL 分派：失败的资源用另一个 URL。
   const core = newCore(2, async url => { if (url === '/api/core/643') throw new Error('down'); return 3 })
   const quote = source
-  const hostile = page(core, quote, { enabled: true, every: 100_000 }, {
-    publish: () => { throw new Error('render failed') },
-  })
+  const hostile = page(core, quote, { enabled: true, every: 100_000 })
   const normal = page(core, quote)
 
   normal.submit({ id: 1 })
   hostile.submit({ id: 1 })
   await settle()
 
-  assert.equal(normal.last?.data, 3, '一个接收者失败不影响另一个')
+  assert.equal(normal.last?.data, 3, '一个读者拿到的结果不受另一个影响')
+  assert.equal(hostile.last?.data, 3, '两个读者读的是结果表里同一份结果')
   assert.equal(core.snapshot().resources.length, 1, '页面回调失败不影响实例与结果')
 
-  // 失败通知里的 onError 抛错同样被隔离，订阅与开启意愿都不受影响。
+  // 框架唯一还会调用的页面回调是 `onError`：它抛错同样被隔离，其他读者与框架状态都不受影响。
   let notified = 0
   const failing = defineRefresh<{ id: number }, number>('/api/core/643')
   const victim = page(core, failing, { enabled: true, every: 100_000 }, {
     onError: () => { notified++; throw new Error('handler failed') },
   })
+  const witness = page(core, failing, { enabled: true, every: 100_000 })
   victim.submit({ id: 1 })
+  witness.submit({ id: 1 })
   await settle()
   assert.equal(notified, 1)
-  assert.equal(subscribed(core, victim)?.subscribers.size, 1)
+  assert.equal(witness.errors.length, 1, '抛错的读者不影响另一个读者收到失败通知')
+  assert.equal(subscribed(core, victim)?.subscribers.size, 2)
 })
 
 test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的执行不再写事实', async () => {
@@ -688,10 +744,10 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
   const empty = core.snapshot()
   assert.deepEqual([empty.handles.length, empty.resources.length, empty.queued.length, empty.scheduled], [0, 0, 0, false])
 
-  const delivered = view.published.length
+  const delivered = view.writes()
   resolvers[0]?.(9)
   await settle()
-  assert.equal(view.published.length, delivered, '迟到的结束不再写任何事实')
+  assert.equal(view.writes(), delivered, '迟到的结束不再写任何事实')
   assert.equal(core.snapshot().running.length, 0, '未结束的执行到真实结束才释放槽位')
   core.dispose()
 })
@@ -704,7 +760,7 @@ test('A04/A05 配置非法时不订阅、不刷新、不通知，修正后恢复
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
   await settle()
   assert.equal(subscribed(core, view), undefined)
-  assert.equal(view.published.length, 0)
+  assert.equal(view.writes(), 0)
 
   view.refresh()
   assert.equal(view.errors.length, 0, '配置非法不通知：页面读自己的 refs 就知道')
@@ -787,7 +843,8 @@ test('A19 参数副本：validate、每轮 load 与每个接收者各拿一份�
   await settle()
   const argsOfA = a.last?.args as unknown as { tags: string[] }
   argsOfA.tags.push('A 页改的')
-  assert.deepEqual(a.last?.args, { id: 1, tags: ['A 页改的'] }, 'A 页改的是自己那份')
+  assert.deepEqual(argsOfA.tags, ['A 页改的'], 'A 页改的是自己读到的那一份')
+  assert.deepEqual(a.last?.args, { id: 1, tags: [] }, '下一次读到的仍是身份键所描述的那份值')
   assert.deepEqual(b.last?.args, { id: 1, tags: [] }, 'A 页改自己的参数影响不到 B 页')
 })
 

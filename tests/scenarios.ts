@@ -59,7 +59,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check((await d.snapshot()).pages['甲']!.manual, 'page knows the result came after its own refresh')
   } },
 
-  { name: 'A02/A06 真实HTTP：共享、单页冻结、最后取消、恢复', async run(d) {
+  { name: 'A02/A06 真实HTTP：共享、暂停只停驱动、最后取消、恢复', async run(d) {
     await d.open('/?test')
     await until(async () => (await d.requests()).length === 1, 'one shared request')
     check((await d.snapshot()).calls.length === 1, 'two subscribers must share the first load')
@@ -73,7 +73,8 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(!(await d.snapshot()).calls[1]!.aborted, 'shared signal must remain active')
     await d.release(second.id)
     await until(async () => await d.price('乙') === String(100 + second.id), 'remaining page updates')
-    check(await d.price('甲') === String(100 + first.id), 'paused page must stay frozen')
+    // 暂停只停「由这一页驱动取数」：画面按身份读共享结果表，因此暂停页读到的也是最新值（ADR-59）。
+    check(await d.price('甲') === String(100 + second.id), 'paused page reads the shared result')
     await until(async () => (await d.requests()).length === 3, 'third request in flight')
     await d.enable('乙', false)
     await until(async () => (await d.requests())[2]!.status === 'aborted', 'real HTTP disconnect')
@@ -88,7 +89,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     const fourth = (await d.requests())[3]!
     await d.release(fourth.id)
     await until(async () => await d.price('甲') === String(100 + fourth.id), 'restored page updates')
-    check(await d.price('乙') === String(100 + second.id), 'other paused page remains frozen')
+    check(await d.price('乙') === String(100 + fourth.id), 'other paused page reads the shared result too')
     await d.enable('甲', false)
   } },
   { name: 'A13 真实传输超时：客户端截止生效、槽位释放、页面收到失败', async run(d) {
@@ -103,7 +104,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await sleep(1_000)
     check((await d.requests()).length === 1, 'next attempt waits for the interval, not a busy retry')
   } },
-  { name: 'A10/A11 旧响应晚到：新资源不被覆盖或删除，页面副本独立', async run(d) {
+  { name: 'A10/A11 旧响应晚到：新资源不被覆盖或删除，结果对所有读者共享', async run(d) {
     await d.open('/?mode=controlled')
     await until(async () => (await d.snapshot()).calls.length === 1, 'initial controlled load')
     await d.enable('甲', false); await d.enable('乙', false)
@@ -124,7 +125,8 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check((await d.snapshot()).calls.length === 2, 'ordinary restore with fresh history must not force another load')
     await d.mutatePage('甲', 999)
     const isolated = await d.snapshot()
-    check(isolated.pages['乙']!.data.quote.price === 222 && isolated.entries[id]!.data.quote.price === 222, 'nested page mutation must not alias another page or Store')
+    // 结果是共享对象（ADR-59）：篡改一个页面读到的 data，就是改结果表里那一份，另一个页面与结果表一起变。
+    check(isolated.pages['乙']!.data.quote.price === 999 && isolated.entries[id]!.data.quote.price === 999, 'nested page mutation is visible to every reader of that identity')
   } },
   { name: 'A09 真实结束才放槽：等待期间不启动、不忙循环', async run(d) {
     await d.open('/?mode=controlled&slots=1')
