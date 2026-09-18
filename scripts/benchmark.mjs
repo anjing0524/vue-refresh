@@ -3,7 +3,7 @@
 // 框架自身的可测代理量——共享收敛、真实在途峰值、事件循环延迟、释放后残留。
 //
 // 边界，先说清楚：
-// - 只走公开入口（`createRefreshManager` + `useRefresh`）与真实 Vue；`load` 只让出一个
+// - 只走公开入口（`createRefreshManager` + `useRefresh`）与真实 Vue；传输只让出一个
 //   微任务，因此**不含浏览器渲染、真实网络与真实业务数据**。真实流量口径由接入方实测（§5 G04）。
 // - 堆增量未强制 GC，只是粗代理；事件循环延迟由 `monitorEventLoopDelay` 给出。
 // - **不设性能阈值**。脚本只在契约被破坏时以非零码退出：真实在途峰值超过 `maxConcurrent`，
@@ -58,23 +58,24 @@ async function measure() {
   let peakInFlight = 0
   let peakRunning = 0
   let failures = 0
-  // 在途很少：load 只让出一个微任务，因此 active 反映框架真实同时在途的 load 数，
+  // 在途很少：取数只让出一个微任务，因此 active 反映框架真实同时在途的请求数，
   // 而并发上限只能由框架的槽位决定。
-  const source = defineRefresh({
-    load: async () => {
+  const source = defineRefresh('/api/benchmark')
+  const http = {
+    post: async () => {
       loads += 1
       active += 1
       peakInFlight = Math.max(peakInFlight, active)
-      // 交叉核对：在真实 load 的入口读框架自己的槽位投影。
+      // 交叉核对：在真实请求的入口读框架自己的槽位投影。
       peakRunning = Math.max(peakRunning, core.snapshot().running.length)
       try {
         await Promise.resolve()
-        return { price: loads }
+        return { data: { price: loads } }
       } finally {
         active -= 1
       }
     },
-  })
+  }
 
   const Card = defineComponent({
     props: { identity: { type: Number, required: true } },
@@ -92,7 +93,7 @@ async function measure() {
   const app = renderer.createApp({
     render: () => h('div', cards.map((identity, index) => h(Card, { key: index, identity }))),
   })
-  const manager = createRefreshManager({ maxConcurrent })
+  const manager = createRefreshManager({ maxConcurrent, axios: http })
   app.use(manager)
 
   const heapBefore = process.memoryUsage().heapUsed
@@ -134,13 +135,13 @@ const median = key => {
 const last = results[results.length - 1]
 console.log(`[bench] 规模：${subscriptionCount} 订阅 / ${identityCount} 身份 / every=${every}ms / maxConcurrent=${maxConcurrent} / 运行 ${duration}ms × ${runs}`)
 for (const [index, result] of results.entries()) {
-  console.log(`[bench] 第 ${index + 1} 次：实际 ${result.elapsed}ms 内 load ${result.loads} 次`
+  console.log(`[bench] 第 ${index + 1} 次：实际 ${result.elapsed}ms 内取数 ${result.loads} 次`
     + `（收敛比 ${result.convergence}；按订阅计的反事实 ${result.perSubscriberCounterfactual} 次）`
     + ` · 在途峰值 ${result.peakInFlight}（框架 running 投影峰值 ${result.peakRunning}）/ 上限 ${maxConcurrent}`
     + ` · 结束瞬间 Resource ${result.observed.resources} 句柄 ${result.observed.handles}`
     + ` · 后台失败 ${result.failures} · 堆增量 ${result.heapDeltaKb}KB`)
 }
-console.log(`[bench] 中位：load ${median('loads')} 次 · 收敛比 ${median('convergence')}`
+console.log(`[bench] 中位：取数 ${median('loads')} 次 · 收敛比 ${median('convergence')}`
   + ` · 在途峰值 ${median('peakInFlight')} · 事件循环延迟 mean ${(histogram.mean / 1e6).toFixed(2)}ms`
   + ` p99 ${(histogram.percentile(99) / 1e6).toFixed(2)}ms max ${(histogram.max / 1e6).toFixed(2)}ms`)
 console.log(`[bench] 释放后残留：${JSON.stringify(last.residue)}`)

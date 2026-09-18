@@ -1,16 +1,16 @@
 # Vue SPA 统一刷新管理
 
 已实现 5 个运行时模块，以及正式包入口、类型声明和可运行示例。源码共用同一套参数准备、任务身份、取消与结果复制规则；
-没有占位成功路径。运行期只有一个零依赖的小依赖（参数键的稳定编码），框架不依赖应用的状态库。
-实现完成不等于验收目录（[统一文档](./统一刷新管理.md) §4 的 A01–A18）的所有分支、业务接入或发布基线已经完成。
+没有占位成功路径。运行期只有一个零依赖的小依赖（参数键的稳定编码）；框架不依赖应用的状态库，也不 import HTTP 客户端——取数用的 axios 实例由 `createRefreshManager` 注入。
+实现完成不等于验收目录（[统一文档](./统一刷新管理.md) §4 的 A01–A20）的所有分支、业务接入或发布基线已经完成。
 
 ## 从总体到局部
 
-固定资源定义（interface、load、可选 validate） → 提交边界准备参数 → 共享实例执行 → 每个页面一份独立副本。
+固定资源定义（URL、interface、可选 validate） → 提交边界准备参数 → 共享实例执行 → 每个页面一份独立副本。
 
 ```text
 src/public-types.ts   公共类型的唯一代码定义与状态取值常量
-src/source.ts         固定资源定义、参数准备与稳定键
+src/source.ts         固定资源定义（URL ＋ 参数准入）、参数准备与稳定键
 src/core.ts           跨实例的协调者（注册表、句柄名册、队列与并发、调度）＋ 一个身份的 Resource 类
 src/vue.ts            组件适配与安装：配置快照、句柄、生命周期、可见性
 src/index.ts          包入口（三个函数与 6 个公共类型；没有常量对象）
@@ -18,7 +18,7 @@ src/index.ts          包入口（三个函数与 6 个公共类型；没有常�
 
 - 依赖方向单向：`public-types` ← `source` ← `core` ← `vue` ← `index`。
   运行期边必须严格向下；本版没有需要登记的等层边，由 `pnpm check:docs` 与 [DESIGN.md](./DESIGN.md) §1 双向核对。
-- 核心不依赖 Vue 或 HTTP。`core.ts` 按职责分成七个分段：状态观测与生命周期、页面操作、观测面、需求关系、后台执行、刷新要求、调度。
+- 核心不依赖 Vue，也不 import HTTP 客户端（只要求注入的对象有一个 `post`）。`core.ts` 按职责分成七个分段：状态观测与生命周期、页面操作、观测面、需求关系、后台执行、刷新要求、调度。
 - 全部可变状态都在 `core.ts`，按所属分两处：**跨实例的**挂在协调者上（`buckets` 身份 → 共享实例、`handles` 名册、`queue`/`running`、唯一唤醒 Timer），**一个身份自己的**全在 `Resource` 类里（订阅、刷新要求、结果、到期与当前任务）——实例只调协调者的两个入口（`enqueue` / `releaseIfUnused`）。
   订阅只写在句柄上、实例侧持有同一批句柄，刷新要求只写在实例上——没有镜像字段，也没有第二套描述同一关系的对象。
 - 参数稳定键交给 `fast-json-stable-stringify`（`JSON.stringify` 的确定性版本：对象键排序、数组保序），是运行期唯一的依赖；框架不设深度上限，业务字段是否合法由调用方负责。
@@ -37,9 +37,9 @@ interface QuoteParams {
 }
 interface Quote { price: number }
 
-const source = defineRefresh<QuoteParams, Quote>({
+// 身份的一半是 URL，另一半是参数值：框架对 URL 发 `post(url, 参数值, { signal })`。
+const source = defineRefresh<QuoteParams, Quote>('/api/quote', {
   validate: p => p.account.length > 0 && p.symbol.length > 0,
-  load: (params, { signal }) => quoteService.read(params, signal),
 })
 const task = useRefresh(source, { enabled, every: 2000 })
 task.submit({ account: 'demo', symbol: 'DEMO' })
@@ -53,15 +53,16 @@ await task.refresh()
 - 参数根是普通对象，允许嵌套普通对象与数组；可选字段不用时省略——显式传 `undefined` 会被按省略处理（与不传是同一个身份），推荐直接省略。嵌套字段请用 `type` 别名或内联对象字面量：具名 `interface` 没有隐式索引签名，会被声明点的值域约束打红（TS2344）。
 - 参数要传**普通对象**：Vue 的 `reactive()` / `ref().value` 是 Proxy，提交边界的复制会抛 `DataCloneError`，
   这类值提交时按 `rejected` 拒绝且不产生请求；需要时传 `toRaw(…)` 或自己新构造的普通对象。
-- Source 身份及全部参数字段值决定共享：对象字段顺序不影响共享，数组顺序影响共享；不提供另一个业务 key 回调。
-- 参数在提交边界复制成框架私有副本，调用方原对象不参与；`validate`、每一轮 `load` 与每个接收者的 `display` 各拿一份副本，因此谁改自己的都不影响别人。轮询、恢复与显式刷新复用同一份已准备参数，`validate` 只在提交时执行一次。
+- URL 及全部参数字段值决定共享：**同一个 URL 在几处各写一份定义也照样合并**（身份不是对象引用），对象字段顺序不影响共享，数组顺序影响共享；不提供另一个业务 key 回调。
+- 参数在提交边界复制成框架私有副本，调用方原对象不参与；`validate`、每一轮请求体与每个接收者的 `display` 各拿一份副本，因此谁改自己的都不影响别人。轮询、恢复与显式刷新复用同一份已准备参数，`validate` 只在提交时执行一次。
 - **对象型参数只能是普通对象或数组**（ADR-52）：`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 这类内容对编码不可见的容器会让两个不同查询塌成同一个身份，故一律拒绝——`Date` 请传它的 ISO 字符串（声明点由 `defineRefresh` 的类型约束先报错，提交边界再由运行期检查兜底）。标量沿用 JSON 语义：`-0` 与 `0` 同键，`NaN`／`Infinity` 按 `null`，`undefined` 字段按省略；传函数、Proxy 这类复制不了的值由 `structuredClone` 拒绝，循环引用让编码交不出身份（内部是 `null`）。以上都按 `rejected` 拒绝（不走 `onError`）。业务字段的合法性仍由调用方与 `validate` 负责。
-- DTO 业务结构由 HTTP 适配器校验；框架只拒绝 `undefined` 并使用原生复制建立所有权，每个接收者各得一份副本。
+- DTO 业务结构由传输侧校验（示例里是 `demoHttp`，接入方通常是 axios 响应拦截器）；框架只拒绝 `undefined` 并使用原生复制建立所有权，每个接收者各得一份副本。畸形响应在框架看来是一次成功，会覆盖旧结果——要不要挡住它由传输侧决定。
 
 ## 安装与使用
 
 ```ts
-const refresh = createRefreshManager({ maxConcurrent: applicationConfig.refreshConcurrency })
+// `axios` 是你配好 baseURL／拦截器／鉴权头的实例；框架只要求它有一个 `post`。
+const refresh = createRefreshManager({ maxConcurrent: applicationConfig.refreshConcurrency, axios })
 app.use(refresh)
 if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
 ```
@@ -72,7 +73,7 @@ if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
 
 `submit` 同步声明身份（同参重复声明幂等，参数被拒时不改动任何状态）；`refresh` 只登记一次要数、**没有回执**。
 关闭 `enabled` 只退订、**不撤销**已发起的刷新要求，因此暂停页仍能刷新一次。
-显式刷新与自动刷新共用同一队列与并发槽，满槽时排队；后台只在真实 `load` 结束后释放并发槽，
+显式刷新与自动刷新共用同一队列与并发槽，满槽时排队；显式刷新与自动刷新共用同一队列与并发槽，满槽时排队；后台只在真实取数结束后释放并发槽，
 另有一层框架上限（10 秒，从开始执行起算）到期即按共享请求失败结算并立即出册，因此挂死的请求不会让应用停摆。
 
 刷新失败只走一条通道：`onError`（参数是原始异常，**只报共享请求失败**）——订阅者与本次有刷新要求的页面都会收到，
@@ -80,7 +81,7 @@ if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
 **框架不改写调用方的 `enabled`**：失败后是否停止自动刷新由页面在 `onError` 里自己决定；
 只要 `enabled` 仍为真，下个周期继续，暂停页也仍可主动刷新。
 
-框架只有一条取数通道：显式刷新与自动刷新都经 Source 的 `load`，结果交付给**有效订阅与未结算的刷新要求**
+框架只有一条取数通道：显式刷新与自动刷新都由框架按 URL 取数，结果交付给**有效订阅与未结算的刷新要求**
 （同一句柄只交付一次）。`display` 是唯一交付面：`args` / `data` 与 `updatedAt`（结果产生的墙钟毫秒）同次整体发布，后加入的组件读到已有结果时拿到的仍是原结果时间，可据此显示数据多旧；
 框架不交付「正在刷新」这类实时状态。需要按结果写业务 Store 的页面在自己的适配层完成。
 框架**不提供读取共享结果的入口**：结果只经每个页面自己的 `display` 交付；要把结果落到业务 Store 的页面在自己的适配层写（`display` 变化时同步一次），框架不做第二个数据出口。
@@ -119,28 +120,28 @@ pnpm dev
 | 实际检查 | 结果/范围 |
 |---|---|
 | pnpm typecheck | 通过，0 错误。`tests/types.ts` 的 `@ts-expect-error` 反例（缺字段/字段类型/旧元组调用/Source 不变性/DTO/readonly/refresh 不接受参数且结算不含 DTO/参数值域拒绝 `Date` 与 `Map`）一并被校验 |
-| pnpm test | 通过：40 个用例全绿（`tests/core.test.ts` 33、`tests/vue.test.ts` 7），覆盖 A01–A19。核心用例直接驱动 `RefreshCore` 并提供配置快照（含一条「运行期失败只走返回值或 `onError`」的边界总账）；Vue 用例用无 DOM 的自定义渲染器 ＋ 真实 KeepAlive，安装路径用最小 `document` 替身，不冒充真实可见性测试 |
-| pnpm build | 通过。生成 `dist/index.js`（10.75 kB，10752 字节）与 5 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态） |
+| pnpm test | 通过：41 个用例全绿（`tests/core.test.ts` 34、`tests/vue.test.ts` 7），覆盖 A01–A20。核心用例直接驱动 `RefreshCore` 并提供配置快照（含一条「运行期失败只走返回值或 `onError`」的边界总账）；Vue 用例用无 DOM 的自定义渲染器 ＋ 真实 KeepAlive，安装路径用最小 `document` 替身，不冒充真实可见性测试 |
+| pnpm build | 通过。生成 `dist/index.js`（10.92 kB，10921 字节）与 5 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态） |
 | pnpm build:demo | 通过。生成 `dist-demo/` 演示页面（四个视图：查询列表、行情面板、双组件共享、B09 组合） |
 | pnpm test:browser | 通过：真实 Chrome 12 条场景全绿——三条代表页面交互（`tests/pages.spec.ts`）＋ 八条受控场景（`tests/refresh.spec.ts`：暂停后显式刷新、满槽排队、真实 HTTP 共享与恢复、真实传输超时、旧响应晚到、真实结束放槽、卸载清理、祖先 KeepAlive 失活与受控 `visibilitychange`）。八条受控场景在根契约重写后**未改一行**仍然通过；页面交互用例只把行情面板的失败场景由 1 次加强为**连续 3 次**（验证反复失败不累积成崩溃），其余断言未动 |
-| pnpm complexity | 5 个源文件、863 行、92 个结构分支、最大函数圈复杂度 11 |
-| node scripts/benchmark.mjs | 24 订阅 / 8 身份 / every=25ms / maxConcurrent=4，3 次 × 2s：load 中位 632 次（收敛比 0.99；按订阅计的反事实 1920 次）、在途峰值 4（框架 `running` 投影峰值同为 4，未超上限）、结束瞬间 8 个共享实例 / 24 个句柄、**释放后残留全 0**；事件循环延迟 mean 1.08ms / p99 1.44ms / max 6.04ms。规模可用 `--subscriptions/--identities/--duration/--every/--runs` 改；**不设性能阈值**，只在真实在途超过 `maxConcurrent` 或释放后有残留时以非零码退出 |
-| 阶段 15 交付产物 | `pnpm build` ＋ `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：9 个条目 = `dist/` 7 个（`index.js` 10.75 kB，10752 字节、sourcemap、5 个 `.d.ts`）＋ `package.json` ＋ README。最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行，不写在这里——README 由 npm 强制打进包内，把包自身哈希写进包内文件没有解 |
+| pnpm complexity | 5 个源文件、895 行、93 个结构分支、最大函数圈复杂度 11 |
+| node scripts/benchmark.mjs | 24 订阅 / 8 身份 / every=25ms / maxConcurrent=4，3 次 × 2s：取数中位 632 次（收敛比 0.99；按订阅计的反事实 1920 次）、在途峰值 4（框架 `running` 投影峰值同为 4，未超上限）、结束瞬间 8 个共享实例 / 24 个句柄、**释放后残留全 0**；事件循环延迟 mean 1.08ms / p99 1.44ms / max 6.04ms。规模可用 `--subscriptions/--identities/--duration/--every/--runs` 改；**不设性能阈值**，只在真实在途超过 `maxConcurrent` 或释放后有残留时以非零码退出 |
+| 阶段 15 交付产物 | `pnpm build` ＋ `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：9 个条目 = `dist/` 7 个（`index.js` 10.92 kB，10921 字节、sourcemap、5 个 `.d.ts`）＋ `package.json` ＋ README。最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行，不写在这里——README 由 npm 强制打进包内，把包自身哈希写进包内文件没有解 |
 | 包级导入（干净消费方） | 仓库外消费工程只安装 tarball 与 `vue@3.5.42`（不再需要状态库）：最小浏览器环境（`document.hidden=false`）下挂载 ＋ `submit` 交付 `price=3`；运行期再断言导出面恰好是三个函数，且值域（ADR-52）兜底拒绝 `Map` 这类内容对编码不可见的容器参数（只经 `rejected`）。**换包必删消费方的 `package-lock.json`**：`file:` 依赖的完整性写在锁文件里，不删会复用上一版解包内容而给出假通过 |
 | TS 4.9 类型消费（G03 阻断节点） | 实测：`typescript@4.9.5` ＋ `module/moduleResolution: Node16` ＋ `strict` ＋ `skipLibCheck` 下 `tsc --noEmit` **本包 5 个声明文件零错误**（含 `@ts-expect-error` 反例：缺字段、Source 不变性、`refresh` 不接受参数、取消分支不带 `reason`、参数值域的 `Date`／`Map`）；不再需要状态库，因此没有需要跳过的 peer 校验。Vue 3.5.42 自身的 `.d.ts` 要求 TS ≥5.4，故 `skipLibCheck: true` 是前置条件。确认人 2026-09-16 裁决：声明只限定到本包自身的类型（自 TS 4.9 起可用，已实测） |
 | pnpm check:docs | 通过。一致性门禁清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准；还会打印叶子→测试标题的追溯报告 |
 
-测试名称以验收叶子编号开头（`A01`–`A19`），只证明具体断言覆盖的分支，不把同一叶子的全部变体自动标通过。
+测试名称以验收叶子编号开头（`A01`–`A20`），只证明具体断言覆盖的分支，不把同一叶子的全部变体自动标通过。
 核心测试覆盖声明幂等与校验失败不改状态、共享身份、恢复与不补跑、并发上限与 FIFO、框架上限出册与迟到结束无效、
 失败结算与下个周期继续、交付副本独立、参数值域与参数副本隔离、回调隔离、销毁、可见性切换的退订与恢复、
 运行期失败只走返回值或 `onError`；
 Vue 测试覆盖声明即取数、配置非法只通知一次并在修正后恢复、改 `enabled.value` 立即生效（暂停与恢复）、
 KeepAlive 双向幂等、安装冲突与接管、未安装协调者时抛错。
-`pnpm check:docs` 的 `[trace]` 行给出机器读数：18 个叶子全部由测试标题点名，`部分验证` 0、`未验证` 0。
+`pnpm check:docs` 的 `[trace]` 行给出机器读数：19 个叶子全部由测试标题点名，`部分验证` 0、`未验证` 0。
 
 尚未取得的证据：**真实切标签页**（浏览器真正把本页置为 hidden）与**监听已摘除本身**（需要 CDP 的
 `DOMDebugger.getEventListeners`，当前驱动拿不到；只能在真实浏览器里以「卸载后再派发 `visibilitychange`
 不产生任何请求」作为可观察边界）、真实业务接入，以及**真实设备与真实流量下的性能口径**——
-基线只测框架侧代理量，`load` 只让出一个微任务，不含浏览器渲染与真实网络。
+基线只测框架侧代理量，取数只让出一个微任务，不含浏览器渲染与真实网络。
 
 正式文档为 `./统一刷新管理.md`（业务规则、契约、验收与门槛）、`./DESIGN.md`（设计与实现）与 `./ADR.md`（已裁决的产品边界与提案裁决）。

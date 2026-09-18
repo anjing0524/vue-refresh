@@ -23,7 +23,7 @@ export interface Config {
  * **订阅到哪个实例**是那个实例 `subscribers` 的成员资格（DESIGN §3.5 第 1 条）。
  */
 export interface Handle<P extends object = object, T = unknown> {
-  /** 擦除后的固定定义：具体 Source 靠方法双变进入这里。 */
+  /** 擦除后的固定定义（URL ＋ 参数准入）：具体 Source 靠 `validate` 的方法双变进入这里。 */
   readonly source: RefreshSource<object, unknown>
   /** 最近一次配置快照；适配层每读到新值就改写，核心只读。 */
   config: Config | null
@@ -51,7 +51,7 @@ export interface Entry {
 }
 
 /**
- * 一个「Source ＋ 参数值」的共享实例：同一个身份的**全部状态与全部操作都在这个类里**。
+ * 一个「URL ＋ 参数值」的共享实例：同一个身份的**全部状态与全部操作都在这个类里**。
  *
  * 越过实例边界的事（FIFO 队列、并发槽、注册表注销）只调核心的两个入口（`enqueue` / `releaseIfUnused`），
  * 所以「一个身份的一生」可以只读这一个类：接入 → 到期 → 执行 → 交付或失败 → 结算要求 → 回收。
@@ -159,7 +159,7 @@ export class Resource {
   }
 }
 
-/** 框架侧单次 `load` 的上限（毫秒）：从真正开始执行起算，排队等待不计入（数值与依据见 ADR-20）。 */
+/** 框架侧单次取数的上限（毫秒）：从真正开始执行起算，排队等待不计入（数值与依据见 ADR-20）。 */
 const LOAD_TIMEOUT_MS = 10_000
 
 /** `setTimeout` 的平台上限（约 24.8 天）；更远的到期分段等待。 */
@@ -182,15 +182,22 @@ export function report(handle: Handle, error: unknown): void {
 
 /** 结果边界：拒绝 `undefined`，其余原生复制；业务合法性由请求适配器负责。 */
 function copyResult(input: unknown): unknown {
-  if (input === undefined) throw new TypeError('load 必须返回一个结果，不能是 undefined')
+  if (input === undefined) throw new TypeError('取数结果不能是 undefined')
   return structuredClone(input)
+}
+
+/** 取数传输：框架只需要一个 POST。真实的 axios 实例在结构上满足它（见 `createRefreshManager`）。 */
+export interface RefreshHttp {
+  post(url: string, data: unknown, config: { readonly signal: AbortSignal }): Promise<{ readonly data: unknown }>
 }
 
 /** 跨实例的协调者：实例注册表、句柄名册、FIFO 队列与并发槽、唯一唤醒 Timer、可见性与销毁。 */
 export class RefreshCore {
   private readonly maxConcurrent: number
-  /** Source → 参数键 → 实例。 */
-  private readonly buckets = new Map<RefreshSource<object, unknown>, Map<string, Resource>>()
+  /** 取数用的 axios 实例；内核只调它的 `post`，因此 core.ts 仍然零运行时依赖。 */
+  private readonly http: RefreshHttp
+  /** URL → 参数键 → 实例。 */
+  private readonly buckets = new Map<string, Map<string, Resource>>()
   /** 全部页面句柄；可见性变化时按它们重新协调。 */
   private readonly handles = new Set<Handle>()
   /** FIFO 待执行任务。 */
@@ -206,8 +213,9 @@ export class RefreshCore {
   private cleanup: (() => void) | null = null
   private disposed = false
 
-  constructor(maxConcurrent: number) {
+  constructor(maxConcurrent: number, http: RefreshHttp) {
     this.maxConcurrent = maxConcurrent
+    this.http = http
   }
 
   // ══════════════════════════ 状态观测与生命周期 ══════════════════════════
@@ -383,18 +391,18 @@ export class RefreshCore {
     // `resourceOf` 没找到就当场建立；找到了就是它，不必再查一次桶。
     const target = resource ?? this.resourceFor(handle.source, parameters)
     // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值）。这份是框架私有权威副本，
-    // 外发给每个消费者（`validate`／每轮 `load`／每个接收者的 `display`）时各复制一份（ADR-52）。
+    // 外发给每个消费者（`validate`／每轮请求体／每个接收者的 `display`）时各复制一份（ADR-52）。
     handle.parameters = target.parameters
     target.subscribers.add(handle)
     target.deliverLatest(handle)
   }
 
-  /** 按「Source 身份 ＋ 完整参数值稳定键」查找，没有就建立实例。 */
+  /** 按「URL ＋ 完整参数值稳定键」查找，没有就建立实例。 */
   private resourceFor(source: RefreshSource<object, unknown>, parameters: Parameters): Resource {
-    let bucket = this.buckets.get(source)
+    let bucket = this.buckets.get(source.name)
     if (!bucket) {
       bucket = new Map()
-      this.buckets.set(source, bucket)
+      this.buckets.set(source.name, bucket)
     }
     const existing = bucket.get(parameters.key)
     if (existing) return existing
@@ -407,7 +415,7 @@ export class RefreshCore {
   /** 本页已声明身份所在的实例；只查不建（协调资格、结算刷新要求、退订都用它）。 */
   private resourceOf(handle: Handle): Resource | undefined {
     const parameters = handle.parameters
-    return parameters ? this.buckets.get(handle.source)?.get(parameters.key) : undefined
+    return parameters ? this.buckets.get(handle.source.name)?.get(parameters.key) : undefined
   }
 
   /** 退订一个句柄；退订后若订阅与要求都空了，实例随之被回收。 */
@@ -423,9 +431,9 @@ export class RefreshCore {
    */
   releaseIfUnused(resource: Resource): void {
     if (resource.subscribers.size > 0 || resource.waiters.size > 0) return
-    const bucket = this.buckets.get(resource.source)
+    const bucket = this.buckets.get(resource.source.name)
     bucket?.delete(resource.parameters.key)
-    if (bucket?.size === 0) this.buckets.delete(resource.source)
+    if (bucket?.size === 0) this.buckets.delete(resource.source.name)
 
     const task = resource.task
     resource.entry = null
@@ -443,7 +451,7 @@ export class RefreshCore {
    *
    * `queued`／`running` 是「占着并发账本的某一格，且是本实例的当前执行」；`detached` 是实例已被回收、
    * 当前执行已撤销，但在跑的那次仍占着槽位，直到迟到的结束自己交还（`releaseIfUnused`——槽位若当场
-   * 交还，在途的 `load` 就与后来者并发了）；`settled` 是三处都不在。
+   * 交还，在途的请求就与后来者并发了）；`settled` 是三处都不在。
    */
   private placeTask(task: Task, position: 'queued' | 'running' | 'detached' | 'settled'): void {
     this.queue.delete(task)
@@ -464,13 +472,18 @@ export class RefreshCore {
   /** 执行一次后台请求；成功、失败或被上限结算，都在 `finally` 释放槽位并补后继请求。 */
   private async runTask(task: Task): Promise<void> {
     const resource = task.resource
-    // 上限从真正开始执行起算（排队不计入）：一个永不结束的 load 不能永久占住并发槽。
+    // 上限从真正开始执行起算（排队不计入）：一个永不结束的请求不能永久占住并发槽。
     const timer = setTimeout(() => { this.expire(task) }, LOAD_TIMEOUT_MS)
     try {
-      // 每一轮都交出一份副本：`load` 是页面代码，改自己的入参不能污染身份键描述的那份值（ADR-52）。
-      const raw = await resource.source.load(structuredClone(resource.parameters.args), { signal: task.controller.signal })
+      // 每一轮都交出一份副本：请求体改不动身份键描述的那份值（ADR-52）。URL 与参数值一起决定身份，
+      // 因此「同一个 URL ＋ 同一份参数值」在这里只会有一条执行（合并发生在 `resourceFor`）。
+      const response = await this.http.post(
+        resource.source.name,
+        structuredClone(resource.parameters.args),
+        { signal: task.controller.signal },
+      )
       if (resource.task !== task) return
-      const entry: Entry = { data: copyResult(raw), updatedAt: Date.now() }
+      const entry: Entry = { data: copyResult(response.data), updatedAt: Date.now() }
       if (resource.task !== task) return
       resource.publish(entry)
     } catch (error) {
@@ -492,7 +505,7 @@ export class RefreshCore {
     if (resource.task !== task) return
     this.placeTask(task, 'settled')
     task.controller.abort()
-    resource.fail(new Error(`load 未在框架上限 ${LOAD_TIMEOUT_MS} 毫秒内结束`))
+    resource.fail(new Error(`取数未在框架上限 ${LOAD_TIMEOUT_MS} 毫秒内结束`))
     resource.refill()
     this.flushSoon()
   }

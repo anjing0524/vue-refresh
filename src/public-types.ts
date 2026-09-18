@@ -13,13 +13,16 @@ export type ReadonlySnapshot<T> =
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
 
 /**
- * 固定资源定义：`P` 与 `T` 与 `load` 绑定；`validate` 可选，只在这个身份被提交时执行一次。
+ * 固定资源定义：一个 URL 加上可选的参数准入规则。**取数由框架按 URL 发起**（`createRefreshManager`
+ * 注入的 axios 实例发 POST，请求体就是参数值），所以定义里不再有取数函数；`T` 只用来携带这个接口的
+ * 原始返回结构。
  *
- * 两个成员都写成**方法**而不是函数属性：方法参数按双变比较，具体 Source 因此可以直接进入框架的
+ * `validate` 写成**方法**而不是函数属性：方法参数按双变比较，具体 Source 因此可以直接进入框架的
  * 擦除视图，接收点不必留类型断言（代价见 ADR-24）。`P` 的值域约束见 DESIGN §4.1。
  */
 export interface RefreshSource<P extends object, T> {
-  load(args: ReadonlySnapshot<P>, context: { readonly signal: AbortSignal }): Promise<T>
+  /** 身份的一半：POST 的 URL 路径。参数值（请求体）是另一半，两者一起决定共享哪个实例。 */
+  readonly name: string
   validate?(args: ReadonlySnapshot<P>): boolean
 }
 

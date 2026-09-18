@@ -3,7 +3,7 @@ import {
 } from 'vue'
 import type { App } from 'vue'
 import { RefreshCore } from './core.ts'
-import type { Config, Handle } from './core.ts'
+import type { Config, Handle, RefreshHttp } from './core.ts'
 import { prepareParameters } from './source.ts'
 import type {
   RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions, RefreshSource,
@@ -87,12 +87,19 @@ export function useRefresh<P extends object, T>(
   }
 }
 
-/** 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限（显式刷新与自动刷新共用这些槽位）；需要浏览器环境。 */
-export function createRefreshManager(options: { readonly maxConcurrent: number }): RefreshManager {
+/**
+ * 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限（显式刷新与自动刷新共用这些槽位）；
+ * `axios` 是取数用的实例——框架按资源定义里的 URL 发 `post(url, 参数值, { signal })`，
+ * 所以你配好的 baseURL／拦截器／鉴权头都照旧生效；需要浏览器环境。
+ */
+export function createRefreshManager(options: {
+  readonly maxConcurrent: number
+  readonly axios: RefreshHttp
+}): RefreshManager {
   if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
     throw new TypeError('maxConcurrent 必须是正安全整数')
   }
-  const core = new RefreshCore(options.maxConcurrent)
+  const core = new RefreshCore(options.maxConcurrent, options.axios)
   let installed: App | null = null
 
   return {

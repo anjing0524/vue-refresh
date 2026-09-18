@@ -1,5 +1,5 @@
 import stringify from 'fast-json-stable-stringify'
-import type { RefreshSource } from './public-types.ts'
+import type { ReadonlySnapshot, RefreshSource } from './public-types.ts'
 
 /**
  * 参数边界：固定资源定义（`defineRefresh`）与提交边界的一次准备（`prepareParameters`）。
@@ -26,10 +26,19 @@ type JsonValue = string | number | boolean | null | undefined | readonly JsonVal
  */
 type JsonParameters<P> = { [K in keyof P]: JsonValue }
 
-/** 声明一种固定业务资源。`definition` 必须是应用级常量；在渲染或提交中重建会得到新的共享身份。 */
-export function defineRefresh<P extends JsonParameters<P>, T>(definition: RefreshSource<P, T>): RefreshSource<P, T> {
+/**
+ * 声明一种固定业务资源：`name` 是取数目标的 URL，`validate` 是参数准入规则。
+ *
+ * 身份就是 URL 与参数值，**同一个 URL 声明多少次都合并到同一个实例**；`definition` 仍建议放模块级常量，
+ * 免得每个调用点各写一份 `validate`。空 URL 会把所有资源并成一条，因此在定义点直接拒绝。
+ */
+export function defineRefresh<P extends JsonParameters<P>, T>(
+  name: string,
+  definition: { validate?: (args: ReadonlySnapshot<P>) => boolean } = {},
+): RefreshSource<P, T> {
+  if (typeof name !== 'string' || name.length === 0) throw new TypeError('defineRefresh 需要一个非空的 URL')
   // 不冻结调用方对象：框架只持有复制出来的私有副本。
-  return Object.freeze({ load: definition.load, validate: definition.validate })
+  return Object.freeze({ name, validate: definition.validate })
 }
 
 /** 值域检查：对象型参数只能是普通对象或数组——`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 这类容器一律拒绝。 */

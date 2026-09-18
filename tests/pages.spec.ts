@@ -8,14 +8,17 @@
 import { expect, test } from '@playwright/test'
 import type { APIRequestContext, Page } from '@playwright/test'
 
-interface Row { id: number; status: string; query: string }
+interface Row { id: number; status: string; body: string }
 
 test.describe.configure({ timeout: 45_000 })
 
 const state = async (request: APIRequestContext): Promise<Row[]> =>
   await (await request.get('/__fixture/state')).json() as Row[]
 
-const param = (row: Row, name: string): string | null => new URLSearchParams(row.query).get(name)
+const param = (row: Row, name: string): string | null => {
+  const value = (JSON.parse(row.body) as Record<string, unknown>)[name]
+  return value === undefined ? null : String(value)
+}
 const symbolOf = (row: Row): string | null => param(row, 'symbol')
 
 /** 最后一条匹配的请求号；`Array.findLast` 不在 ES2022 lib 内，这里手写。 */

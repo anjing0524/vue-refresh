@@ -14,14 +14,15 @@
 
 ```text
 public-types.ts            公共类型的唯一代码定义与状态取值常量；不依赖运行时模块
-source.ts                  固定资源定义、提交边界准备与稳定键
+source.ts                  固定资源定义（URL ＋ 参数准入）、提交边界准备与稳定键
 core.ts                    跨实例的协调者（注册表、名册、队列与并发、调度）＋ 一个身份的 Resource 类
 vue.ts                     组件适配与安装：配置快照、句柄、生命周期、可见性、只读入口
 index.ts                   包入口（三个函数与 6 个公共类型；没有常量对象）
 ```
 
 依赖方向单向：`public-types` ← `source` ← `core` ← `vue` ← `index`。
-核心不依赖 Vue 或任何状态库；运行期只依赖 `fast-json-stable-stringify`（零依赖，参数键的确定性编码）。这条方向由 `pnpm check:docs` 校验：
+核心不依赖 Vue 或任何状态库，也不 import 任何 HTTP 客户端：取数用的 axios 实例由 `createRefreshManager` 注入，
+`core.ts` 只调它的 `post`。运行期只依赖 `fast-json-stable-stringify`（零依赖，参数键的确定性编码）。这条方向由 `pnpm check:docs` 校验：
 **运行期边必须严格向下**，同层或向上的运行期边必须同时在 `check-docs.mjs` 与本节登记，否则直接失败；
 类型回边只报告（运行期被擦除）。本版没有需要登记的例外边。
 
@@ -55,7 +56,7 @@ useRefresh（组件 setup）
 reconcile  = coordinate ＋ flushSoon（两步必须分开：coordinate 在 flush 里也会跑，那里不能再排 flush）
 coordinate → 资格成立则接入实例或更新间隔，否则退订（失去存在时先结算未完成的刷新要求）
 flush      → 协调句柄 → 一趟：到期入队 ＋ 收齐最早到期时刻 → 按 FIFO 占槽启动 → 安排唯一唤醒 Timer
-runTask    → source.load → 复核任务身份 → 记结果与结算时刻 → Resource.publish → finally：清计时、释放槽位、补未满足的要求、再调度
+runTask    → http.post(URL, 参数副本) → 复核任务身份 → 记结果与结算时刻 → Resource.publish → finally：清计时、释放槽位、补未满足的要求、再调度
 expire     → 上限到期：先撤销在册身份 → abort → 按请求失败结算 → 补后继 → 再调度
 Resource.publish → 有效订阅 ∪ 未结算的刷新要求，各一份独立副本 → 结算刷新要求（结算在交付之后）
 ```
@@ -97,7 +98,7 @@ flowchart LR
 
 ### 3.2 身份
 
-- Source 对象身份 ＋ `Parameters.key` 定位实例；实例的生存期由订阅与刷新要求共同决定。
+- URL（`RefreshSource.name`）＋ `Parameters.key` 定位实例；同一个 URL 与同一份参数值就是同一个实例，因此两处各写一份定义也照样合并。实例的生存期由订阅与刷新要求共同决定。
 - **没有第二套计数**：任务、结果与刷新要求都不记版本或代次，公开通知也不带「由谁触发」
   （ADR-43 删掉等待者的版本下限、ADR-45 删掉任务版本、ADR-47 删掉声明代次）。
 
@@ -107,8 +108,8 @@ flowchart LR
 
 | 所有者 | 字段、初值 | 写入与释放 |
 |---|---|---|
-| Source | `load`、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立；所有使用方释放引用后回收 |
-| Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给每个消费者（`validate`／每轮 `load`／每个接收者的 `display`）时各复制一份；需求与实例释放后回收 |
+| Source | `name`（取数 URL，身份的一半）、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立（URL 必须非空）；所有使用方释放引用后回收 |
+| Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给每个消费者（`validate`／每轮请求体／每个接收者的 `display`）时各复制一份；需求与实例释放后回收 |
 | Handle | 组 A 端口与配置：`source` / `config=null` / `publish` / `onError`；组 B 状态：`parameters=null`、`active=false`；组 C 接驳：`cleanup=null` | 三种角色分开看（**本表是这三组角色的权威定义**）：**组 A** 适配层提供、核心只读——`source` / `publish` / `onError` 创建时给全，`config` 是会变的快照字段（适配层每读到新值就改写，核心只读字段、不调 getter）；**组 B** 核心独占写入，适配层只给初值、从不读；**组 C** `cleanup` 是唯一双向成员：适配层在 watcher 就绪后写一次（晚于 `addHandle` 才产生），核心在 `removeHandle` 读、清、调。**两件事不存字段**：「句柄是否已释放」是 `RefreshCore.handles` 的名册成员资格（§3.7），「订阅到哪个实例」是那个实例 `subscribers` 的成员资格（§3.5 第 1 条，ADR-57）。`publish` 声明为**方法**，方法参数双变，具体 `RefreshDisplay<P, T>` 因此可以直接进入擦除后的注册表槽位（ADR-24） |
 | Resource | 类：`core`（只用它两个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`entry=null`、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `deliverLatest` / `publish` / `fail` / `clearRequest` / `refill`（`deliverTo` 私有）；核心越出实例边界只碰四个字段：`task`（只经 `placeTask`，§3.5 第 4 条）、`entry`（`releaseIfUnused` 清）、`subscribers` 与 `waiters` 的增删（`coordinate` / `unsubscribe` / `refresh`） |
 | Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；位置（在队／在跑／被弃／已结算）只由 `placeTask` 迁移；`finally` 交还真实槽位，`expire` 提前交还 |
@@ -220,8 +221,8 @@ flowchart LR
 不再另判「实例是否仍在册」：「都空」已经蕴含「在册」，因为注销是唯一的删除路径，而空实例再也拿不到新的边
 （§3.5 第 11 条；ADR-44 删掉那次在册复核的依据）。注销做四件事：删注册、
 清 `entry`、撤销当前执行、`abort` 在途；在跑的那次标为**被弃**——它仍占着并发槽位，直到迟到的结束自己交还，
-而当场交还就会让在途的 `load` 与后来者并发；还在排队的任务同时从 `queue` 移除（`placeTask`，ADR-56）。
-`abort` 不承诺底层立刻结束，所以迟到的 `load` 返回由 `runTask` 的身份复核（`resource.task !== task`）判为无效：
+而当场交还就会让在途的请求与后来者并发；还在排队的任务同时从 `queue` 移除（`placeTask`，ADR-56）。
+`abort` 不承诺底层立刻结束，所以迟到的响应由 `runTask` 的身份复核（`resource.task !== task`）判为无效：
 不写结果、不交付、不二次通知；它的 `finally` 只清自己的计时与槽位。
 
 **三、上限到期（为什么先撤销身份再 abort）**
@@ -234,7 +235,7 @@ flowchart LR
 
 ### 4.1 参数准备与键
 
-固定 Source 绑定 `P`、`T`、`load` 及可选同步 `validate`。`P` 的值域在声明点由 `defineRefresh` 约束为 JSON 值（对象型只能是普通对象或数组，ADR-52），提交边界再由 `assertJsonValue` 运行期兜底：`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 等容器的内容对编码不可见，两个内容不同的参数会塌成同一个身份，故一律拒绝（`Date` 请传 ISO 字符串）。业务字段的合法性仍不归框架——那是调用方与 `validate` 的责任。编码交给 `fast-json-stable-stringify`，标量沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 字段按省略；函数与 Proxy 这类复制不了的值由 `structuredClone` 拒绝，循环引用让编码交不出身份。
+固定 Source 绑定取数 URL（`name`）、`P`、`T` 及可选同步 `validate`。`P` 的值域在声明点由 `defineRefresh` 约束为 JSON 值（对象型只能是普通对象或数组，ADR-52），提交边界再由 `assertJsonValue` 运行期兜底：`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 等容器的内容对编码不可见，两个内容不同的参数会塌成同一个身份，故一律拒绝（`Date` 请传 ISO 字符串）。业务字段的合法性仍不归框架——那是调用方与 `validate` 的责任。编码交给 `fast-json-stable-stringify`，标量沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 字段按省略；函数与 Proxy 这类复制不了的值由 `structuredClone` 拒绝，循环引用让编码交不出身份。
 
 提交边界**一次**执行；四步各由一个函数负责，没有共享、也没有需要冻结的副作用：
 
@@ -261,13 +262,15 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 
 ### 4.3 数据所有权
 
-- DTO 业务校验由 `load` 所在的 HTTP 适配器负责。
+- DTO 业务校验由取数所在的传输侧负责（本仓示例是 `demoHttp`，接入方通常是 axios 响应拦截器）。框架拿到的是
+  `response.data`，只做结果边界检查（拒绝 `undefined`、原生复制），不做形状复核——因此畸形响应在框架看来是
+  一次**成功**：它会覆盖旧结果。要不要挡住它，是传输侧的决定。
 - 框架拒绝 `undefined` 并执行 `structuredClone`；不做原型白名单、自有描述符、循环或复制后形状复核。
 - 原生支持的 `Date` / `Map` / 循环等可被复制，**不表示**框架验证了业务合法性；不支持的值由原生复制抛错，
   沿用共享请求失败处理；`null` 是有效结果。
 - 结果 → 每个接收者各复制一份（`display` 是唯一出口）；不冻结业务原对象，不用 JSON 来回 `parse`。
 - **参数与结果的所有权相同**：两者都是每个消费者各复制一份（`structuredClone`，ADR-52）。参数在提交边界复制一份
-  作为框架私有权威副本，`Resource.deliverTo` 交付前再复制一份、每一轮 `load` 也各拿一份，因此页面写自己的
+  作为框架私有权威副本，`Resource.deliverTo` 交付前再复制一份、每一轮请求体也各拿一份，因此页面写自己的
   `display.args` 改不到别人的画面、下一轮请求的参数或身份键所描述的值。**隔离不靠冻结**：`Object.freeze` 冻的是
   属性描述符，而 `Map.set` / `Set.add` / `Date.setTime` 写的是内部槽，规范上冻不住——既然私有副本不外发，
   就不需要「冻得住」这个假设。
@@ -301,7 +304,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 - `queue` / `running` 是执行位置的唯一事实：`running` 统计真实尚未结束的任务，也就是并发槽。
 - 显式刷新与自动刷新共用队列与 `maxConcurrent`；满槽排队，不绕过上限。
 - **框架上限**从任务真正开始执行起算（排队不计入），数值 `10000` 毫秒由确认人给出（ADR-20）。
-  到期按共享请求失败结算并立即出册，因此挂死的传输、忘了拒绝的适配器、把长连接当一次 `load` 的封装
+  到期按共享请求失败结算并立即出册，因此挂死的传输、忘了拒绝的适配器、把长连接当一次取数的封装
   都不能让槽位永久被占。abort 会取消该计时。
 - 出册后这次执行迟到的结束在任务身份复核处被判无效：不写结果、不交付、不二次通知。
 - 因此 `maxConcurrent` 约束的是**在册任务数**：被上限结算的任务不再计入，其底层请求可能仍未结束。
@@ -350,7 +353,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 - `onError` 同步执行，返回的 Promise 拒绝立即观察但不等待，不阻塞其他接收者。
 - 框架**调用**的 `publish` / `onError` / `cleanup` 抛错或返回拒绝的 Promise 都只被吞掉，
   不改变已定结果、订阅、调度与其他接收者的交付；框架自身不写诊断日志。
-- 隔离面恰好是这三类回调：`load` 拿到的 `AbortSignal` 上的监听器由宿主在 `abort()` 时同步调用，
+- 隔离面恰好是这三类回调：传输拿到的 `AbortSignal` 上的监听器由宿主在 `abort()` 时同步调用，
   它们的抛错由宿主上报，框架 catch 不到，因此不在承诺内。
 - 后台失败保留需求与开启意愿，旧画面不变，下个周期继续；框架不改写调用方的 `enabled`。
 
@@ -397,7 +400,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 
 | 符号 | 做什么 |
 |---|---|
-| `defineRefresh` | 声明一种固定业务资源；定义必须是应用级常量 |
+| `defineRefresh` | 声明一种固定业务资源：URL（身份的一半，必须非空）＋ 可选参数准入规则；建议放应用级常量 |
 | `useRefresh` | 组件侧入口：登记本页需求句柄，跟踪配置与生命周期，返回显示面与两个动作 |
 | `createRefreshManager` | 创建应用级协调者；`install` 接上可见性监听与卸载释放 |
 | `RefreshCore.isDisposed` | 协调者是否已销毁；存活状态的唯一公开出口 |

@@ -2,9 +2,11 @@
  * 三条代表页面共用的业务定义与本地服务适配。
  *
  * 页面只做两件事：声明「要哪份数据、多久一次、什么时候算需要」，以及决定拿到结果后怎么显示。
- * 身份、共享、调度、取消与有效结果交付都由框架负责；参数与 DTO 的运行时校验属于 HTTP 边界。
+ * 身份（URL ＋ 参数值）、共享、调度、取消与有效结果交付都由框架负责；请求也由框架发起——它按定义里的
+ * URL 对 `demoHttp` 发 `post(url, 参数值, { signal })`。参数与 DTO 的运行时校验属于这一侧（业务／传输适配）。
  */
 import { defineRefresh } from '../src/source'
+import type { RefreshHttp } from '../src/core'
 
 
 export type SortField = 'price' | 'change' | 'volume'
@@ -25,7 +27,15 @@ export interface CallLog { id: number; url: string; finished: boolean; aborted: 
 
 export const log: { calls: CallLog[]; events: string[] } = { calls: [], events: [] }
 
-async function request(path: string, signal: AbortSignal): Promise<unknown> {
+/**
+ * 传输：框架只要求一个 `post`，真实的 axios 实例在结构上就满足这个形状。
+ * 这里用 fetch 顶替（示例不带 axios 依赖），本地夹具按 URL 分派。
+ */
+export const demoHttp: RefreshHttp = {
+  post: async (url, body, { signal }) => ({ data: await request(url, body as object, signal) }),
+}
+
+async function request(path: string, body: object, signal: AbortSignal): Promise<unknown> {
   const call: CallLog = { id: log.calls.length + 1, url: path, finished: false, aborted: false, failed: false }
   log.calls.push(call)
   log.events.push(`请求${call.id}：开始 ${path}`)
@@ -35,9 +45,16 @@ async function request(path: string, signal: AbortSignal): Promise<unknown> {
   }, { once: true })
   try {
     // 超时与取消都在传输层生效：Deadline 覆盖响应体读取，不做提前的 Promise.race。
-    const response = await fetch(path, { signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]) })
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+    })
     if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    return await response.json()
+    const payload: unknown = await response.json()
+    // 响应形状的校验也在传输层：畸形响应变成取数失败，而不是被当成成功结果交付。
+    return path === '/api/list' ? readList(payload, (body as ListParams).page) : readQuote(payload)
   } catch (error) {
     call.failed = true
     throw error
@@ -46,9 +63,6 @@ async function request(path: string, signal: AbortSignal): Promise<unknown> {
     log.events.push(`请求${call.id}：执行结束`)
   }
 }
-
-const quoteQuery = (args: QuoteParams): string =>
-  `account=${encodeURIComponent(args.account)}&symbol=${encodeURIComponent(args.symbol)}`
 
 /** HTTP 边界的响应校验：业务结构在这里被拒绝，框架只拒绝 undefined 并建立副本所有权。 */
 function readQuote(body: unknown): QuoteResult {
@@ -59,10 +73,6 @@ function readQuote(body: unknown): QuoteResult {
     throw new TypeError('Invalid quote response')
   }
   return { quote: { price, requestId } }
-}
-
-export async function runQuote(args: QuoteParams, { signal }: { signal: AbortSignal }): Promise<QuoteResult> {
-  return readQuote(await request(`/api/quote?${quoteQuery(args)}`, signal))
 }
 
 function readList(body: unknown, page: number): ListResult {
@@ -77,25 +87,16 @@ function readList(body: unknown, page: number): ListResult {
   return { rows, page, requestId: data.requestId }
 }
 
-export async function runList(args: ListParams, { signal }: { signal: AbortSignal }): Promise<ListResult> {
-  const query = new URLSearchParams({
-    account: args.account, market: args.market, page: String(args.page), sortBy: args.sortBy,
-  })
-  return readList(await request(`/api/list?${query.toString()}`, signal), args.page)
-}
-
 const MARKETS = ['SH', 'SZ', 'HK']
 
-export const listSource = defineRefresh<ListParams, ListResult>({
+export const listSource = defineRefresh<ListParams, ListResult>('/api/list', {
   // validate 属于资源定义：所有使用方共用同一套业务规则，只检查业务条件。
   validate: p => p.account.length > 0 && MARKETS.includes(p.market)
     && Number.isSafeInteger(p.page) && p.page >= 1,
-  load: runList,
 })
 
-export const quoteSource = defineRefresh<QuoteParams, QuoteResult>({
+export const quoteSource = defineRefresh<QuoteParams, QuoteResult>('/api/quote', {
   validate: p => p.account.length > 0 && p.symbol.length > 0,
-  load: runQuote,
 })
 
 /** 相对时间按当前时刻重算（随交付重渲染）；页面不为此自建 Timer。 */

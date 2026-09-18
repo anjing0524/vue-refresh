@@ -10,7 +10,7 @@ export interface Driver {
   nestedOuter(shown: boolean): Promise<void>
   visibility(hidden: boolean): Promise<void>
   unmount(): Promise<void>
-  requests(): Promise<Array<{ id: number; status: string; query: string }>>
+  requests(): Promise<Array<{ id: number; status: string; body: string }>>
   release(id: number): Promise<void>
   price(name: string): Promise<string>
 }

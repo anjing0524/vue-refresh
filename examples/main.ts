@@ -3,10 +3,10 @@ import type { Component } from 'vue'
 import { defineRefresh } from '../src/source'
 import type { RefreshHandle } from '../src/public-types'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue'
-import type { RefreshCore } from '../src/core'
+import type { RefreshCore, RefreshHttp } from '../src/core'
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
-import { log } from './sources'
+import { demoHttp, log } from './sources'
 import type { CallLog } from './sources'
 import { QueryListPage } from './pages/query-list'
 import { QuotePanelPage } from './pages/quote-panel'
@@ -71,7 +71,10 @@ function mountHarness(): void {
     try {
       if (deferred) return await deferred
       // Deadline includes response body consumption; no early Promise.race.
-      const response = await fetch(`/api/quote?account=${args.account}&symbol=${args.symbol}`, {
+      const response = await fetch('/api/quote', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(args),
         signal: AbortSignal.any([signal, AbortSignal.timeout(timeout)]),
       })
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
@@ -90,10 +93,13 @@ function mountHarness(): void {
       events.push(`请求${id}：执行结束`)
     }
   }
-  const source = defineRefresh<QuoteParams, Quote>({
+  const source = defineRefresh<QuoteParams, Quote>('/api/quote', {
     validate: params => params.account.length > 0 && params.symbol.length > 0,
-    load: readQuote,
   })
+  // 传输：框架只要求一个 post；controlled 模式的手动结算就在这个函数里。
+  const http: RefreshHttp = {
+    post: async (_url, body, { signal }) => ({ data: await readQuote(body as QuoteParams, { signal }) }),
+  }
   // 页面侧事实：上一次手刷拿到的结果时间。框架不再交付「这次是谁触发的」。
   const manualAt: Record<string, number> = {}
 
@@ -170,7 +176,7 @@ function mountHarness(): void {
       h('p', { class: 'note' }, '固定业务参数接口 · 共享刷新与显式刷新 · 验证范围见运行记录。'),
     ]),
   })
-  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2 })
+  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2, axios: http })
   app.use(refresh)
   if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
   app.mount('#app')
@@ -233,7 +239,7 @@ const VIEWS: Array<{ id: string; label: string; component: Component }> = [
  * 因此每个视图的共享事实只由它自己的组件决定。
  */
 function mountShell(): void {
-  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2 })
+  const refresh = createRefreshManager({ maxConcurrent: params.get('slots') === '1' ? 1 : 2, axios: demoHttp })
   const active = ref(params.get('page') ?? VIEWS[0]!.id)
   let core: RefreshCore | null = null
   const current = (): { id: string; label: string; component: Component } =>
