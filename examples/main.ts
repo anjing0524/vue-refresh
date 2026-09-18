@@ -1,4 +1,4 @@
-import { createApp, defineComponent, h, KeepAlive, onMounted, ref } from 'vue'
+import { createApp, defineComponent, h, KeepAlive, onMounted, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import type { Component } from 'vue'
 import { defineRefresh } from '../src/source'
@@ -16,12 +16,26 @@ import './style.css'
 
 const params = new URLSearchParams(location.search)
 
+/** 交付面里失败那一项的只读投影（`cause` 原样带出，观测面不解释它）。 */
+interface HarnessFailure { readonly cause: unknown; readonly at: number }
+
 /** 集成验证台的只读观测面；只给测试用，不是 src/package API。 */
 export interface HarnessSnapshot {
   calls: Array<{ id: number; aborted: boolean; finished: boolean }>
   events: string[]
-  pages: Record<string, { readonly args: QuoteParams; readonly data: Quote; readonly updatedAt: number; readonly manual: boolean } | null>
-  entries: Record<string, { data: Quote }>
+  /**
+   * 每页 `display.value` 的投影：**没有画面**（还没声明身份／已释放）时是 `null`；
+   * 画面存在但从未成功过时是 `data: null, updatedAt: null, failure: {...}`——两者不再混为一谈。
+   */
+  pages: Record<string, {
+    readonly args: QuoteParams
+    readonly data: Quote | null
+    readonly updatedAt: number | null
+    readonly failure: HarnessFailure | null
+    readonly manual: boolean
+  } | null>
+  /** 结果表只读投影：`data` 为最后一次成功，`failure` 为最近一次失败（成功会把失败清空）。 */
+  entries: Record<string, { data: Quote | null; failure: HarnessFailure | null }>
   running: number
   queued: number
   resources: number
@@ -112,33 +126,41 @@ function mountHarness(): void {
       core = currentCore()!
       const enabled = ref(true)
       const draftSymbol = ref('DEMO')
-      const task = useRefresh(source, { enabled, every, onError: () => { events.push('后台请求失败，等待下一周期') } })
+      const task = useRefresh(source, { enabled, every })
+      // 失败不再经回调推送：交付面出现新的失败对象时记一条事件（默认 pre flush，首次不触发）。
+      watch(() => task.display.value?.failure, failure => {
+        if (failure) events.push('后台请求失败，等待下一周期')
+      })
       components.set(props.label, { task, enabled })
       const args: QuoteParams = props.label === '甲'
         ? { account: 'demo', symbol: 'DEMO' } : { symbol: 'DEMO', account: 'demo' }
       onMounted(() => task.submit(args))
-      return () => h('section', { class: 'card', 'data-testid': props.label }, [
-        h('div', { class: 'card-heading' }, [h('h2', `组件${props.label}`), h('span', enabled.value ? '订阅中' : '已暂停')]),
-        h('p', { class: 'price', 'data-testid': `price-${props.label}` }, task.display.value?.data.quote.price.toString() ?? '等待首查'),
-        h('p', task.display.value ? `来自请求 ${task.display.value.data.quote.requestId}` : '两个组件共用同一来源和参数'),
-        h('p', task.display.value
-          ? `展示参数：${task.display.value.args.symbol} · ${task.display.value.updatedAt >= (manualAt[props.label] ?? Infinity) ? '本页刷新' : '共享刷新'}`
-          : ''),
-        // updatedAt 是墙钟读数：相对时间按 U16/§2.5 的建议把差值钳制到 0，避免校时回拨显示负数。
-        h('p', { 'data-testid': `age-${props.label}` }, task.display.value
-          ? `数据时间：${new Date(task.display.value.updatedAt).toLocaleTimeString()} · ${Math.max(0, Math.round((Date.now() - task.display.value.updatedAt) / 1000))} 秒前`
-          : ''),
-        h('label', ['品种 ', h('input', { value: draftSymbol.value, onInput: (event: Event) => { draftSymbol.value = (event.target as HTMLInputElement).value } })]),
-        h('button', {
-          onClick: () => {
-            // 手刷没有回执：页面自己记下点击时刻，交付后比较 `updatedAt` 判断这次结果是不是自己的动作之后产生的。
-            manualAt[props.label] = Date.now()
-            task.submit({ account: 'demo', symbol: draftSymbol.value })
-            task.refresh()
-          },
-        }, '刷新本页'),
-        h('button', { onClick: () => { enabled.value = !enabled.value } }, enabled.value ? '暂停刷新' : '恢复刷新'),
-      ])
+      return () => {
+        const display = task.display.value
+        const data = display?.data ?? null
+        return h('section', { class: 'card', 'data-testid': props.label }, [
+          h('div', { class: 'card-heading' }, [h('h2', `组件${props.label}`), h('span', enabled.value ? '订阅中' : '已暂停')]),
+          h('p', { class: 'price', 'data-testid': `price-${props.label}` }, data?.quote.price.toString() ?? '等待首查'),
+          h('p', data ? `来自请求 ${data.quote.requestId}` : '两个组件共用同一来源和参数'),
+          h('p', display && display.updatedAt !== null
+            ? `展示参数：${display.args.symbol} · ${display.updatedAt >= (manualAt[props.label] ?? Infinity) ? '本页刷新' : '共享刷新'}`
+            : ''),
+          // updatedAt 是墙钟读数：相对时间按 U16/§2.5 的建议把差值钳制到 0，避免校时回拨显示负数。
+          h('p', { 'data-testid': `age-${props.label}` }, display && display.updatedAt !== null
+            ? `数据时间：${new Date(display.updatedAt).toLocaleTimeString()} · ${Math.max(0, Math.round((Date.now() - display.updatedAt) / 1000))} 秒前`
+            : ''),
+          h('label', ['品种 ', h('input', { value: draftSymbol.value, onInput: (event: Event) => { draftSymbol.value = (event.target as HTMLInputElement).value } })]),
+          h('button', {
+            onClick: () => {
+              // 手刷没有回执：页面自己记下点击时刻，交付后比较 `updatedAt` 判断这次结果是不是自己的动作之后产生的。
+              manualAt[props.label] = Date.now()
+              task.submit({ account: 'demo', symbol: draftSymbol.value })
+              task.refresh()
+            },
+          }, '刷新本页'),
+          h('button', { onClick: () => { enabled.value = !enabled.value } }, enabled.value ? '暂停刷新' : '恢复刷新'),
+        ])
+      }
     },
   })
   /**
@@ -151,12 +173,15 @@ function mountHarness(): void {
     name: 'NestedWidget',
     setup() {
       const enabled = ref(true)
-      const task = useRefresh(source, { enabled, every, onError: () => { events.push('嵌套页后台请求失败，等待下一周期') } })
+      const task = useRefresh(source, { enabled, every })
+      watch(() => task.display.value?.failure, failure => {
+        if (failure) events.push('嵌套页后台请求失败，等待下一周期')
+      })
       components.set('嵌套', { task, enabled })
       onMounted(() => task.submit({ account: 'demo', symbol: 'NESTED' }))
       return () => h('section', { class: 'card', 'data-testid': 'nested' }, [
         h('div', { class: 'card-heading' }, [h('h2', '嵌套页'), h('span', enabled.value ? '订阅中' : '已暂停')]),
-        h('p', { class: 'price', 'data-testid': 'price-嵌套' }, task.display.value?.data.quote.price.toString() ?? '等待首查'),
+        h('p', { class: 'price', 'data-testid': 'price-嵌套' }, task.display.value?.data?.quote.price.toString() ?? '等待首查'),
       ])
     },
   })
@@ -194,10 +219,20 @@ function mountHarness(): void {
         events: [...events],
         pages: Object.fromEntries([...components].map(([name, c]) => {
           const display = c.task.display.value
-          return [name, display === null ? null : { ...structuredClone(display), manual: display.updatedAt >= (manualAt[name] ?? Infinity) }]
+          return [name, display === null ? null : {
+            args: structuredClone(display.args),
+            // `data` 可以为 null（首查就失败）；`updatedAt` 与它同生共死。
+            data: display.data === null ? null : structuredClone(display.data),
+            updatedAt: display.updatedAt,
+            failure: display.failure,
+            manual: display.updatedAt !== null && display.updatedAt >= (manualAt[name] ?? Infinity),
+          }]
         })),
         entries: Object.fromEntries(view.results
-          .map(row => [row.key, { data: row.entry.data as Quote }])),
+          .map(row => [row.key, {
+            data: row.cell.entry === null ? null : row.cell.entry.data as Quote,
+            failure: row.cell.failure,
+          }])),
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,
         timer: view.scheduled, pending: view.flushing,
@@ -214,8 +249,9 @@ function mountHarness(): void {
     resolve(id: number, price: number) { if (controlled) calls[id - 1]!.resolve({ quote: { price, requestId: id } }) },
     mutatePage(name: string, price: number) {
       // Deliberately bypass readonly only to verify runtime ownership isolation.
-      const data = components.get(name)!.task.display.value!.data as Quote
-      data.quote.price = price
+      const data = components.get(name)!.task.display.value?.data
+      if (!data) return
+      ;(data as Quote).quote.price = price
     },
     nestedOuter(shown: boolean) { nestedOuterShown.value = shown },
     // 受控可见性：真实浏览器里覆写 document.hidden 并派发真正的 visibilitychange 事件，

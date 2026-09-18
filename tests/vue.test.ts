@@ -56,6 +56,17 @@ const tick = async (): Promise<void> => {
   await new Promise(resolve => { setTimeout(resolve, 0) })
 }
 
+const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
+
+/** 采样是真实定时器上的事，断言不能假设精确时刻，只能等到条件成立或超时。 */
+async function until(condition: () => boolean, message: string, budget = 2_000): Promise<void> {
+  const end = Date.now() + budget
+  while (!condition()) {
+    if (Date.now() > end) throw new Error(`超时：${message}`)
+    await sleep(10)
+  }
+}
+
 test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿后停止；卸载后释放并保留画面', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>('/api/vue/47')
@@ -95,17 +106,16 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
   assert.equal(currentCore()?.snapshot().resources.length, 0, '卸载后实例与结果一并消失')
 })
 
-test('A04/A05 配置非法：不通知并停止订阅，修正后按当前资格恢复', async () => {
+test('A04/A05 配置非法：不取数并停止订阅，修正后按当前资格恢复', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>('/api/vue/84')
   const manager = newManager(1, async () => { loads++; return 1 })
   const every = ref(100_000)
-  const errors: unknown[] = []
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: ref(true), every, onError: error => { errors.push(error) } })
+      api = useRefresh(quote, { enabled: ref(true), every })
       return () => h('div')
     },
   }))
@@ -119,8 +129,8 @@ test('A04/A05 配置非法：不通知并停止订阅，修正后按当前资格
   every.value = 0
   await tick()
   await tick()
-  // 配置非法不通知：它是本页自己的输入事实，框架只负责不订阅、不请求（ADR-51）。
-  assert.equal(errors.length, 0)
+  // 配置非法不产生任何结果：它是本页自己的输入事实，框架只负责不订阅、不请求（ADR-51）。
+  assert.equal(api.display.value?.failure, null, '配置非法不写失败')
 
   every.value = 50_000
   await tick()
@@ -204,17 +214,16 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
   app.unmount()
 })
 
-test('A04 运行期读到非布尔时按配置非法处理：不订阅、不通知、修正后恢复', async () => {
+test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写失败、修正后恢复', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>('/api/vue/187')
   const manager = newManager(1, async () => { loads++; return 1 })
   const enabled = ref<boolean>(true)
-  const errors: unknown[] = []
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled, every: ref(100_000), onError: error => { errors.push(error) } })
+      api = useRefresh(quote, { enabled, every: ref(100_000) })
       return () => h('div')
     },
   }))
@@ -229,7 +238,7 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、不通�
   ;(enabled as Ref<unknown>).value = undefined
   await tick()
   await tick()
-  assert.equal(errors.length, 0, '配置非法不通知')
+  assert.equal(api.display.value?.failure, null, '配置非法不写失败')
   api.submit({ symbol: 'B' })
   await tick()
   assert.equal(loads, 1, '配置非法时不订阅')
@@ -237,6 +246,95 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、不通�
   enabled.value = true
   await tick()
   assert.equal(loads, 2, '修正后按当前资格恢复')
+  app.unmount()
+})
+
+test('A21 采样：慢页面不跟着快页面跳，只在自己的拍上抄；显式刷新不等拍', async () => {
+  let loads = 0
+  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/203')
+  const manager = newManager(2, async () => { loads++; return loads })
+  let slow!: RefreshHandle<{ symbol: string }, number>
+  let quick!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup: () => () => h('div', [h(Slow), h(Quick)]),
+  }))
+  // 两个页面声明同一个身份：这个身份按**最小的 every**取数（ADR-61），因此结果表一直在变。
+  const Slow = defineComponent({
+    setup() {
+      slow = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const Quick = defineComponent({
+    setup() {
+      quick = useRefresh(quote, { enabled: ref(true), every: ref(20) })
+      return () => h('div')
+    },
+  })
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  slow.submit({ symbol: 'A' })
+  quick.submit({ symbol: 'A' })
+  await tick()
+
+  const latest = (): unknown => currentCore()?.snapshot().results[0]?.cell.entry?.data
+  // 新身份的第一份内容不等拍：两个页面都立即拿到首查结果。
+  assert.equal(slow.display.value?.data, 1, '慢页面的第一份内容立即上屏')
+  assert.equal(quick.display.value?.data, 1, '快页面的第一份内容立即上屏')
+
+  // 快页面 20ms 一拍、结果表一直有新版本；慢页面 100 秒一拍，所以它停在首查那一帧。
+  await until(() => loads >= 4, '快页面把共享取数推到第 4 次')
+  await until(() => quick.display.value?.data === latest(), '快页面跟到最新一版')
+  assert.equal(slow.display.value?.data, 1, '两拍之间结果表的新版本不改变慢页面的画面')
+  assert.notEqual(latest(), 1, '结果表确实一直在变（否则这一条什么也没证明）')
+
+  // 显式刷新不等拍：用户点名要的那一次，结果一到就抄进画面。
+  slow.refresh()
+  await until(() => slow.display.value?.data === latest(), '慢页面显式刷新后立即读到最新一版')
+  app.unmount()
+})
+
+test('A13 失败写进结果表那一格：首查失败也读得到，成功后失败被清掉，数据保留旧址', async () => {
+  let mode: 'ok' | 'fail' = 'fail'
+  let loads = 0
+  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/265')
+  const manager = newManager(1, async () => {
+    loads++
+    if (mode === 'fail') throw new Error(`boom-${loads}`)
+    return loads
+  })
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+
+  // 首查就失败：画面不能是 `null`，否则这个页面永远没有失败可读；`data` 为 `null` 表示从未成功过。
+  assert.notEqual(api.display.value, null, '首查失败也发布画面（否则首查失败无从读取）')
+  assert.equal(api.display.value?.data, null, '从未成功过：数据为 null')
+  assert.equal(api.display.value?.updatedAt, null)
+  assert.match(String((api.display.value?.failure?.cause as Error).message), /boom-1/, '原始异常原样带出')
+
+  mode = 'ok'
+  api.refresh()
+  await until(() => api.display.value?.data === 2, '显式刷新后读到成功结果')
+  assert.equal(api.display.value?.failure, null, '成功清掉失败')
+
+  mode = 'fail'
+  api.refresh()
+  await until(() => api.display.value?.failure !== null, '失败重新可读')
+  assert.equal(api.display.value?.data, 2, '失败不覆盖旧址（数据仍是上一次成功的）')
+  assert.equal(api.display.value?.updatedAt !== null, true, '失败不动结果的产生时间')
   app.unmount()
 })
 

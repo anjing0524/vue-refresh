@@ -15,7 +15,8 @@ import { monitorEventLoopDelay } from 'node:perf_hooks'
 
 // 最小浏览器环境：install 会注册可见性监听（本库只服务 SPA）。
 globalThis.document = { hidden: false, addEventListener() {}, removeEventListener() {} }
-import { createRenderer, defineComponent, h, onMounted, ref } from 'vue'
+import { createRenderer, defineComponent, h, onMounted, ref, watch } from 'vue'
+import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore } from '../src/vue.ts'
 import { defineRefresh } from '../src/source.ts'
 import { useRefresh } from '../src/vue.ts'
@@ -84,16 +85,20 @@ async function measure() {
       // 本库只服务 SPA：Node 里跑基准要先给出最小浏览器环境，再显式声明可见，
       // 与 tests/vue.test.ts 的做法一致（自定义渲染器不冒充浏览器可见性测试）。
       core.setVisible(true)
-      const task = useRefresh(source, { enabled: ref(true), every: ref(every), onError: () => { failures += 1 } })
+      const task = useRefresh(source, { enabled: ref(true), every: ref(every) })
+      // 失败不再回调推送：交付面出现新的失败对象时计一次（这是原输出字段 `failures` 的来源）。
+      watch(() => task.display.value?.failure, failure => { if (failure) failures += 1 })
       onMounted(() => task.submit({ symbol: `S${props.identity}` }))
-      return () => h('span', String(task.display.value?.data.price ?? ''))
+      return () => h('span', String(task.display.value?.data?.price ?? ''))
     },
   })
   const cards = Array.from({ length: subscriptionCount }, (_, index) => index % identityCount)
   const app = renderer.createApp({
     render: () => h('div', cards.map((identity, index) => h(Card, { key: index, identity }))),
   })
-  const manager = createRefreshManager({ maxConcurrent, axios: http })
+  const pinia = createPinia()
+  const manager = createRefreshManager({ maxConcurrent, axios: http, pinia })
+  app.use(pinia)
   app.use(manager)
 
   const heapBefore = process.memoryUsage().heapUsed

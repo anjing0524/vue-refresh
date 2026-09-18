@@ -18,6 +18,10 @@ const check: (condition: unknown, message: string) => asserts condition = (condi
   if (!condition) throw new Error(message)
 }
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+/** 观测面上某一页读到的价格；还没有数据（首查失败或尚未上屏）或没有这一页时为 `null`。 */
+const shown = (view: Snapshot['pages'][string] | undefined): number | null => view?.data?.quote.price ?? null
+/** 结果表某一格里最后一次成功的价格；从未成功过时为 `null`。 */
+const stored = (row: Snapshot['entries'][string] | undefined): number | null => row?.data?.quote.price ?? null
 async function until(condition: () => Promise<boolean>, message: string) {
   const end = performance.now() + 5_000
   while (!(await condition())) {
@@ -38,7 +42,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await d.release((await d.requests())[1]!.id)
     await until(async () => (await d.snapshot()).pages['甲']?.args.symbol === 'OTHER', 'refresh settles')
     const state = await d.snapshot()
-    check(state.pages['甲']!.args.symbol === 'OTHER' && state.pages['甲']!.manual, 'display contains refreshed parameters and the page knows it was its own refresh')
+    check(state.pages['甲']?.args.symbol === 'OTHER' && state.pages['甲']?.manual === true, 'display contains refreshed parameters and the page knows it was its own refresh')
     check(state.pages['乙'] === null, 'paused page without a refresh requirement receives nothing')
     check(Object.keys(state.entries).length === 1 && state.resources === 2, '两个身份各一个实例：甲换身份后的结果留在结果表里')
     await sleep(200)
@@ -106,7 +110,10 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     const state = await d.snapshot()
     check(state.calls[0]!.finished, 'deadline ends the real request')
     check((await d.requests())[0]!.status === 'aborted', 'transport saw the disconnect')
-    check(state.pages['甲'] === null, 'timed-out request delivers nothing')
+    // 失败是那一格的事实（ADR-63）：首查就失败时画面**不是** null，而是「有失败、没有数据」。
+    const timedOut = state.pages['甲']
+    check(shown(timedOut) === null && (timedOut?.failure ?? null) !== null,
+      'timed-out request delivers a failure and no data')
     check(state.running === 0 && state.queued === 0, 'deadline releases the physical slot')
     await sleep(1_000)
     check((await d.requests()).length === 1, 'next attempt waits for the interval, not a busy retry')
@@ -127,19 +134,19 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await d.resolve(1, 111)
     await until(async () => (await d.snapshot()).running === 0, 'old request really finished')
     const now = await d.snapshot()
-    check(now.pages['甲']!.data.quote.price === 222 && now.entries[id]!.data.quote.price === 222, '旧身份的结果不会覆盖新身份那一份')
+    check(shown(now.pages['甲']) === 222 && stored(now.entries[id]) === 222, '旧身份的结果不会覆盖新身份那一份')
     check(now.resources === 2, '两个身份各一个实例（旧身份由仍暂停的乙声明着）')
     check(!now.events.some(e => e.includes('失败')), '两个身份都不产生失败通知')
     // 乙仍在暂停：不是读者，画面冻结；重新激活后直接读回自己身份当前那一份（不重复取数）。
-    check(now.pages['乙'] === null, 'paused page stays frozen')
+    check(shown(now.pages['乙']) === null, 'paused page stays frozen')
     await d.enable('乙', true)
     await until(async () => await d.price('乙') === '111', 'restored page reads the current value of its own identity')
     check((await d.snapshot()).calls.length === 2, 'restoring reads the existing entry without a new request')
     await d.mutatePage('甲', 999)
     const isolated = await d.snapshot()
     // 结果是共享对象（ADR-59）：甲改的就是结果表里那一份（页面与结果表一起变）；乙读的是另一个身份，不受影响。
-    check(isolated.pages['甲']!.data.quote.price === 999 && isolated.entries[id]!.data.quote.price === 999, 'mutation of the shared entry is visible through the reader and the Store')
-    check(isolated.pages['乙']!.data.quote.price === 111, 'another identity is unaffected')
+    check(shown(isolated.pages['甲']) === 999 && stored(isolated.entries[id]) === 999, 'mutation of the shared entry is visible through the reader and the Store')
+    check(shown(isolated.pages['乙']) === 111, 'another identity is unaffected')
   } },
   { name: 'A09 真实结束才放槽：等待期间不启动、不忙循环', async run(d) {
     await d.open('/?mode=controlled&slots=1')
@@ -153,7 +160,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(blocked.running === 1 && blocked.calls.length === 1 && !blocked.pending && !blocked.timer, 'a full slot must queue without spinning')
     await d.resolve(1, 111)
     await until(async () => (await d.snapshot()).calls.length === 2, 'real empty slot advances queue')
-    check((await d.snapshot()).pages['甲']!.data.quote.price === 111, 'the first request delivers to its own identity')
+    check(shown((await d.snapshot()).pages['甲']) === 111, 'the first request delivers to its own identity')
     await d.resolve(2, 222)
     await until(async () => await d.price('乙') === '222', 'queued request actually delivers')
   } },
@@ -182,7 +189,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await until(async () => (await calls()).length === 2, '嵌套页首查')
     const first = (await calls())[1]!.id
     await d.resolve(first, 100 + first)
-    await until(async () => (await nestedDisplay())?.data.quote.price === 100 + first, '嵌套页拿到首查结果')
+    await until(async () => shown(await nestedDisplay()) === 100 + first, '嵌套页拿到首查结果')
     check((await d.snapshot()).resources === 2, '两个身份各自一个实例')
 
     // 祖先失活：外层 KeepAlive 切走 → 嵌套页 deactivated → 只失去资格（ADR-61）：
@@ -192,14 +199,14 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await sleep(200)
     check((await d.snapshot()).resources === 2, '祖先失活只失去资格：两个实例都留着')
     check((await calls()).length === before, '祖先失活不得产生请求')
-    check((await nestedDisplay())?.data.quote.price === 100 + first, '失活时画面保留')
+    check(shown(await nestedDisplay()) === 100 + first, '失活时画面保留')
 
     // 切回：仍是同一个实例与同一份结果（未到期），所以不重取，画面保持不变。
     await d.nestedOuter(true)
     await sleep(200)
     check((await calls()).length === before, '激活直接读回：未到期不重复取数')
     check((await d.snapshot()).resources === 2, '激活不重建实例')
-    check((await nestedDisplay())?.data.quote.price === 100 + first, '激活后画面仍是同一份结果')
+    check(shown(await nestedDisplay()) === 100 + first, '激活后画面仍是同一份结果')
 
     // 受控 visibilitychange：走 app.ts 注册的那条真实监听，而不是直接调用核心（隐藏 ＝ 环境不允许）。
     await d.visibility(true)

@@ -1,40 +1,49 @@
 import assert from 'node:assert/strict'
 import { afterEach, mock, test } from 'node:test'
 import { RefreshCore } from '../src/core.ts'
-import type { Config, Entry, Handle, Resource, ResultRow, ResultSink } from '../src/core.ts'
+import type { Config, Entry, Handle, Resource, ResultCell, ResultRow, ResultSink } from '../src/core.ts'
 import { defineRefresh, prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
-import type { RefreshDisplay, RefreshSource, SubmitResult } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshFailure, RefreshSource, SubmitResult } from '../src/public-types.ts'
 
 /** 每个用例结束时销毁核心：周期调度会留下唯一的唤醒 Timer，不销毁的话进程不会退出。 */
 const cores: RefreshCore[] = []
 
 /**
- * 结果表替身：与 Pinia store 同形（整条替换、随实例释放即删），并记录写入次序供断言。
- * `onWrite` 让用例模拟「写结果的那一刻页面代码同步重入」——旧契约里交付回调所在的位置。
+ * 结果表替身：与 Pinia store 同形（格＝成功 ＋ 失败，整格换新对象、随实例释放即删），
+ * 并记录成功写入次序供断言。`onWrite` 让用例模拟「写结果的那一刻页面代码同步重入」。
  */
 function newTable() {
-  const entries = new Map<string, Entry>()
+  const cells = new Map<string, ResultCell>()
   const writes: Array<{ url: string; key: string; entry: Entry }> = []
   const id = (url: string, key: string): string => `${url}\u0000${key}`
   const table = {
     sink: {
       write(url: string, key: string, entry: Entry): void {
-        entries.set(id(url, key), entry)
+        cells.set(id(url, key), { entry, failure: null })
         writes.push({ url, key, entry })
         table.onWrite?.()
       },
-      remove(url: string, key: string): void { entries.delete(id(url, key)) },
+      fail(url: string, key: string, failure: RefreshFailure): void {
+        cells.set(id(url, key), { entry: cells.get(id(url, key))?.entry ?? null, failure })
+        table.onWrite?.()
+      },
+      remove(url: string, key: string): void { cells.delete(id(url, key)) },
       list(): readonly ResultRow[] {
-        return [...entries].map(([raw, entry]) => {
+        const rows: ResultRow[] = []
+        for (const [raw, cell] of cells) {
+          if (cell.entry === null && cell.failure === null) continue
           const [url = '', key = ''] = raw.split('\u0000')
-          return { url, key, entry }
-        })
+          rows.push({ url, key, cell })
+        }
+        return rows
       },
     } satisfies ResultSink,
     writes,
     onWrite: null as (() => void) | null,
-    read(url: string, key: string): Entry | undefined { return entries.get(id(url, key)) },
+    read(url: string, key: string): ResultCell | undefined { return cells.get(id(url, key)) },
+    /** 这一格上当前的失败；空格子或成功过之后都是 `null`。 */
+    failure(url: string, key: string): RefreshFailure | null { return cells.get(id(url, key))?.failure ?? null },
   }
   return table
 }
@@ -82,12 +91,13 @@ const DEFAULT_CONFIG: Config = { enabled: true, every: 100_000, active: true }
 /** 只给要改的那几项；`null` 表示整份快照非法。 */
 type PartialConfig = { enabled?: boolean; every?: number; active?: boolean }
 
-/** 一页：句柄 ＋ 错误记录。与集成测试同一口径，直接驱动核心；画面按身份从结果表现读。 */
+/** 一页：句柄 ＋ 按身份读结果表。与集成测试同一口径，直接驱动核心；画面按身份从结果表现读。 */
 interface Page {
   readonly handle: Handle
-  readonly errors: unknown[]
   readonly last: RefreshDisplay<object, unknown> | undefined
-  /** 本页**当前身份**被写进结果表几次（旧契约里的「交付次数」）；没有身份时为 0。 */
+  /** 本页**当前身份**那一格上的失败；没有身份、或成功过之后为 `null`（ADR-63）。 */
+  failure(): RefreshFailure | null
+  /** 本页**当前身份**被写进结果表几次（成功；旧契约里的「交付次数」）；没有身份时为 0。 */
   writes(): number
   submit(args: object): SubmitResult
   refresh(): void
@@ -99,25 +109,26 @@ function page(
   core: RefreshCore,
   source: RefreshSource<object, unknown>,
   initial: PartialConfig | null = {},
-  hooks: { onError?: (error: unknown) => unknown } = {},
 ): Page {
   const table = tableOf(core)
-  const errors: unknown[] = []
   const handle: Handle = {
     source,
     config: initial === null ? null : { ...DEFAULT_CONFIG, ...initial },
-    onError: error => { if (hooks.onError) return hooks.onError(error); errors.push(error) },
     cleanup: null,
     parameters: null,
   }
   core.addHandle(handle)
   return {
     handle,
-    errors,
     writes(): number {
       const parameters = handle.parameters
       if (parameters === null) return 0
       return table.writes.filter(write => write.url === handle.source.name && write.key === parameters.key).length
+    },
+    failure(): RefreshFailure | null {
+      const parameters = handle.parameters
+      if (parameters === null) return null
+      return table.failure(handle.source.name, parameters.key)
     },
     submit: args => core.submit(handle, (): Parameters => prepareParameters(args, source)),
     refresh: () => core.refresh(handle),
@@ -138,10 +149,15 @@ function page(
     get last() {
       const parameters = handle.parameters
       if (parameters === null) return undefined
-      const entry = table.read(handle.source.name, parameters.key)
-      if (!entry) return undefined
+      const cell = table.read(handle.source.name, parameters.key)
+      if (!cell || (cell.entry === null && cell.failure === null)) return undefined
       // `display` 的形状：`args` 每次读取复制一份（身份键所描述的那份值），`data` 是结果表里同一个对象。
-      return { args: structuredClone(parameters.args), data: entry.data, updatedAt: entry.updatedAt }
+      return {
+        args: structuredClone(parameters.args),
+        data: cell.entry === null ? null : cell.entry.data,
+        updatedAt: cell.entry === null ? null : cell.entry.updatedAt,
+        failure: cell.failure,
+      }
     },
   }
 }
@@ -300,8 +316,8 @@ test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（�
   assert.equal(view.submit({ id: -1 }).status, 'rejected')
   assert.equal(view.handle.parameters, before)
   assert.equal(declared(core, view), instance)
-  // 校验失败不改动任何状态：旧身份仍然在后台继续取数；输入问题也不经 onError（ADR-51）。
-  assert.equal(view.errors.length, 0, '参数被拒只走同步返回值')
+  // 校验失败不改动任何状态：旧身份仍然在后台继续取数；输入问题也不进结果表（ADR-51）。
+  assert.equal(view.failure(), null, '参数被拒只走同步返回值')
 
   // 业务 validate 自己抛错时同样按 rejected 返回：异常由提交边界收住，不冒泡到调用方。
   const throwing = defineRefresh<{ id: number }, number>('/api/core/159-throwing', {
@@ -310,7 +326,7 @@ test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（�
   const victim = page(core, throwing)
   assert.equal(victim.submit({ id: 1 }).status, 'rejected')
   assert.equal(victim.handle.parameters, null, '被拒的声明不改动状态')
-  assert.equal(victim.errors.length, 0, '被拒的声明不产生通知')
+  assert.equal(victim.failure(), null, '被拒的声明不产生失败')
 })
 
 test('A14 在途任务直接满足本次刷新：不追发第二次', async () => {
@@ -551,7 +567,7 @@ test('A05 暂停只失去资格：已发起的刷新要求继续等当前请求�
   assert.equal(reader(core, view), false, '要求已结算：暂停页不再是读者，画面冻结在最后一帧')
 })
 
-test('A13 共享请求失败：保留旧画面、通知页面、下个周期继续', async () => {
+test('A13 共享请求失败：保留旧址、把失败写进该身份那一格、下个周期继续', async () => {
   let fail = false
   let calls = 0
   const source = defineRefresh<{ id: number }, number>('/api/core/425')
@@ -565,7 +581,7 @@ test('A13 共享请求失败：保留旧画面、通知页面、下个周期继�
 
   assert.ok(calls >= 2)
   assert.equal(view.last?.data, 5, '失败保留旧画面')
-  assert.ok(view.errors.length >= 1, '失败经 onError 通知')
+  assert.ok(view.failure(), '失败写进该身份那一格：按身份读得到（读取面这一侧由 tests/vue.test.ts 验证）')
   assert.equal(declared(core, view)?.declarers.size, 1, '资格与开启意愿都保留')
 })
 
@@ -583,12 +599,12 @@ test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重
 
   rejecters[0]?.(new Error('down'))
   await settle()
-  assert.equal(view.errors.length, 1, '失败经 onError 通知：刷新没有回执')
+  assert.ok(view.failure(), '失败写进该身份那一格：刷新没有回执')
   assert.ok(reader(core, view), '资格与开启意愿都保留')
   assert.equal(resolvers.length, 1, '失败不自动重试')
 })
 
-test('A13/A14 暂停页显式刷新失败：没有回执，失败仍经 onError 通知', async () => {
+test('A13/A14 暂停页显式刷新失败：没有回执，失败写进该身份那一格等读取面取', async () => {
   const source = defineRefresh<{ id: number }, number>('/api/core/466')
   const core = newCore(2, async () => { throw new Error('down') })
   const paused = page(core, source, { enabled: false, every: 100_000 })
@@ -597,7 +613,7 @@ test('A13/A14 暂停页显式刷新失败：没有回执，失败仍经 onError 
   paused.refresh()
   await settle()
 
-  assert.equal(paused.errors.length, 1, '未订阅页面只有 onError 这条失败通道')
+  assert.ok(paused.failure(), '未订阅页面按身份从结果表读到失败')
   assert.equal(paused.writes(), 0, '失败不写结果')
   assert.equal(core.snapshot().resources.length, 1, '失败撤销要求；声明还在，实例不释放')
 })
@@ -609,8 +625,8 @@ test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结�
   const empty = page(core, source)
   empty.submit({ id: 1 })
   await settle()
-  assert.equal(empty.errors.length, 1)
-  assert.equal(empty.last, undefined, '空结果不写结果')
+  assert.ok(empty.failure(), '空结果按请求失败：这一格处于失败态')
+  assert.equal(empty.last?.data, null, '空结果不写数据：这一格只有失败')
 
   mode = 'null'
   const view = page(core, source)
@@ -694,7 +710,7 @@ test('A10 上限到期：挂死的 load 出册并交还槽位，迟到的结束�
 
   assert.equal(core.snapshot().running.length, 0, '上限到期当场出册，槽位交还调度')
   assert.equal(core.snapshot().resources[0]?.task, null)
-  assert.equal(view.errors.length, 1, '上限到期按请求失败通知一次')
+  assert.ok(view.failure(), '上限到期按请求失败写一次该格')
 
   const delivered = view.writes()
   resolvers[0]?.(99)
@@ -743,7 +759,7 @@ test('A04/A17 两个协调者互不共享：同 Source 同参数各自取数', a
   assert.equal(right.last?.data, 2)
 })
 
-test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态与其他接收者', async () => {
+test('A16 页面回调抛错不影响框架状态与其他页面：传输失败只写结果表，清理抛错被隔离', async () => {
   const source = defineRefresh<{ id: number }, number>('/api/core/625')
   // 同一个核心只有一个传输，因此按 URL 分派：失败的资源用另一个 URL。
   const core = newCore(2, async url => { if (url === '/api/core/643') throw new Error('down'); return 3 })
@@ -759,19 +775,23 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   assert.equal(hostile.last?.data, 3, '两个读者读的是结果表里同一份结果')
   assert.equal(core.snapshot().resources.length, 1, '页面回调失败不影响实例与结果')
 
-  // 框架唯一还会调用的页面回调是 `onError`：它抛错同样被隔离，其他读者与框架状态都不受影响。
-  let notified = 0
+  // 传输失败只是这个身份那一格的事实：两个声明者都能读到它，框架状态照旧。
   const failing = defineRefresh<{ id: number }, number>('/api/core/643')
-  const victim = page(core, failing, { enabled: true, every: 100_000 }, {
-    onError: () => { notified++; throw new Error('handler failed') },
-  })
+  const victim = page(core, failing, { enabled: true, every: 100_000 })
   const witness = page(core, failing, { enabled: true, every: 100_000 })
   victim.submit({ id: 1 })
   witness.submit({ id: 1 })
   await settle()
-  assert.equal(notified, 1)
-  assert.equal(witness.errors.length, 1, '抛错的读者不影响另一个读者收到失败通知')
+  assert.ok(victim.failure(), '失败方自己读得到')
+  assert.ok(witness.failure(), '同一个身份另一个读者读的是同一格，也读得到')
+  assert.equal(victim.failure()?.cause instanceof Error, true, '原始异常原样带出')
   assert.equal(declared(core, victim)?.declarers.size, 2)
+
+  // 框架唯一还会调用的页面回调是 `cleanup`：它抛错同样被隔离，名册与别的句柄都不受影响。
+  victim.handle.cleanup = () => { throw new Error('cleanup failed') }
+  assert.doesNotThrow(() => { core.removeHandle(victim.handle) })
+  assert.equal(core.snapshot().handles.includes(victim.handle), false, '抛错的清理不打断释放本身')
+  assert.equal(declared(core, witness)?.declarers.size, 1, '另一个句柄的声明不受影响')
 })
 
 test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的执行不再写事实', async () => {
@@ -815,7 +835,7 @@ test('A04/A05 配置非法时不取数、不刷新、不通知；声明仍在，
   assert.equal(view.writes(), 0)
 
   view.refresh()
-  assert.equal(view.errors.length, 0, '配置非法不通知：页面读自己的 refs 就知道')
+  assert.equal(view.failure(), null, '配置非法不取数自然也不会写失败：页面读自己的 refs 就知道')
 })
 
 test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => {
@@ -827,7 +847,7 @@ test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => 
   view.refresh()
   await settle()
   assert.equal(calls, 0)
-  assert.equal(view.errors.length, 0, '页面自己知道还没有身份，不重复通知')
+  assert.equal(view.failure(), null, '页面自己知道还没有身份，不产生失败')
 })
 
 test('A18 参数编码与值域：键按 JSON 语义稳定排序，坏参数一律拒绝且不改动状态', async () => {
@@ -901,11 +921,11 @@ test('A19 参数副本：validate、每轮 load 与每个接收者各拿一份�
 })
 
 /**
- * 这一条是「调用方不用写 try/catch」的总账：公开入口只给返回值、`onError`，或者什么都不给。
+ * 这一条是「调用方不用写 try/catch」的总账：公开入口只给返回值、结果表这一格，或者什么都不给。
  * 唯一会同步抛错的是装配误用（`useRefresh` 不在 setup、没有协调者、`maxConcurrent` 非法、安装冲突），
  * 那些在 `vue.test.ts` 里各有一条，且都发生在第一次运行就能看见的固定位置。
  */
-test('边界总账：运行期失败只走返回值或 onError，公开入口都不抛错', async () => {
+test('边界总账：运行期失败只走返回值或结果表这一格，公开入口都不抛错', async () => {
   // 取数侧：结果非法（`undefined`）与结果不可复制都只是后台失败，槽位当场交还。
   const broken: Array<{ name: string; post: FakePost }> = [
     { name: '/api/core/788', post: async () => undefined as unknown as number },
@@ -917,7 +937,7 @@ test('边界总账：运行期失败只走返回值或 onError，公开入口都
     const view = page(core, source)
     assert.doesNotThrow(() => { view.submit({ id: 1 }) })
     await settle()
-    assert.equal(view.errors.length, 1)
+    assert.ok(view.failure(), '运行期失败写进该格，入口不抛错')
     assert.equal(core.snapshot().running.length, 0)
   }
 
@@ -940,7 +960,7 @@ test('边界总账：运行期失败只走返回值或 onError，公开入口都
   ]) {
     assert.equal(page(newCore(1, async () => 1), defineRefresh<object, number>('/api/core/813', { validate })).submit({}).status, 'rejected')
   }
-  assert.equal(view.errors.length, 0, '输入非法一律不通知')
+  assert.equal(view.failure(), null, '输入非法一律不进结果表')
   assert.equal(core.snapshot().resources.length, 0)
 
   // 刷新侧：入口状态不成立（这里是没有身份）时直接返回，不抛错、不需要 try/catch。

@@ -36,11 +36,31 @@ export type SubmitResult =
   | { readonly status: 'rejected'; readonly error: unknown }
   | { readonly status: 'cancelled' }
 
-/** 交付面：参数、数据与结果产生时间同次整体发布。**两者都是本页独立副本**（ADR-52）。 */
+/**
+ * 最近一次失败的原始异常与它发生的时刻。失败是**那个身份的事实**，写在结果表这一格上，
+ * 由读取面按自己的节拍取走——框架不再向页面推送失败（ADR-63）。
+ */
+export interface RefreshFailure {
+  /** 原始异常（传输抛出的、`AbortError` 或框架上限错误），原样带出，判断交给读取面。 */
+  readonly cause: unknown
+  /** 失败发生的时刻（`Date.now()`）。 */
+  readonly at: number
+}
+
+/**
+ * 交付面：参数、数据与结果产生时间同次整体发布。**两者都是本页独立副本**（ADR-52）。
+ *
+ * 它是**某一拍**的副本，不是实时视图：适配层按这一页自己的 `every` 从结果表抄一份
+ * （新身份的第一份、显式刷新那一次、以及失活恢复后的第一份立即抄），两拍之间结果表里的
+ * 新版本不改变这里（ADR-63）。因此 `data` 可以比结果表旧——这是慢页面主动要的代价。
+ */
 export interface RefreshDisplay<P extends object, T> {
   readonly args: ReadonlySnapshot<P>
-  readonly data: ReadonlySnapshot<T>
-  readonly updatedAt: number
+  /** 最后一次成功的数据；**从未成功过**（首查就失败）时为 `null`。 */
+  readonly data: ReadonlySnapshot<T> | null
+  readonly updatedAt: number | null
+  /** 最近一次失败；之后成功过就清空为 `null`（失败发生后两拍之间又被成功盖过，则看不见，见 ADR-63）。 */
+  readonly failure: RefreshFailure | null
 }
 
 /**
@@ -52,23 +72,20 @@ export interface RefreshDisplay<P extends object, T> {
 export interface RefreshOptions {
   /** 唯一开启意愿。框架只读取它，**从不写入**。 */
   readonly enabled: Ref<boolean>
-  /** 刷新间隔（毫秒）；只接受正安全整数，不自动转换或取整。 */
-  readonly every: Ref<number>
   /**
-   * 取数失败通知（**只报共享请求失败**，ADR-51）：参数是原始异常，供页面自行判断。
-   * 框架立即观察其异步拒绝，但不等待完成；每次通知都重新读取本字段。
-   * 调用方自己的输入问题不走这条通道——参数不可用由 `submit` 同步返回 `rejected`。
+   * 刷新间隔（毫秒）；只接受正安全整数，不自动转换或取整。它同时是两个频率：这个身份**取数**的
+   * 需求间隔（同身份取所有页面里的最小值），以及**本页读结果表**的采样间隔（ADR-63）。
    */
-  readonly onError?: (error: unknown) => void | Promise<void>
+  readonly every: Ref<number>
 }
 
 /** 组件句柄：声明订阅、主动刷新并读取本页快照。 */
 export interface RefreshHandle<P extends object, T> {
   /**
-   * 本页看到的画面：按已声明身份从结果表读出来的一个只读视图。
+   * 本页看到的画面：按已声明身份从结果表读出来的一个只读视图，**按本页 `every` 采样**。
    *
-   * `args` 每次读取都复制一份（它是身份键描述的那份值）；`data` 是结果表里**同一个对象**，
-   * 要改自己复制。实例被释放时读回 `null`。
+   * `args` 每次采样都复制一份（它是身份键描述的那份值）；`data` 是结果表里**同一个对象**，
+   * 要改自己复制。实例被释放时读回 `null`，但画面**保留最后一帧**，不因没人订阅而变空。
    */
   readonly display: Readonly<Ref<RefreshDisplay<P, T> | null>>
   /** 声明或更新订阅身份；相同身份重复声明幂等，不隐含刷新。 */
@@ -76,7 +93,8 @@ export interface RefreshHandle<P extends object, T> {
   /**
    * 显式刷新当前身份；与自动刷新共用同一条获取与交付路径。
    *
-   * 只登记一次要求，**没有回执**：成功只经 `display`，失败只经 `onError`（与自动刷新同一条通道）。
+   * 只登记一次要求，**没有回执**：成功与失败都只经 `display`（同一条通道）。
+   * 这个动作一定会被本页看见——它不等下一拍，结果一到就抄（ADR-63）。
    */
   refresh(): void
 }

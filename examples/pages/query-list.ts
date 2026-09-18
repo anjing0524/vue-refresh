@@ -4,7 +4,7 @@
  * 展示：完整参数提交、独立启停、分页排序复用已提交参数、失败关闭、暂停仍可单查。
  * 页面只做三件事：维护表单草稿、调用公开入口、渲染本页快照；不碰共享分区、不自建 Timer。
  */
-import { defineComponent, h, onMounted, ref, shallowRef } from 'vue'
+import { defineComponent, h, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRefresh } from '../../src/vue'
 import { ageLine, listSource } from '../sources'
 import type { ListParams, SortField } from '../sources'
@@ -41,11 +41,13 @@ export const QueryListPage = defineComponent({
     const task = useRefresh(listSource, {
       enabled,
       every: ref(1_500),
-      // 框架只通知取数失败、从不写 enabled；「失败关闭」是页面在 onError 里自己做的决定。
-      onError: () => {
-        enabled.value = false
-        note.value = '后台请求失败：页面关闭自动刷新（框架不改写 enabled）'
-      },
+    })
+    // 框架只把失败写进交付面、从不写 enabled；「失败关闭」是页面从交付面读到新失败后的自己的决定。
+    // 默认 flush 是 pre 且首次不触发；成功会把 failure 清成 null，所以只认非空的新对象。
+    watch(() => task.display.value?.failure, failure => {
+      if (!failure) return
+      enabled.value = false
+      note.value = '后台请求失败：页面关闭自动刷新（框架不改写 enabled）'
     })
 
     onMounted(submit)
@@ -71,8 +73,10 @@ export const QueryListPage = defineComponent({
       h('label', { class: 'field' }, [label, input() as never])
 
     return () => {
-      const display = task.display.value
-      const rows = display?.data.rows ?? []
+      // 首查就失败时 display 不是 null，而是 `data: null, failure: {...}`：空态按 data／updatedAt 判。
+      const data = task.display.value?.data ?? null
+      const updatedAt = task.display.value?.updatedAt ?? null
+      const rows = data?.rows ?? []
       return h('section', { class: 'page', 'data-testid': 'page-query-list' }, [
         h('h2', '查询列表'),
         h('p', { class: 'intro' }, '改动表单不会发请求；点「提交查询」才把四个字段一起作为新身份提交。暂停后画面保留，仍可只查一次。'),
@@ -108,10 +112,10 @@ export const QueryListPage = defineComponent({
           ? `已提交参数：${submitted.value.account} / ${submitted.value.market} / 第 ${submitted.value.page} 页 / 按${SORT_LABEL[submitted.value.sortBy]}`
           : '尚未提交'),
         // 框架不再交付「这次是谁触发的」：页面比较手刷时刻与结果时间自己判定。
-        h('p', { 'data-testid': 'ql-origin' }, display
-          ? `本次来源：${display.updatedAt >= manualAt.value ? '本页刷新' : '共享刷新'} · 请求号 ${display.data.requestId}`
+        h('p', { 'data-testid': 'ql-origin' }, data !== null && updatedAt !== null
+          ? `本次来源：${updatedAt >= manualAt.value ? '本页刷新' : '共享刷新'} · 请求号 ${data.requestId}`
           : ''),
-        h('p', { 'data-testid': 'ql-age' }, display ? ageLine(display.updatedAt) : ''),
+        h('p', { 'data-testid': 'ql-age' }, updatedAt !== null ? ageLine(updatedAt) : ''),
         h('p', { 'data-testid': 'ql-note' }, note.value),
         h('table', { class: 'rows' }, [
           h('thead', [h('tr', ['代码', '价格', '涨跌幅', '成交量'].map(head => h('th', head)))]),

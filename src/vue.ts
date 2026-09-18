@@ -4,7 +4,7 @@ import {
 import type { App } from 'vue'
 import type { Pinia } from 'pinia'
 import { RefreshCore } from './core.ts'
-import type { Config, Handle, RefreshHttp } from './core.ts'
+import type { Config, Handle, RefreshHttp, ResultCell } from './core.ts'
 import { prepareParameters } from './source.ts'
 import { useRefreshStore } from './store.ts'
 import type {
@@ -12,7 +12,7 @@ import type {
 } from './public-types.ts'
 
 /**
- * Vue 适配层：把响应式配置与组件生命周期翻译成框架需求，把结果表接到 Pinia。
+ * Vue 适配层：把响应式配置与组件生命周期翻译成框架需求，按本页频率从结果表采样，把结果表接到 Pinia。
  *
  * 只跟踪 `enabled` 与 `every` 两项配置（都是 `Ref`），不跟踪参数、表单草稿或结果；
  * 本库是 SPA 单例，组件适配不经过 `provide` / `inject`（ADR-37，见 DESIGN §6.3）。
@@ -20,6 +20,9 @@ import type {
 
 /** 当前生效的协调者；`install` 写入，已销毁时可被下一个实例替换（HMR、会话切换）。 */
 let current: RefreshCore | null = null
+
+/** `setInterval` 的平台上限（约 24.8 天）；更长的 `every` 在这里封顶，否则溢出成 1ms 空转。 */
+const MAX_PULSE_DELAY = 2_147_483_647
 
 /** 当前生效的结果表（与协调者同源）；读的一侧从这里取，写的一侧由内核的 sink 写入。 */
 let currentStore: ReturnType<typeof useRefreshStore> | null = null
@@ -67,7 +70,6 @@ export function useRefresh<P extends object, T>(
   const handle: Handle<P, T> = {
     source,
     config: null,
-    onError: error => options.onError?.(error),
     cleanup: null,
     parameters: null,
   }
@@ -85,38 +87,75 @@ export function useRefresh<P extends object, T>(
   const eligible = shallowRef(0)
 
   /**
-   * 本页看到的画面：按已声明身份从结果表读，读到就整条替换。
+   * 本页看到的画面：**某一拍的副本**，按本页 `every` 从结果表抄来。
    *
-   * - **读者才跟随**：`core.isReader(handle)`（订阅着该身份，或它上面有无撤销的刷新要求）为真时才更新；
+   * - **读者才跟随**：`core.isReader(handle)`（声明着且够资格，或它上面有无撤销的刷新要求）为真时才抄；
    *   暂停、失活、卸载中都不是读者，画面**冻结在最后一帧**。暂停页自己 `refresh()` 那一次仍在要求里，
-   *   所以那次结果照样更新画面（A05、G6）。
-   * - 参数每次读取复制一份：它是身份键描述的那份值，被页面改掉会污染键与下一轮请求（ADR-52）。
-   * - 数据就是结果表里那**同一个对象**（不再逐个接收者复制）；要改自己复制，只读视图由类型约束（ADR-59）。
-   * - **没有条目时不写 `null`，保留上一次画面**：条目随实例释放即删（A06 在结果表这一层不变），
+   *   而且那一次不等拍（`immediate`），所以照样更新画面（A05、G6）。
+   * - **按本页频率采样**（ADR-63）：脉搏每 `every` 毫秒敲一次，一拍最多抄一次；两拍之间结果表里的新版本
+   *   不改变画面——慢页面主动要的就是「不跟着快页面跳」。三处不等拍：身份刚落定的第一份内容、
+   *   本页刚重新成为读者、本页刚显式刷新。
+   * - **没东西可抄时保留上一次画面**：条目随实例释放即删（A06 在结果表这一层不变），
    *   而页面上「刚才那份数据」不该因为没人订阅了就变空。
    * - **先无条件读结果表**（在任何 `return` 之前）：否则这个副作用记不住对结果表的依赖，
    *   之后的写入唤不醒它（浏览器用例抓到过这个真实缺陷）。`eligible` 只负责资格边沿重新判定。
    *
-   * 依赖粒度：`store.read(url, key)` 现在返回的是那一个 cell ref 的 `.value`，watcher 的依赖
-   * 收在那一个 ref 上；写别的格不会唤醒这个 watcher。
+   * 依赖粒度：`store.read(url, key)` 现在返回的是那一个 cell ref 的 `.value`，副作用收在那一个 ref 上；
+   * 写别的格不会唤醒这个副作用。
    */
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
+  /** 采样脉搏：只在「本页可能跟着结果表走」（愿意开且激活）时装上，周期就是这一页自己的 `every`。 */
+  const pulse = shallowRef(0)
+  /** 上一拍抄到的格；引用比较就是版本比较，因此不引版本号（ADR-43／45／47）。`undefined`＝还没抄到过。 */
+  let sampled: ResultCell | undefined
+  /** 上次抄写时的脉搏值：相等就说明这一拍已经抄过，新版本留到下一拍。 */
+  let sampledPulse = -1
+  /** 欠一拍：下一份内容立即抄，不等脉搏（身份落定、重新成为读者、显式刷新都置它）。 */
+  let immediate = true
+
   watchEffect(() => {
     const key = identity.value
-    const entry = store.read(source.name, key ?? '')
+    const cell = store.read(source.name, key ?? '')
+    pulse.value
     eligible.value
-    if (key === null || !entry || !core.isReader(handle)) return
+    if (key === null || cell === undefined || !core.isReader(handle)) return
+    // 这一格既没成功过也没失败过：没有可抄的东西，画面停在上一帧（不发布空副本）。
+    if (cell.entry === null && cell.failure === null) return
+    if (cell === sampled) return
+    // 本拍已经抄过、又不欠拍：让画面留到下一拍再看表（这就是「按本页频率采样」）。
+    if (!immediate && pulse.value === sampledPulse) return
     const parameters = handle.parameters
     if (parameters === null) return
     display.value = {
       args: structuredClone(parameters.args) as unknown as ReadonlySnapshot<P>,
-      data: entry.data as ReadonlySnapshot<T>,
-      updatedAt: entry.updatedAt,
+      data: cell.entry === null ? null : cell.entry.data as ReadonlySnapshot<T>,
+      updatedAt: cell.entry === null ? null : cell.entry.updatedAt,
+      failure: cell.failure,
     }
+    sampled = cell
+    sampledPulse = pulse.value
+    immediate = false
   }, { flush: 'sync' })
 
   /** 这一页是否挂载/激活（KeepAlive 失活为假）。它与「浏览器可见」是两件事，后者由核心统一监听。 */
   const active = shallowRef(false)
+
+  /** 采样脉搏的 Timer；`null` 表示没在敲。 */
+  let pulseTimer: ReturnType<typeof setInterval> | null = null
+  const stopPulse = (): void => {
+    if (pulseTimer === null) return
+    clearInterval(pulseTimer)
+    pulseTimer = null
+  }
+  /**
+   * 重新装脉搏：只在有资格时敲（暂停/失活的页面不跟着结果表走，不必起床）。周期超平台上限时封顶，
+   * 否则 `setInterval` 会溢出成 1ms 空转。
+   */
+  const restartPulse = (config: Config | null): void => {
+    stopPulse()
+    if (config === null || !config.enabled || !config.active) return
+    pulseTimer = setInterval(() => { pulse.value += 1 }, Math.min(MAX_PULSE_DELAY, config.every))
+  }
 
   // 唯一的配置写入口：两个 `Ref` ＋ 这一页的激活状态合成一份快照，再按当前资格协调。
   // 非法配置不通知——它是本页自己的输入事实，页面读自己的 refs 就知道；框架只负责不订阅、
@@ -125,13 +164,18 @@ export function useRefresh<P extends object, T>(
     handle.config = config
     core.reconcile(handle)
     eligible.value += 1
+    // 配置或生命周期刚变：下一份内容不等拍（失活恢复直接读回、修正非法配置后立刻上屏都在这里）。
+    immediate = true
+    restartPulse(config)
   }, { flush: 'sync', immediate: true })
 
-  if (core.isDisposed()) stopWatching()
-  else handle.cleanup = stopWatching
+  if (core.isDisposed()) {
+    stopWatching()
+    stopPulse()
+  } else handle.cleanup = () => { stopWatching(); stopPulse() }
 
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。
-  // 只改 `active`：快照与协调由上面那个 `flush: 'sync'` 的 watcher 完成（单一写入口）。
+  // 只改 `active`：快照、协调与脉搏由上面那个 `flush: 'sync'` 的 watcher 完成（单一写入口）。
   onMounted(() => { active.value = true })
   onActivated(() => { active.value = true })
   onDeactivated(() => { active.value = false })
@@ -144,10 +188,18 @@ export function useRefresh<P extends object, T>(
     display,
     submit: args => {
       const result = core.submit(handle, () => prepareParameters(args, source))
-      if (result.status === 'accepted') identity.value = handle.parameters?.key ?? null
+      if (result.status === 'accepted') {
+        // 新身份的第一份内容不等拍：否则慢页面上屏要等一个 `every`，看起来像坏了。
+        immediate = true
+        identity.value = handle.parameters?.key ?? null
+      }
       return result
     },
-    refresh: () => core.refresh(handle),
+    refresh: () => {
+      // 用户点名要的那一次不等拍：结果一到就抄（这是「显式刷新一定会被看见」的全部机制）。
+      immediate = true
+      core.refresh(handle)
+    },
   }
 }
 
@@ -166,9 +218,10 @@ export function createRefreshManager(options: {
     throw new TypeError('maxConcurrent 必须是正安全整数')
   }
   const store = useRefreshStore(options.pinia)
-  // 内核只经这三个动作碰结果表：成功写、释放删、观测列举。
+  // 内核只经这四个动作碰结果表：成功写、失败写、释放删、观测列举。
   const core = new RefreshCore(options.maxConcurrent, options.axios, {
     write: (url, key, entry) => { store.write(url, key, entry) },
+    fail: (url, key, failure) => { store.fail(url, key, failure) },
     remove: (url, key) => { store.remove(url, key) },
     list: () => store.list(),
   })

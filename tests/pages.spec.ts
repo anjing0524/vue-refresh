@@ -184,16 +184,25 @@ test('双组件共享：1s/5s 同参共享、单页暂停后画面冻结、重�
   const inFlight = (await state(request)).find(row => row.id === second)!
   expect(inFlight.status).toBe('pending')
   await release(request, second)
-  await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + second}.00`)
+  // 乙的 every 是 5 秒，而画面按本页 every 采样（ADR-63）：这一份不是它的首查，最多要等一个周期才上屏。
+  await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + second}.00`, { timeout: 15_000 })
   // 暂停页不是该身份的读者（既没订阅也没未撤销的要求），画面冻结在最后一帧——别人刷新的结果它不跟（ADR-60）。
   await expect(page.getByTestId('sp-price-甲')).toHaveText(`${100 + first}.00`)
+
+  // 重新进入之前先让共享身份拿到一份**新鲜**结果：乙（5 秒页）显式刷新一次，并等它上屏。
+  // 不这样做的话，甲重新挂载时手里那份已经到期，周期取数会合理地补一次——「重新挂载不强制新请求」就测糊了；
+  // 而且随后那条「共享对象」断言要求两页读到的是**同一条**结果（各抄各的拍会抄到不同版本）。
+  await page.getByTestId('sp-once-乙').click()
+  const renewed = await pendingId(request)
+  await release(request, renewed)
+  await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + renewed}.00`)
 
   // 重新进入：卸载甲后乙仍持有实例；重新挂载把已有结果直接交付给新订阅，不强制新请求。
   await page.getByTestId('sp-unmount-a').click()
   await expect.poll(async () => (await inspect(page)).resources).toBe(1)
   const beforeReenter = (await state(request)).length
   await page.getByTestId('sp-mount-a').click()
-  await expect(page.getByTestId('sp-request-甲')).toContainText(`来自请求 ${second} · DEMO`)
+  await expect(page.getByTestId('sp-request-甲')).toContainText(`来自请求 ${renewed} · DEMO`)
   expect((await state(request)).length).toBe(beforeReenter)
 
   // 数据是**共享对象**（ADR-59）：篡改甲读到的 data 就是改结果表里那一份，所以两页**都读到 999**——
@@ -258,5 +267,6 @@ test('A05/A14 无启停按钮，前次失败后在同一个同步块里开启意
   const background = (await state(request))[2]!
   expect(symbolOf(background)).toBe('B09-NEW')
   await release(request, background.id)
-  await expect(page.getByTestId('b09-price')).toHaveText(`${100 + background.id}.00`)
+  // 同上：b09 这一页 every 是 5 秒，且这不是它的首查结果，按采样最多等一个周期。
+  await expect(page.getByTestId('b09-price')).toHaveText(`${100 + background.id}.00`, { timeout: 15_000 })
 })

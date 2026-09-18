@@ -30,9 +30,10 @@ const PairCard = defineComponent({
     const options: RefreshOptions = {
       enabled: ref(true),
       every: computed(() => props.every),
-      onError: () => { failures.value += 1 },
     }
     const task = useRefresh(quoteSource, options)
+    // 失败不再由框架推送：交付面出现新的失败对象时计一次（默认 pre flush，首次不触发）。
+    watch(() => task.display.value?.failure, failure => { if (failure) failures.value += 1 })
     const params = (symbol: string): QuoteParams => ({ account: 'demo', symbol })
     onMounted(() => task.submit(params(props.symbol)))
     watch(() => props.symbol, symbol => task.submit(params(symbol)))
@@ -40,19 +41,27 @@ const PairCard = defineComponent({
     onUnmounted(() => emit('gone', props.label))
 
     return () => {
-      const display = task.display.value
+      // 首查就失败时 display 不是 null，而是 `data: null, failure: {...}`：空态按 data／updatedAt 判。
+      const data = task.display.value?.data ?? null
+      const args = task.display.value?.args ?? null
+      const updatedAt = task.display.value?.updatedAt ?? null
       return h('section', { class: 'card', 'data-testid': `sp-card-${props.label}` }, [
         h('h3', [props.label, h('span', { class: 'tag' }, `每 ${props.every / 1000} 秒`)]),
-        h('p', { class: 'price', 'data-testid': `sp-price-${props.label}` }, display ? display.data.quote.price.toFixed(2) : '等待首查'),
-        h('p', { 'data-testid': `sp-request-${props.label}` }, display
-          ? `来自请求 ${display.data.quote.requestId} · ${display.args.symbol}`
+        h('p', { class: 'price', 'data-testid': `sp-price-${props.label}` }, data ? data.quote.price.toFixed(2) : '等待首查'),
+        h('p', { 'data-testid': `sp-request-${props.label}` }, data !== null && args !== null
+          ? `来自请求 ${data.quote.requestId} · ${args.symbol}`
           : '尚未交付'),
-        h('p', { 'data-testid': `sp-age-${props.label}` }, display ? ageLine(display.updatedAt) : ''),
+        h('p', { 'data-testid': `sp-age-${props.label}` }, updatedAt !== null ? ageLine(updatedAt) : ''),
         h('p', { 'data-testid': `sp-failures-${props.label}` }, `后台失败：${failures.value} 次`),
         h('button', {
           'data-testid': `sp-toggle-${props.label}`,
           onClick: () => { options.enabled.value = !options.enabled.value },
         }, options.enabled.value ? '暂停本页' : '恢复本页'),
+        // 显式刷新一次：暂停页也能用（A05），而且这一次不等采样拍，结果一到就上屏（ADR-63）。
+        h('button', {
+          'data-testid': `sp-once-${props.label}`,
+          onClick: () => { task.refresh() },
+        }, '刷新本页一次'),
       ])
     }
   },
@@ -77,8 +86,8 @@ export const SharedPairPage = defineComponent({
       entries.value = next
     }
     const copyPrice = (label: string): string => {
-      const display = entries.value[label]?.task.display.value
-      return display ? display.data.quote.price.toFixed(2) : '—'
+      const data = entries.value[label]?.task.display.value?.data
+      return data ? data.quote.price.toFixed(2) : '—'
     }
     const state = (): string => `甲：${showA.value ? '订阅中' : '已退订'} ｜ 乙：${showB.value ? '订阅中' : '已退订'}`
 
@@ -101,7 +110,7 @@ export const SharedPairPage = defineComponent({
           'data-testid': 'sp-mutate-a',
           onClick: () => {
             const display = entries.value['甲']?.task.display.value
-            if (!display) return
+            if (!display?.data) return
             // 故意绕过 readonly，验证运行期所有权：结果是共享对象，改了它同身份的读者一起变（ADR-59）。
             ;(display.data as unknown as QuoteResult).quote.price = 999
             revision.value += 1
@@ -128,13 +137,12 @@ export const B09View = defineComponent({
   setup() {
     const enabled = ref(true)
     const failures = ref(0)
-    const task = useRefresh(quoteSource, {
-      enabled,
-      every: ref(5_000),
-      onError: () => {
-        failures.value += 1
-        enabled.value = false // 页面自己的策略：前次失败后先关闭意愿。
-      },
+    const task = useRefresh(quoteSource, { enabled, every: ref(5_000) })
+    // 失败只从交付面读到：出现新的失败对象时，页面自己关闭开启意愿（框架从不写 enabled）。
+    watch(() => task.display.value?.failure, failure => {
+      if (!failure) return
+      failures.value += 1
+      enabled.value = false // 页面自己的策略：前次失败后先关闭意愿。
     })
     onMounted(() => task.submit({ account: 'demo', symbol: 'B09' }))
 
@@ -146,15 +154,16 @@ export const B09View = defineComponent({
       task.refresh()
     }
     return () => {
-      const display = task.display.value
+      const data = task.display.value?.data ?? null
+      const args = task.display.value?.args ?? null
       return h('section', { class: 'page', 'data-testid': 'page-b09' }, [
         h('h2', '无启停按钮的刷新组合（B09）'),
-        h('p', { class: 'intro' }, '本视图没有任何启停按钮。挂载时按 B09 参数提交并失败一次，页面在 onError 里关闭意愿；点下面的按钮开启意愿、声明新身份并刷新一次。'),
+        h('p', { class: 'intro' }, '本视图没有任何启停按钮。挂载时按 B09 参数提交并失败一次，页面从交付面读到失败后关闭意愿；点下面的按钮开启意愿、声明新身份并刷新一次。'),
         h('p', { 'data-testid': 'b09-failures' }, `前次后台失败：${failures.value} 次`),
         h('p', { 'data-testid': 'b09-state' }, enabled.value ? '开启意愿：真' : '开启意愿：假（页面已关闭）'),
-        h('p', { class: 'price', 'data-testid': 'b09-price' }, display ? display.data.quote.price.toFixed(2) : '等待首查'),
-        h('p', { 'data-testid': 'b09-request' }, display
-          ? `来自请求 ${display.data.quote.requestId} · ${display.args.symbol}`
+        h('p', { class: 'price', 'data-testid': 'b09-price' }, data ? data.quote.price.toFixed(2) : '等待首查'),
+        h('p', { 'data-testid': 'b09-request' }, data !== null && args !== null
+          ? `来自请求 ${data.quote.requestId} · ${args.symbol}`
           : '尚未交付'),
         h('button', { 'data-testid': 'b09-refresh', onClick: refreshAndResume }, '刷新并在页面内开启订阅'),
       ])

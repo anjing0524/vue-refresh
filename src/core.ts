@@ -1,4 +1,4 @@
-import type { RefreshSource, SubmitResult } from './public-types.ts'
+import type { RefreshFailure, RefreshSource, SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
 
 /**
@@ -17,8 +17,8 @@ export interface Config {
 }
 
 /**
- * 组件需求句柄：三种角色挂在一个对象上，读之前先分清是哪一组——**组 A｜端口与配置**（`source` / `config` /
- * `onError`）由适配层给、核心只读、**组 B｜状态**（`parameters`）由核心独占写入、
+ * 组件需求句柄：两种角色挂在一个对象上，读之前先分清是哪一组——**组 A｜端口与配置**（`source` / `config`）
+ * 由适配层给、核心只读、**组 B｜状态**（`parameters`）由核心独占写入、
  * **组 C｜接驳**（`cleanup`）双向。完整所有权表见 DESIGN §3.3。
  *
  * 三件事不存字段：**是否已释放**是 `RefreshCore.handles` 的名册成员资格（DESIGN §3.7）、
@@ -30,7 +30,6 @@ export interface Handle<P extends object = object, T = unknown> {
   readonly source: RefreshSource<object, unknown>
   /** 最近一次配置快照；适配层每读到新值就改写，核心只读。 */
   config: Config | null
-  readonly onError: (error: unknown) => unknown
   /** 适配层的释放回调；`removeHandle` 读一次、清空，然后调用它。 */
   cleanup: (() => void) | null
   /** 已声明的身份；未声明时为 `null`。 */
@@ -49,21 +48,36 @@ export interface Entry {
   readonly updatedAt: number
 }
 
+/**
+ * 结果表的一格：**最后一次成功的结果 ＋ 最近一次失败**，一次取数的成败都只落在这里。
+ *
+ * 失败不覆盖数据（旧址照旧）也不清空它；成功后失败被清掉（`failure` 回到 `null`）。
+ * 只有整格是新对象这一件事代表「变过」——读取面据此比较引用就知道要不要抄（ADR-63）。
+ */
+export interface ResultCell {
+  /** 最后一次成功；**从未成功过**（首查就失败）时为 `null`。 */
+  readonly entry: Entry | null
+  /** 最近一次失败；之后成功过就清空。 */
+  readonly failure: RefreshFailure | null
+}
+
 /** 结果表的一行。 */
 export interface ResultRow {
   readonly url: string
   readonly key: string
-  readonly entry: Entry
+  readonly cell: ResultCell
 }
 
 /**
  * 结果表：**结果的唯一真值**，按「URL → 参数键」两级分组。
  *
- * 内核只经这三个动作碰它：成功时 `write`、实例释放时 `remove`、只读投影时 `list`。
+ * 内核只经这四个动作碰它：成功时 `write`、失败时 `fail`、实例释放时 `remove`、只读投影时 `list`。
  * 适配层把它接到 Pinia（`src/store.ts`），因此 `core.ts` 仍然零运行时依赖。
  */
 export interface ResultSink {
   write(url: string, key: string, entry: Entry): void
+  /** 写失败：**保留这一格已有的数据**，只换掉失败那一项。 */
+  fail(url: string, key: string, failure: RefreshFailure): void
   remove(url: string, key: string): void
   list(): readonly ResultRow[]
 }
@@ -137,8 +151,9 @@ export class Resource {
   /**
    * 成功结算：记结算时刻、把结果写进结果表（唯一真值），再满足这一批刷新要求。
    *
-   * 这里**没有交付循环**：谁在读、读几次、读到的是哪一版，都由读的人在结果表上自己取（ADR-59）。
+   * 这里**没有交付循环**：谁在读、读几次、读到的是哪一版，都由读的人在结果表上自己取（ADR-59、ADR-63）。
    * 顺序固定：先落定结果，再结算要求——要求结算可能让实例当场释放，而释放会把结果删掉（A06）。
+   * 两份「先定下这一批要求、再写结果表」的理由是同一个：写结果表会同步触发页面代码。
    */
   settle(entry: Entry): void {
     this.settledAt = Date.now()
@@ -150,20 +165,17 @@ export class Resource {
   }
 
   /**
-   * 失败结算：通知本实例此刻的**读者**（有资格的声明者，或正在等这次结果的页面——后者没有回执，
-   * 这是它唯一的失败通道），然后撤销本实例全部未完成的刷新要求。暂停、失活、隐藏的页面不是读者，
-   * 不会收到它们没要求过的失败通知。
+   * 失败结算：把失败写进结果表这一格（**读取面按自己的节拍取**，框架不再推送），
+   * 然后撤销本实例全部未完成的刷新要求。
+   *
+   * 数据保持原样：失败只让「这一格当前处于失败态」，不动最后一次成功的结果。
+   * 与 `settle` 同序（先定下这批要求、再写表），理由也相同：写表会同步触发页面代码。
    */
   fail(error: unknown): void {
     this.settledAt = Date.now()
-    const notified = new Set<Handle>(this.declarers)
-    for (const handle of this.waiters) notified.add(handle)
-    for (const handle of notified) {
-      // 前一个页面的 `onError` 可能已经改身份或卸载，因此每个通知点重新复核读者身份。
-      if (!this.core.isReader(handle)) continue
-      report(handle, error)
-    }
-    for (const handle of [...this.waiters]) this.clearRequest(handle)
+    const satisfied = [...this.waiters]
+    this.core.writeFailure(this, { cause: error, at: this.settledAt })
+    for (const handle of satisfied) this.clearRequest(handle)
   }
 
   /** 撤销一个句柄的刷新要求；它可能是本实例的最后一个需求，因此顺手让核心判断要不要回收这个实例。 */
@@ -194,11 +206,6 @@ function isolate(effect: () => unknown): void {
   } catch {
     // 回调失败只吞掉这一条；已定结果、订阅与调度都不受影响。
   }
-}
-
-/** 经 `onError` 通知页面：**只报共享请求失败**，参数是原始异常（ADR-51）。框架自身的失败不进这条通道。 */
-function report(handle: Handle, error: unknown): void {
-  isolate(() => handle.onError(error))
 }
 
 /** 结果边界：拒绝 `undefined`，其余原生复制；业务合法性由请求适配器负责。 */
@@ -303,7 +310,7 @@ export class RefreshCore {
       parameters = prepare()
     } catch (error) {
       // 无效声明不改动任何状态：旧身份、订阅与未结算的刷新要求原样保留。
-      // 输入问题不走 `onError`：它由本次调用的同步返回值说清楚（ADR-51）。
+      // 输入问题不进结果表：它由本次调用的同步返回值说清楚（ADR-51）。
       return { status: 'rejected', error }
     }
     const declared = handle.parameters
@@ -320,7 +327,7 @@ export class RefreshCore {
   /**
    * 显式刷新：有当前请求就直接用它的结果，没有就当场登记一次；不恢复自动刷新，也不改写调用方的开关。
    *
-   * **不回执**：成功只经 `display`，失败只经 `onError`。入口条件不成立时直接返回、不产生副作用也不通知。
+   * **不回执**：成功与失败都只经结果表（`display` 那一侧）。入口条件不成立时直接返回、不产生副作用也不写表。
    */
   refresh(handle: Handle): void {
     if (this.disposed || !this.handles.has(handle)) return
@@ -476,6 +483,11 @@ export class RefreshCore {
   /** 把一次成功写进结果表。**实例入口**：结果住结果表，实例只在成功这一刻与它打交道。 */
   writeResult(resource: Resource, entry: Entry): void {
     this.sink.write(resource.source.name, resource.parameters.key, entry)
+  }
+
+  /** 把一次失败写进结果表同一格（数据保留）。**实例入口**，与 `writeResult` 对称。 */
+  writeFailure(resource: Resource, failure: RefreshFailure): void {
+    this.sink.fail(resource.source.name, resource.parameters.key, failure)
   }
 
   // ══════════════════════════ 后台执行 ══════════════════════════

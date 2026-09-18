@@ -25,23 +25,28 @@ const QuoteCard = defineComponent({
       enabled: ref(true),
       // 频率是响应式输入：改动它就走配置变化路径，由框架替换当前任务。
       every: computed(() => props.every),
-      // `onError` 只报取数失败：这里不需要再判断来源（ADR-51）。
-      onError: () => {
-        failures.value += 1
-        emit('failure')
-      },
     })
+    // 失败不再由框架推送：交付面上出现**新的失败对象**就计一次。默认 flush 是 pre 且首次不触发；
+    // 每次失败都是一个新对象（成功会把 failure 清成 null），所以按引用变化计数即可。
+    watch(() => task.display.value?.failure, failure => {
+      if (!failure) return
+      failures.value += 1
+      emit('failure')
+    })
+    // 失败不清开启意愿：这里的 `enabled` 从来没人写过，下个周期继续取数。
     const prepared = (symbol: string): QuoteParams => ({ account: 'demo', symbol })
     onMounted(() => { submits += 1; task.submit(prepared(props.symbol)) })
     watch(() => props.symbol, symbol => { submits += 1; task.submit(prepared(symbol)) })
 
     return () => {
       const display = task.display.value
+      // 首查就失败时 display 不是 null，而是 `data: null, failure: {...}`：空态按 data 判。
+      const data = display?.data ?? null
       return h('section', { class: 'card', 'data-testid': 'qp-card' }, [
         h('h3', `行情 · ${props.symbol}`),
-        h('p', { class: 'price', 'data-testid': 'qp-price' }, display ? display.data.quote.price.toFixed(2) : '等待首查'),
-        h('p', { 'data-testid': 'qp-request' }, display ? `来自请求 ${display.data.quote.requestId}` : ''),
-        h('p', { 'data-testid': 'qp-age' }, display ? `数据时间：${ageLine(display.updatedAt)}` : ''),
+        h('p', { class: 'price', 'data-testid': 'qp-price' }, data ? data.quote.price.toFixed(2) : '等待首查'),
+        h('p', { 'data-testid': 'qp-request' }, data ? `来自请求 ${data.quote.requestId}` : ''),
+        h('p', { 'data-testid': 'qp-age' }, display && display.updatedAt !== null ? `数据时间：${ageLine(display.updatedAt)}` : ''),
         h('p', { 'data-testid': 'qp-submitted' }, display
           ? `已提交参数：${display.args.account} / ${display.args.symbol}`
           : '已提交参数：尚未交付'),
