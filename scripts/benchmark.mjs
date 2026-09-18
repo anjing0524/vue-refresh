@@ -18,7 +18,6 @@ globalThis.document = { hidden: false, addEventListener() {}, removeEventListene
 import { createRenderer, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore } from '../src/vue.ts'
-import { defineRefresh } from '../src/source.ts'
 import { useRefresh } from '../src/vue.ts'
 
 const option = (name, fallback) => {
@@ -61,7 +60,6 @@ async function measure() {
   let failures = 0
   // 在途很少：取数只让出一个微任务，因此 active 反映框架真实同时在途的请求数，
   // 而并发上限只能由框架的槽位决定。
-  const source = defineRefresh('/api/benchmark')
   const http = {
     post: async () => {
       loads += 1
@@ -85,7 +83,7 @@ async function measure() {
       // 本库只服务 SPA：Node 里跑基准要先给出最小浏览器环境，再显式声明可见，
       // 与 tests/vue.test.ts 的做法一致（自定义渲染器不冒充浏览器可见性测试）。
       core.setVisible(true)
-      const task = useRefresh(source, { enabled: ref(true), every: ref(every) })
+      const task = useRefresh('/api/benchmark', { enabled: ref(true), every: ref(every) })
       // 失败不再回调推送：交付面出现新的失败时刻时计一次（这是原输出字段 `failures` 的来源）。
       watch(() => task.display.value?.failedAt, failedAt => { if (failedAt !== null) failures += 1 })
       onMounted(() => task.submit({ symbol: `S${props.identity}` }))

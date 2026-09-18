@@ -1,7 +1,6 @@
 import { createApp, defineComponent, h, KeepAlive, onMounted, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import type { Component } from 'vue'
-import { defineRefresh } from '../src/source'
 import type { RefreshHandle } from '../src/public-types'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue'
 import type { RefreshCore, RefreshHttp } from '../src/core'
@@ -108,7 +107,7 @@ function mountHarness(): void {
     }
   }
   // 参数准入由调用方在 `submit` 之前自己判（框架不再跑任何调用方回调，ADR-74）。
-  const source = defineRefresh<QuoteParams, Quote>('/api/quote')
+  const source = '/api/quote'
   // 传输：框架只要求一个 post；controlled 模式的手动结算就在这个函数里。
   const http: RefreshHttp = {
     post: async (_url, body, { signal }) => ({ data: await readQuote(body as QuoteParams, { signal }) }),
@@ -124,7 +123,7 @@ function mountHarness(): void {
       core = currentCore()!
       const enabled = ref(true)
       const draftSymbol = ref('DEMO')
-      const task = useRefresh(source, { enabled, every })
+      const task = useRefresh<QuoteParams, Quote>(source, { enabled, every })
       // 失败不再经回调推送：交付面出现新的失败对象时记一条事件（默认 pre flush，首次不触发）。
       watch(() => task.display.value?.failedAt, failedAt => {
         if (failedAt !== null) events.push('后台请求失败，等待下一周期')
@@ -171,7 +170,7 @@ function mountHarness(): void {
     name: 'NestedWidget',
     setup() {
       const enabled = ref(true)
-      const task = useRefresh(source, { enabled, every })
+      const task = useRefresh<QuoteParams, Quote>(source, { enabled, every })
       watch(() => task.display.value?.failedAt, failedAt => {
         if (failedAt !== null) events.push('嵌套页后台请求失败，等待下一周期')
       })

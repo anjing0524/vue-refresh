@@ -4,7 +4,6 @@ import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import type { RefreshHttp } from '../src/core.ts'
-import { defineRefresh } from '../src/source.ts'
 import type { RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
 import type { Ref } from 'vue'
 
@@ -69,7 +68,6 @@ async function until(condition: () => boolean, message: string, budget = 2_000):
 
 test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿后停止；卸载后释放并保留画面', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/47')
   const manager = newManager(2, async () => { loads++; return 42 })
   const enabled = ref(true)
   let api!: RefreshHandle<{ symbol: string }, number>
@@ -77,7 +75,7 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled, every: ref(100_000) })
+      api = useRefresh<{ symbol: string }, number>('/api/vue/47', { enabled, every: ref(100_000) })
       onScopeDispose(() => { released++ })
       // 真实组件会渲染画面；画面保留要成立，前提是页面确实显示过它。
       return () => h('div', String(api.display.value?.data ?? ''))
@@ -108,14 +106,13 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
 
 test('A04/A05 配置非法：不取数并停止订阅，修正后按当前资格恢复', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/84')
   const manager = newManager(1, async () => { loads++; return 1 })
   const every = ref(100_000)
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: ref(true), every })
+      api = useRefresh<{ symbol: string }, number>('/api/vue/84', { enabled: ref(true), every })
       return () => h('div')
     },
   }))
@@ -142,7 +139,6 @@ test('A04/A05 配置非法：不取数并停止订阅，修正后按当前资格
 
 test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接入', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/118')
   const manager = newManager(1, async () => { loads++; return 7 })
   const enabled = ref(true)
   const every = ref(100_000)
@@ -150,7 +146,7 @@ test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled, every })
+      api = useRefresh<{ symbol: string }, number>('/api/vue/118', { enabled, every })
       return () => h('div', String(api.display.value?.data ?? ''))
     },
   }))
@@ -176,14 +172,13 @@ test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接
 
 test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/150')
   const manager = newManager(2, async () => { loads++; return loads })
   const shown = ref(true)
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const Inner = defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      api = useRefresh<{ symbol: string }, number>('/api/vue/150', { enabled: ref(true), every: ref(100_000) })
       return () => h('div', String(api.display.value?.data ?? ''))
     },
   })
@@ -217,7 +212,7 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
 test('A04/A06 点过刷新之后失活：缓存里那一帧仍会更新；失活期间点刷新不产生事实', async () => {
   let loads = 0
   const resolvers: Array<(value: number) => void> = []
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/907')
+  const quote = '/api/vue/907'
   const manager = newManager(1, () => { loads++; return new Promise<number>(resolve => { resolvers.push(resolve) }) })
   const shown = ref(true)
   let reader!: RefreshHandle<{ symbol: string }, number>
@@ -225,13 +220,13 @@ test('A04/A06 点过刷新之后失活：缓存里那一帧仍会更新；失活
 
   const Reader = defineComponent({
     setup() {
-      reader = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      reader = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(true), every: ref(100_000) })
       return () => h('div')
     },
   })
   const Cached = defineComponent({
     setup() {
-      cached = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      cached = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(true), every: ref(100_000) })
       return () => h('div')
     },
   })
@@ -276,7 +271,7 @@ test('A04/A06 点过刷新之后失活：缓存里那一帧仍会更新；失活
 
 test('A06 重新成为读者不会自己补抄：下一份写入到达时才上屏，而且不等窗口', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/911')
+  const quote = '/api/vue/911'
   const manager = newManager(1, async () => { loads++; return loads })
   const enabled = ref(false)
   let reader!: RefreshHandle<{ symbol: string }, number>
@@ -284,13 +279,13 @@ test('A06 重新成为读者不会自己补抄：下一份写入到达时才上�
 
   const Reader = defineComponent({
     setup() {
-      reader = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      reader = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(true), every: ref(100_000) })
       return () => h('div')
     },
   })
   const Paused = defineComponent({
     setup() {
-      paused = useRefresh(quote, { enabled, every: ref(100_000) })
+      paused = useRefresh<{ symbol: string }, number>(quote, { enabled, every: ref(100_000) })
       return () => h('div')
     },
   })
@@ -322,14 +317,13 @@ test('A06 重新成为读者不会自己补抄：下一份写入到达时才上�
 
 test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写失败、修正后恢复', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/187')
   const manager = newManager(1, async () => { loads++; return 1 })
   const enabled = ref<boolean>(true)
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled, every: ref(100_000) })
+      api = useRefresh<{ symbol: string }, number>('/api/vue/187', { enabled, every: ref(100_000) })
       return () => h('div')
     },
   }))
@@ -357,7 +351,7 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写�
 
 test('A21 节流：慢页面不跟着快页面跳，节流窗口内的新版本不换画面；显式刷新不等节流', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/203')
+  const quote = '/api/vue/203'
   const manager = newManager(2, async () => { loads++; return loads })
   let slow!: RefreshHandle<{ symbol: string }, number>
   let quick!: RefreshHandle<{ symbol: string }, number>
@@ -368,13 +362,13 @@ test('A21 节流：慢页面不跟着快页面跳，节流窗口内的新版本�
   // 两个页面声明同一个身份：这个身份按**最小的 every**取数（ADR-61），因此结果表一直在变。
   const Slow = defineComponent({
     setup() {
-      slow = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      slow = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(true), every: ref(100_000) })
       return () => h('div')
     },
   })
   const Quick = defineComponent({
     setup() {
-      quick = useRefresh(quote, { enabled: ref(true), every: ref(20) })
+      quick = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(true), every: ref(20) })
       return () => h('div')
     },
   })
@@ -408,7 +402,6 @@ test('A21 节流：慢页面不跟着快页面跳，节流窗口内的新版本�
 
 test('A21 写端稀于本页 every 时写入即抄：节流不丢数据，新格一到就上屏', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/204')
   // 传输带 80ms 延迟：写入流的间隔（every ＋ 延迟）比本页 every（20ms）稀。
   const manager = newManager(1, async () => {
     loads++
@@ -419,7 +412,7 @@ test('A21 写端稀于本页 every 时写入即抄：节流不丢数据，新格
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: ref(true), every: ref(20) })
+      api = useRefresh<{ symbol: string }, number>('/api/vue/204', { enabled: ref(true), every: ref(20) })
       return () => h('div')
     },
   }))
@@ -444,7 +437,6 @@ test('A21 写端稀于本页 every 时写入即抄：节流不丢数据，新格
 test('A13 失败写进结果表那一格：首查失败也读得到，成功后失败被清掉，数据保留旧址', async () => {
   let mode: 'ok' | 'fail' = 'fail'
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/265')
   const manager = newManager(1, async () => {
     loads++
     if (mode === 'fail') throw new Error(`boom-${loads}`)
@@ -454,7 +446,7 @@ test('A13 失败写进结果表那一格：首查失败也读得到，成功后�
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      api = useRefresh<{ symbol: string }, number>('/api/vue/265', { enabled: ref(true), every: ref(100_000) })
       return () => h('div')
     },
   }))
@@ -485,14 +477,13 @@ test('A13 失败写进结果表那一格：首查失败也读得到，成功后�
 
 test('A17/A06 释放一页之后：submit 返回 cancelled、refresh 不产生事实（§2.4「取消只有一个来源」）', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/265')
   const manager = newManager(1, async () => { loads++; return 1 })
   const shown = ref(true)
   let api!: RefreshHandle<{ symbol: string }, number>
 
   const Inner = defineComponent({
     setup() {
-      api = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      api = useRefresh<{ symbol: string }, number>('/api/vue/265', { enabled: ref(true), every: ref(100_000) })
       return () => h('div')
     },
   })
@@ -533,10 +524,23 @@ test('A17 安装：同一实例重复安装无副作用，另一个活跃实例�
 })
 
 test('A17 未安装协调者时 useRefresh 直接抛错', () => {
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/238')
   const app = renderer.createApp(defineComponent({
     setup() {
-      assert.throws(() => { useRefresh(quote, { enabled: ref(true), every: ref(1000) }) }, /需要先安装/)
+      assert.throws(() => { useRefresh<{ symbol: string }, number>('/api/vue/238', { enabled: ref(true), every: ref(1000) }) }, /需要先安装/)
+      return () => h('div')
+    },
+  }))
+  app.mount({} as never)
+  app.unmount()
+})
+
+test('A02 空 URL 直接拒绝：它是身份的一半，短了会把不同资源并成一条', () => {
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      assert.throws(
+        () => { useRefresh<{ symbol: string }, number>('', { enabled: ref(true), every: ref(1000) }) },
+        /需要一个非空的 URL/,
+      )
       return () => h('div')
     },
   }))
@@ -546,19 +550,19 @@ test('A17 未安装协调者时 useRefresh 直接抛错', () => {
 
 test('A05/A11 暂停页还没有读取时间时跟着第一份数据上屏一次，此后冻结；自己点刷新那一次照样上屏', async () => {
   let loads = 0
-  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/903')
+  const quote = '/api/vue/903'
   const manager = newManager(1, async () => { loads++; return loads })
   let reader!: RefreshHandle<{ symbol: string }, number>
   let paused!: RefreshHandle<{ symbol: string }, number>
   const Reader = defineComponent({
     setup() {
-      reader = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      reader = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(true), every: ref(100_000) })
       return () => h('div')
     },
   })
   const Paused = defineComponent({
     setup() {
-      paused = useRefresh(quote, { enabled: ref(false), every: ref(100_000) })
+      paused = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(false), every: ref(100_000) })
       return () => h('div')
     },
   })
@@ -570,26 +574,25 @@ test('A05/A11 暂停页还没有读取时间时跟着第一份数据上屏一次
 
   reader.submit({ symbol: 'A' })
   paused.submit({ symbol: 'A' })
-  await tick()
+  // 调度是真实时序：只等条件成立，不假设要转几圈（仓库既有约定）。
+  await until(() => reader.display.value?.data === 1 && paused.display.value?.data === 1, '两个页面都上屏第一份')
   assert.equal(loads, 1, '共享身份只取一次')
   assert.equal(reader.display.value?.data, 1)
   assert.equal(paused.display.value?.data, 1, '暂停页还没有读取时间：没有时间就直接读，上屏第一份')
 
-  // 同一格再来一拍：暂停页仍然什么都不抄——读闸门只认「刚点过刷新、基线已置空」。
+  // 同一格再来一拍：暂停页仍然什么都不抄——读闸门第二项只认「还没有读取时间」。
   reader.refresh()
-  await tick()
-  assert.equal(reader.display.value?.data, 2)
+  await until(() => reader.display.value?.data === 2, '读者拿到第二版')
   assert.equal(paused.display.value?.data, 1, '它此后有上次读取时间了：窗口内不换画面（冻结）')
 
   // 暂停页自己点名要的那一拍照样放行（A05）。
   paused.refresh()
-  await tick()
+  await until(() => paused.display.value?.data === 3, '暂停页显式刷新后上屏')
   assert.equal(paused.display.value?.data, 3, '显式刷新把上次读取时间置 null：这一拍照样上屏')
 
   // 之后再来的新结果不再进这一页：冻结回到最后一帧。
   reader.refresh()
-  await tick()
-  assert.equal(reader.display.value?.data, 4)
+  await until(() => reader.display.value?.data === 4, '读者拿到第四版')
   assert.equal(paused.display.value?.data, 3, '没点刷新的那一拍不再跟随：停在自己拿到的那一版')
   app.unmount()
 })

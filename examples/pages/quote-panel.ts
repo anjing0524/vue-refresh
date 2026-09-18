@@ -7,8 +7,8 @@
  */
 import { KeepAlive, computed, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { useRefresh } from '../../src/vue'
-import { ageLine, quoteSource } from '../sources'
-import type { QuoteParams } from '../sources'
+import { ageLine, QUOTE_URL } from '../sources'
+import type { QuoteParams, QuoteResult } from '../sources'
 
 const INTERVALS = [1_000, 2_000, 5_000]
 const SYMBOLS = ['DEMO', 'DEMO2', 'OTHER']
@@ -21,7 +21,7 @@ const QuoteCard = defineComponent({
     // 一次准备、一次提交：参数对象只在挂载时构造，不在渲染里重建。
     let submits = 0
     const failures = ref(0)
-    const task = useRefresh(quoteSource, {
+    const task = useRefresh<QuoteParams, QuoteResult>(QUOTE_URL, {
       enabled: ref(true),
       // 频率是响应式输入：改动它就走配置变化路径，由框架替换当前任务。
       every: computed(() => props.every),

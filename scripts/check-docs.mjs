@@ -460,7 +460,7 @@ for (const [kind, head] of [['函数', '| 函数 |'], ['状态常量对象', '| 
 //     `settleRequest`; §0 now registers 「刷新命令」 instead, so both must stay out of the normative
 //     text. The adapter keeps its own `pending` flag — that one is current code, not history.
 const RETIRED = ['caller', 'ErrorOrigin', 'CancelReason', 'RefreshError', 'readSnapshot', 'reported', 'INVALID_CONFIG_MESSAGE',
-  '刷新要求', 'settleRequest']
+  '刷新要求', 'settleRequest', 'defineRefresh', 'RefreshSource']
 for (const [file, text] of [['/README.md', read('/README.md')], ['/DESIGN.md', designText],
   ['/统一刷新管理.md', design.slice(0, catalogueEnd)]]) {
   for (const term of RETIRED) {

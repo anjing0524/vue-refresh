@@ -1,13 +1,13 @@
 import { ref } from 'vue'
-import { defineRefresh, useRefresh } from '../src/index.ts'
-import type { RefreshSource } from '../src/index.ts'
+import { useRefresh } from '../src/index.ts'
 interface Params { account: string; symbol: string; filter?: { page: number } }
 interface Quote { price: number }
 // URL 与参数值决定身份；`Quote` 是**声明**的原始返回结构（框架不做响应转换，所以没有取数函数可绑定）。
-const source = defineRefresh<Params, Quote>('/api/quote')
+// 资源声明现在就是 URL 字符串本身：参数类型 `P` 与结果类型 `T` 在 `useRefresh` 调用上写明（ADR-74）。
+const source = '/api/quote'
 // Compile-only function: never executed outside component setup.
 function contract() {
-  const task = useRefresh(source, { enabled: ref(true), every: ref(1000) })
+  const task = useRefresh<Params, Quote>(source, { enabled: ref(true), every: ref(1000) })
   task.submit({ account: 'demo', symbol: 'A', filter: { page: 1 } })
   // @ts-expect-error missing required interface field
   task.submit({ account: 'demo' })
@@ -44,23 +44,20 @@ function contract() {
   // @ts-expect-error 失败是框架写的事实，页面不能改写它
   task.display.value!.failedAt = null
   // @ts-expect-error 失败不再由框架推送：`onError` 这一项已删除（ADR-63）
-  useRefresh(source, { enabled: ref(true), every: ref(1000), onError: () => {} })
-  // 具体 Source 是**带类型标记的字符串**（ADR-74），因此可以直接进入框架的擦除视图
-  // （`RefreshSource<object, unknown>`），异构注册表不必在接收点保留类型断言。
-  const erased: RefreshSource<object, unknown> = source
-  void erased
-  // 反向的代价换了个位置：擦除视图仍然可以注册，但读出来的数据收不窄成具体 DTO。
-  const erasedTask = useRefresh(erased, { enabled: ref(true), every: ref(1000) })
+  useRefresh<Params, Quote>(source, { enabled: ref(true), every: ref(1000), onError: () => {} })
+  // 擦除视图：类型参数写在调用上（`object` 是值域的最宽形态），异构注册表不必在接收点留类型断言；
+  // 反向的代价是读出来的数据收不窄成具体 DTO。
+  const erasedTask = useRefresh<object, unknown>(source, { enabled: ref(true), every: ref(1000) })
   // @ts-expect-error 擦除视图的 display.data 是 unknown，不能当 Quote 用
   const erasedPrice: number = erasedTask.display.value!.data!.price
   void erasedPrice
 }
-// @ts-expect-error 定义必须给出 URL：它是身份的一半，缺了就无法与其它资源区分
-defineRefresh<Params, Quote>()
+// @ts-expect-error URL 是身份的一半，必须给出（资源声明就是那个字符串，ADR-74）
+useRefresh<Params, Quote>()
 // 参数值域（ADR-52）：对象型只能是普通对象或数组。这两条是**反向探针**——`JsonParameters` 的写法
 // 换个形状（例如加 `readonly` 修饰符）会静默失效，那时这两条 `@ts-expect-error` 会变成「未使用的指令」而报错。
 // @ts-expect-error Date 的内容对编码不可见，请传 ISO 字符串
-defineRefresh<{ account: string; from: Date }, Quote>('/api/date')
+useRefresh<{ account: string; from: Date }, Quote>('/api/date', { enabled: ref(true), every: ref(1000) })
 // @ts-expect-error Map 的内容对编码不可见
-defineRefresh<{ account: string; box: Map<string, number> }, Quote>('/api/map')
+useRefresh<{ account: string; box: Map<string, number> }, Quote>('/api/map', { enabled: ref(true), every: ref(1000) })
 void contract

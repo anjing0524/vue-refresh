@@ -13,12 +13,12 @@
 工程目录：`vue-refresh/`。运行时分层：
 
 ```text
-public-types.ts            公共类型的唯一代码定义与状态取值常量；不依赖运行时模块
-source.ts                  资源声明（带类型的 URL 字符串）、提交边界准备与稳定键
+public-types.ts            公共契约类型（判别联合，没有常量对象）；不依赖运行时模块
+source.ts                  参数边界：准备（复制、值域检查、稳定键）
 core.ts                    跨实例的协调者（身份注册表、队列与并发、调度、可见性）＋ 一个身份自己的 Resource 类与每页一份的 Config 配置槽
 store.ts                   结果表（Pinia 模块级定义）：URL → 参数键 两级分组，整条替换，随实例释放即删
 vue.ts                     组件适配与安装：配置槽原地改写、生命周期、可见性、读闸门、结果表接线
-index.ts                   包入口（三个函数与 6 个公共类型；没有常量对象）
+index.ts                   包入口（两个函数与 5 个公共类型；没有常量对象）
 ```
 
 依赖方向单向：`public-types` ← `source` ← `core` ← `store` ← `vue` ← `index`。
@@ -37,12 +37,12 @@ index.ts                   包入口（三个函数与 6 个公共类型；没�
 
 | 文件 | 职责 |
 |---|---|
-| `public-types.ts` | 公共契约类型（判别联合，没有常量对象）与 `RefreshSource`（**带类型的 URL 字符串**：没有字段、没有运行期结构、也不冻结任何对象） |
-| `source.ts` | `defineRefresh`（**只收一个 URL**：声明点用 `JsonParameters` 约束参数值域，运行时原样返回那个字符串）、`Parameters`、`assertJsonValue`（值域检查：对象型限普通对象或数组）、`prepareParameters`（复制 → 值域检查 → 稳定编码，消费者各拿副本；**不跑任何回调**）、定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
+| `public-types.ts` | 公共契约类型（判别联合，没有常量对象）：交付面、句柄、协调者、选项与提交结果 |
+| `source.ts` | 参数边界：`Parameters`、`assertJsonValue`（值域检查：对象型限普通对象或数组）、`prepareParameters`（复制 → 值域检查 → 稳定编码，消费者各拿副本；**不跑任何回调**）、`parameterKey`；`P` 的值域约束 `JsonParameters` 也在这里，由 `useRefresh` 的类型参数使用；稳定编码用 `fast-json-stable-stringify` |
 | `core.ts` | `RefreshCore`：跨实例的协调者——身份注册表、唯一 Timer 与有序队列（手动刷新插到队头）、并发槽、结果表写入端、可见性、只读计数投影；`Resource`：一个身份自己的状态与判定（声明者、这一轮是否已产出／是否还欠一轮、到期、当前执行、成功与失败结算），**不持有核心**——写表、回收、排队都是核心的动作（ADR-65）；`Config`：**一页在核心里的登记**——每页一个可变配置槽，适配层原地写、核心只读（ADR-66） |
 | `store.ts` | 结果表：模块级 `defineStore`，`URL → 参数键 → ResultCell 四字段` 两级分组，`shallowRef` 整条替换；写入端给内核（`write` / `fail` / `remove` / `list`），读出口给页面（`read`） |
 | `vue.ts` | `useRefresh`（每页一份 `Config` 配置槽、公开 `RefreshHandle`、指向结果表的 Display、**读闸门**、生命周期）、`createRefreshManager`（安装、可见性监听、结果表接线、销毁） |
-| `index.ts` | 包导出：三个函数、逐个列出的 6 个公共类型（不用 `export type *`）；工具型别名不导出 |
+| `index.ts` | 包导出：两个函数、逐个列出的 5 个公共类型（不用 `export type *`）；工具型别名不导出 |
 
 ### 2.1 调用链路
 
@@ -82,8 +82,8 @@ display（读取面）→ 写入驱动：结果表写入唤醒本页副作用 �
 
 ```mermaid
 flowchart LR
-  Source[Source 固定业务定义] --> Parameters[Parameters 快照与 key]
-  Source -. url .-> Config[Config 每页一份配置槽，就是它在核心里的登记]
+  Url[资源：URL 字符串] --> Parameters[Parameters 快照与 key]
+  Url -. 同一个 URL .-> Config[Config 每页一份配置槽，就是它在核心里的登记]
   Config -. 按身份读 .-> Table[结果表: URL → 参数键 → ResultCell 四字段]
   Resource[Resource 共享实例] --> Decl[declarers: 装 Config 的声明者集合]
   Resource --> Round[produced / needsNext ＝ 这一轮产出了没有 / 还欠一轮]
@@ -109,7 +109,7 @@ flowchart LR
 
 ### 3.2 身份
 
-- URL（`RefreshSource` 本身就是带类型的 URL 字符串）＋ `Parameters.key` 定位实例；同一个 URL 与同一份参数值就是同一个实例，因此两处各写一份定义也照样合并。实例的生存期只由声明决定（最后一个声明者离开就回收）。
+- URL（一个字符串）＋ `Parameters.key` 定位实例（声明不再有对象或函数，ADR-75）；同一个 URL 与同一份参数值就是同一个实例，因此两处各写一份定义也照样合并。实例的生存期只由声明决定（最后一个声明者离开就回收）。
 - **没有第二套计数**：执行与结果都不记版本或代次，读取面也不带「由谁触发」的标记
   （ADR-43 删掉等待者的版本下限、ADR-45 删掉任务版本、ADR-47 删掉声明代次）。
 
@@ -119,7 +119,6 @@ flowchart LR
 
 | 所有者 | 字段、初值 | 写入与释放 |
 |---|---|---|
-| Source | **一个带类型的 URL 字符串**（`RefreshSource<P,T> = string & { readonly __params?: P; readonly __result?: T }`）：没有字段、没有运行期结构、不冻结任何对象；`P`／`T` 只在定义点声明一次，是编译期载体 | `defineRefresh` 只做类型声明并原样返回那个 URL；**空 URL 由 `useRefresh` 拒绝**（它会把所有资源并成一条），定义点不做运行期检查（ADR-74） |
 | Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给消费者（每轮请求体）时各复制一份；`display.args` 每次抄写再复制一份（它是身份键那份值）；配置槽与实例释放后回收 |
 | Config | `{ enabled, every, active }`；**每页一个对象**，适配层在 `useRefresh` 里建立（初值 `enabled=false`、`every=null`、`active=false`） | 适配层**唯一写**：`vue.ts` 的 `applyConfig` 在一个同步块里原地改写三格（单一写入口）；核心只读，不重新调用业务 getter。**它同时就是这一页在核心里的登记**——这个对象挂在哪个实例的 `declarers` 里，就等于这一页声明了哪个身份，因此没有第二份名册（ADR-66）。`every === null` ＝ 这一拍配置非法（不取数、不刷新、不算有资格），它与「暂停」（`config.enabled=false` 而 `every` 仍有效）是两件事（A04、A05）。随本页作用域释放（`onScopeDispose` → `released` ＋ `undeclare`）；核心不 import 定义对象，也没有任何回调字段（ADR-64） |
 | Resource | 类：`url`、`parameters`（一个身份只保留一份参数对象）、`declarers` 空集合（`Set<Config>`）、`produced=false`（这一轮的结果已经产出）、`needsNext=false`（产出之后又有人点过刷新，本轮结束再排一轮）、`settledAt=null`、`controller=null` | 首次声明创建；**一个身份只保留一份参数对象**：首次声明采用那份已准备参数，后续同键加入者复用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`declarers` 空时由 `releaseIfUnused` 删除注册、结果表条目、排队执行并 abort 在途。**一个身份内的状态与判定都是它自己的方法**：`dueAt` / `eligibleEvery` / `isPresent` / `isCurrent` / `hasExecution` / `isWanted` / `isEligible` / `settle(at)` / `fail(at)`——后两个只记结算时刻并把 `produced` 置起，写表与回收由核心做；实例不持有核心（ADR-65），核心越出实例边界只碰 `controller`（只经 `place`，§3.5 第 4 条）与 `declarers` 的增删（`submit` / `undeclare`），那两个位由 `refresh` / `refill` 与 `run` 读写（§3.6、§3.9 第一条）。**这里不记「谁要的」**：刷新是给身份的一句命令，核心不留任何「欠一张」的账（ADR-70） |
@@ -260,7 +259,7 @@ flowchart LR
 
 ### 4.1 参数准备与键
 
-固定的资源声明绑定取数 URL、`P`、`T`——声明本身就是一个带类型的 URL 字符串。`P` 的值域在声明点由 `defineRefresh` 约束为 JSON 值（对象型只能是普通对象或数组，ADR-52），提交边界再由 `assertJsonValue` 运行期兜底：`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 等容器的内容对编码不可见，两个内容不同的参数会塌成同一个身份，故一律拒绝（`Date` 请传 ISO 字符串）。业务字段的合法性仍不归框架——那是调用方自己的事：它在 `submit` 之前自己判，框架不替它跑回调（ADR-74）。编码交给 `fast-json-stable-stringify`，标量沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 字段按省略；函数与 Proxy 这类复制不了的值由 `structuredClone` 拒绝，循环引用让编码交不出身份。
+资源就是「URL ＋ 参数值」这条身份：URL 与 `P`／`T` 都在 `useRefresh<P, T>(url, …)` 那一行写出，框架里没有声明对象。`P` 的值域由 `JsonParameters` 约束为 JSON 值（对象型只能是普通对象或数组，ADR-52），提交边界再由 `assertJsonValue` 运行期兜底：`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 等容器的内容对编码不可见，两个内容不同的参数会塌成同一个身份，故一律拒绝（`Date` 请传 ISO 字符串）。业务字段的合法性仍不归框架——那是调用方自己的事：它在 `submit` 之前自己判，框架不替它跑回调（ADR-74）。编码交给 `fast-json-stable-stringify`，标量沿用 JSON 语义：`-0` 与 `0` 同键，`NaN` / `Infinity` 按 `null`，`undefined` 字段按省略；函数与 Proxy 这类复制不了的值由 `structuredClone` 拒绝，循环引用让编码交不出身份。
 
 提交边界**一次**执行；三步各由一个函数负责，没有共享、也没有需要冻结的副作用：
 
@@ -458,7 +457,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 | 你想弄清 | 从这里开始 | 接着读 |
 |---|---|---|
-| 一次取数怎么走完 | `src/index.ts`（三个导出）→ `vue.ts` 的 `useRefresh` | §2.1 的链路，再看 `RefreshCore.submit` → `reconcile` → `flush` → `run` → `Resource.settle`（交出这一批要求） |
+| 一次取数怎么走完 | `src/index.ts`（两个导出）→ `vue.ts` 的 `useRefresh` | §2.1 的链路，再看 `RefreshCore.submit` → `reconcile` → `flush` → `run` → `Resource.settle`（记结算时刻与 `produced`） |
 | 一个页面的配置槽怎么变成共享实例 | `RefreshCore.submit` → `RefreshCore.resourceOf`（扫描）→ `RefreshCore.resourceFor` | §3.1 对象关系、§3.3 所有权表、§3.5 第 8／10 条 |
 | 隐藏、卸载、销毁之后还剩什么 | `RefreshCore.setVisible` / `RefreshCore.undeclare` / `RefreshCore.dispose`；适配层的 `released` / `lastReadAt` | §3.6 命令表、§3.9 第一／二条、§3.5 第 9 条、§6.4 |
 
@@ -478,9 +477,8 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 | 符号 | 做什么 |
 |---|---|
-| `defineRefresh` | 声明一种固定业务资源：给 URL 打上参数类型 `P` 与结果类型 `T`，返回**带类型的 URL 字符串**本身（运行时就是恒等；空 URL 由 `useRefresh` 拒）；建议放应用级常量 |
 | `Config` | 一页在核心里的**全部内容**与登记：`{ enabled, every, active }` 一个可变对象，适配层原地写、核心只读；`every === null` ＝ 这一拍配置非法 |
-| `useRefresh` | 组件侧入口：第一个参数是资源 URL（`defineRefresh` 的返回值，或带类型的字符串字面量；空 URL 抛 `TypeError`），建立本页的配置槽并跟踪配置与生命周期，返回公开的 `RefreshHandle`（指向结果表的只读显示面与两个动作）；**参数准备在这里完成**（不跑任何调用方回调，ADR-74），抛错就地变 `rejected`（ADR-64）；`display` 读取面＝**写入驱动 ＋ `updatedAt` 差节流**（新格距展示中那份满一个本页 `every` 才换画面，一个 `every` 窗口最多换一次），**三处不等窗口**：身份落定、重新成为读者、显式 `refresh()`——都只把上次读取时间置 `null`（ADR-67、ADR-72） |
+| `useRefresh` | 组件侧**唯一入口**：`(url, options)`——第一个参数是资源 URL 字符串（非空，空 URL 抛 `TypeError`），`P`／`T` 写在这一行的类型参数上；建立本页的配置槽并跟踪配置与生命周期，返回公开的 `RefreshHandle`（指向结果表的只读显示面与两个动作）；**参数准备在这里完成**（不跑任何调用方回调，ADR-74），抛错就地变 `rejected`（ADR-64）；`display` 读取面＝**写入驱动 ＋ `updatedAt` 差节流**（新格距展示中那份满一个本页 `every` 才换画面，一个 `every` 窗口最多换一次），**三处不等窗口**：身份落定、重新成为读者、显式 `refresh()`——都只把上次读取时间置 `null`（ADR-67、ADR-72） |
 | `createRefreshManager` | 创建应用级协调者：接结果表（`pinia`）、取数实例（`axios`）与并发上限；`install` 再接可见性监听与卸载释放 |
 | `RefreshCore.isDisposed` | 协调者是否已销毁；存活状态的唯一公开出口 |
 | `RefreshCore.isVisible` | 浏览器此刻是否可见：核心持有的**一比特事实**，读闸门在适配层（ADR-66） |

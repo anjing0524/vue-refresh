@@ -9,7 +9,7 @@ import { prepareParameters } from './source.ts'
 import type { JsonParameters, Parameters } from './source.ts'
 import { useRefreshStore } from './store.ts'
 import type {
-  ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions, RefreshSource,
+  ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions,
 } from './public-types.ts'
 
 /**
@@ -67,7 +67,7 @@ function applyConfig(target: Config, read: readonly [unknown, unknown, boolean])
  * 必须在组件的 `setup` 中同步调用，且此前已安装一个存活的协调者。
  */
 export function useRefresh<P extends JsonParameters<P>, T>(
-  url: RefreshSource<P, T>,
+  url: string,
   options: RefreshOptions,
 ): RefreshHandle<P, T> {
   if (url.length === 0) throw new TypeError('useRefresh 需要一个非空的 URL：它是身份的一半')

@@ -7,7 +7,7 @@
  */
 import { computed, defineComponent, h, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRefresh } from '../../src/vue'
-import { ageLine, quoteSource } from '../sources'
+import { ageLine, QUOTE_URL } from '../sources'
 import type { QuoteParams, QuoteResult } from '../sources'
 import type { RefreshHandle, RefreshOptions } from '../../src/public-types'
 
@@ -31,7 +31,7 @@ const PairCard = defineComponent({
       enabled: ref(true),
       every: computed(() => props.every),
     }
-    const task = useRefresh(quoteSource, options)
+    const task = useRefresh<QuoteParams, QuoteResult>(QUOTE_URL, options)
     // 失败不再由框架推送：交付面出现新的失败对象时计一次（默认 pre flush，首次不触发）。
     watch(() => task.display.value?.failedAt, failedAt => { if (failedAt !== null) failures.value += 1 })
     const params = (symbol: string): QuoteParams => ({ account: 'demo', symbol })
@@ -137,7 +137,7 @@ export const B09View = defineComponent({
   setup() {
     const enabled = ref(true)
     const failures = ref(0)
-    const task = useRefresh(quoteSource, { enabled, every: ref(5_000) })
+    const task = useRefresh<QuoteParams, QuoteResult>(QUOTE_URL, { enabled, every: ref(5_000) })
     // 失败只从交付面读到：出现新的失败对象时，页面自己关闭开启意愿（框架从不写 enabled）。
     watch(() => task.display.value?.failedAt, failedAt => {
       if (failedAt === null) return

@@ -6,8 +6,8 @@
  */
 import { defineComponent, h, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRefresh } from '../../src/vue'
-import { ageLine, listSource } from '../sources'
-import type { ListParams, SortField } from '../sources'
+import { ageLine, LIST_URL } from '../sources'
+import type { ListParams, ListResult, SortField } from '../sources'
 
 const SORTS: readonly SortField[] = ['price', 'change', 'volume']
 const SORT_LABEL: Record<SortField, string> = { price: '价格', change: '涨跌幅', volume: '成交量' }
@@ -38,7 +38,7 @@ export const QueryListPage = defineComponent({
       if (task.submit(args).status === 'accepted') submitted.value = args
     }
 
-    const task = useRefresh(listSource, {
+    const task = useRefresh<ListParams, ListResult>(LIST_URL, {
       enabled,
       every: ref(1_500),
     })

@@ -1,5 +1,5 @@
 import stringify from 'fast-json-stable-stringify'
-import type { ReadonlySnapshot, RefreshSource } from './public-types.ts'
+import type { ReadonlySnapshot } from './public-types.ts'
 
 /**
  * 参数边界：提交边界的一次准备（`prepareParameters`）。
@@ -28,17 +28,6 @@ export type { JsonParameters }
 
 /** 组件刷新的参数类型（`useRefresh` 的 `P`）必须整体落在 `JsonValue` 里；`tests/types.ts` 里有反向探针。 */
 type JsonParameters<P> = { [K in keyof P]: JsonValue }
-
-/**
- * 声明一个取数资源：给它一个 URL，并在这里**声明一次**参数类型与原始返回结构。
- *
- * 返回值就是那个 URL 字符串（`RefreshSource` 只是带类型的别名，没有运行期结构、也不冻结任何对象）；
- * 身份是「URL ＋ 参数值」，同一个 URL 声明多少次都合并到同一个实例。空 URL 会在 `useRefresh` 被拒
- * （它会把所有资源并成一条），这里不做运行期检查。
- */
-export function defineRefresh<P extends JsonParameters<P>, T>(url: string): RefreshSource<P, T> {
-  return url
-}
 
 /** 值域检查：对象型参数只能是普通对象或数组——`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 这类容器一律拒绝。 */
 function assertJsonValue(value: unknown, seen: WeakSet<object>): void {

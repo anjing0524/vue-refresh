@@ -5,7 +5,6 @@
  * 身份（URL ＋ 参数值）、共享、调度、取消与有效结果交付都由框架负责；请求也由框架发起——它按定义里的
  * URL 对 `demoHttp` 发 `post(url, 参数值, { signal })`。参数与 DTO 的运行时校验属于这一侧（业务／传输适配）。
  */
-import { defineRefresh } from '../src/source'
 import type { RefreshHttp } from '../src/core'
 
 
@@ -88,10 +87,10 @@ function readList(body: unknown, page: number): ListResult {
 }
 
 // 参数准入由调用方在 `submit` 之前自己判（框架不再替调用方跑任何回调，ADR-74），因此这里只有 URL：
-// 声明一次参数类型与原始返回结构，同一个 URL 的多次声明合并成同一个实例。
-export const listSource = defineRefresh<ListParams, ListResult>('/api/list')
+// **同一个 URL 就是同一个身份**；参数类型与原始返回结构由各页面在 `useRefresh` 上写明（ADR-74）。
+export const LIST_URL = '/api/list'
 
-export const quoteSource = defineRefresh<QuoteParams, QuoteResult>('/api/quote')
+export const QUOTE_URL = '/api/quote'
 
 /** 相对时间按当前时刻重算（随交付重渲染）；页面不为此自建 Timer。 */
 export function ageLine(updatedAt: number): string {

@@ -13,18 +13,6 @@ export type ReadonlySnapshot<T> =
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
 
 /**
- * 一个取数资源的**声明**：URL 字符串本身，带上它的参数类型 `P` 与原始返回结构 `T`。
- *
- * 它**不是一个对象**：框架按 URL 发 POST、请求体就是参数值，所以声明里没有取数函数、没有准入规则、
- * 也没有别的字段（ADR-74）。带 `P`／`T` 只为**在定义点声明一次**——`defineRefresh` 的返回值带上它们，
- * `useRefresh` 从它推出句柄类型；直接写字符串字面量也行，但那时要在 `useRefresh` 上写明类型参数。
- */
-export type RefreshSource<P, T> = string & {
-  readonly __params?: P
-  readonly __result?: T
-}
-
-/**
  * `submit` 的同步结果。`accepted` 只表示身份已被记录，不代表请求成功。
  * `cancelled` 不带原因：取消只有一个来源（句柄或协调者已销毁），单成员取值没有信息量（ADR-48）。
  * 声明不检查可见性与开启意愿，换身份也只是把这份声明从旧身份上摘掉——刷新是给身份的命令，不留账（ADR-70）。
