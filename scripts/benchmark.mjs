@@ -19,6 +19,7 @@ import { createRenderer, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore } from '../src/vue.ts'
 import { useRefresh } from '../src/vue.ts'
+import { snapshot } from '../tests/support/observe.ts'
 
 const option = (name, fallback) => {
   const index = process.argv.indexOf(`--${name}`)
@@ -66,7 +67,7 @@ async function measure() {
       active += 1
       peakInFlight = Math.max(peakInFlight, active)
       // 交叉核对：在真实请求的入口读框架自己的槽位投影。
-      peakRunning = Math.max(peakRunning, core.snapshot().running.length)
+      peakRunning = Math.max(peakRunning, snapshot(core).running.length)
       try {
         await Promise.resolve()
         return { data: { price: loads } }
@@ -104,13 +105,13 @@ async function measure() {
   app.mount(node())
   await sleep(duration)
   const elapsed = performance.now() - started
-  const view = core.snapshot()
+  const view = snapshot(core)
   const declarers = view.resources.reduce((total, resource) => total + resource.declarers.size, 0)
   const observed = { resources: view.resources.length, declarers, running: view.running.length }
 
   app.unmount()
   manager.dispose()
-  const after = core.snapshot()
+  const after = snapshot(core)
   const residue = {
     resources: after.resources.length,
     declarers: after.resources.reduce((total, resource) => total + resource.declarers.size, 0),

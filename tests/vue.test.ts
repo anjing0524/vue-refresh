@@ -6,6 +6,7 @@ import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import type { RefreshHttp } from '../src/core.ts'
 import type { RefreshDisplay, RefreshFailure, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
 import type { Ref } from 'vue'
+import { snapshot } from './support/observe.ts'
 
 /** 这几个用例验证浏览器路径：`install` 无条件注册可见性监听（本库只服务 SPA），因此先提供最小替身。 */
 Object.defineProperty(globalThis, 'document', {
@@ -48,6 +49,18 @@ function newManager(maxConcurrent: number, post: FakePost = async () => undefine
 afterEach(() => {
   for (const manager of managers.splice(0)) manager.dispose()
 })
+
+/**
+ * 观测面取一份快照；协调者已销毁时返回 `undefined`。
+ *
+ * ADR-78 之后销毁会把模块级的安装槽置空（`currentCore()` 因此回 `null`），所以这里显式区分
+ * 「没有协调者」与「协调者里没有东西」——原来的 `?.` 把两者合成同一个 `undefined`，读起来像
+ * 断言失效而不是状态变化。
+ */
+function snapshotOf(): ReturnType<typeof snapshot> | undefined {
+  const core = currentCore()
+  return core === null ? undefined : snapshot(core)
+}
 
 const tick = async (): Promise<void> => {
   await Promise.resolve()
@@ -101,7 +114,7 @@ test('A06/A11/A12 适配层：声明后立即拿到数据；关闭开启意愿�
   app.unmount()
   await tick()
   assert.equal(released, 1)
-  assert.equal(currentCore()?.snapshot().resources.length, 0, '卸载后实例与结果一并消失')
+  assert.equal(api.display.value, null, '整个应用卸载＝协调者也销毁：两个读出口一起清空（ADR-78）；只卸载页面、协调者还活着的情形是 A17/A06 那条')
 })
 
 test('A04/A05 配置非法：不取数并停止订阅，修正后按当前资格恢复', async () => {
@@ -161,7 +174,7 @@ test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接
   await tick()
   // 暂停只失去资格：声明、实例与结果都留着（ADR-61），画面冻结在最后一帧。
   assert.equal(api.display.value?.data, 7, '暂停保留画面')
-  assert.equal(currentCore()?.snapshot().resources.length, 1, '暂停不释放实例：声明还在')
+  assert.equal(snapshotOf()?.resources.length, 1, '暂停不释放实例：声明还在')
 
   enabled.value = true
   await tick()
@@ -380,7 +393,7 @@ test('A21 节流：慢页面不跟着快页面跳，节流窗口内的新版本�
   await tick()
 
   const latest = (): unknown => {
-    const cell = currentCore()?.snapshot().results[0]?.cell
+    const cell = snapshotOf()?.results[0]?.cell
     return cell === undefined || cell.updatedAt === null ? null : cell.data
   }
   // 新身份的第一份内容不等节流：两个页面都立即拿到首查结果。
@@ -544,7 +557,8 @@ test('A17/A06 释放一页之后：submit 返回 cancelled、refresh 不产生�
   api.refresh()
   await tick()
   assert.equal(loads, 1, '释放后不再取数')
-  assert.equal(currentCore()?.snapshot().resources.length, 0, '释放后实例与结果一并回收')
+  assert.equal(snapshotOf()?.resources.length, 0, '释放后实例与结果一并回收')
+  assert.equal(api.display.value?.data, 1, '画面仍保留最后一帧（ADR-60：冻结与实例生死是两件事）')
   app.unmount()
 })
 
@@ -560,6 +574,83 @@ test('A17 安装：同一实例重复安装无副作用，另一个活跃实例�
   manager.dispose()
   app.use(other) // 上一个实例已销毁：原地接管同一个注入槽位。
   app.mount({} as never)
+  await tick()
+  app.unmount()
+})
+
+test('A17 协调者销毁后读取面一起清空：结果表已空，两个出口不该把最后一帧冻在画面上（ADR-78）', async () => {
+  let mode: 'ok' | 'fail' = 'ok'
+  const manager = newManager(1, async () => {
+    if (mode === 'fail') throw new Error('取数失败')
+    return 7
+  })
+  const shown = ref(true)
+  let api!: RefreshHandle<{ symbol: string }, number>
+  // 单独拿一份有显式类型的出口别名：`assert.equal(display.value, null)` 会把 `display.value`
+  // 这个属性在整个函数里收窄成 `null`，后面的松手断言就会被判成 `never`。
+  let display!: Readonly<Ref<RefreshDisplay<{ symbol: string }, number> | null>>
+
+  const Inner = defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/278', { enabled: ref(true), every: ref(100_000) })
+      display = api.display
+      return () => h('div')
+    },
+  })
+  const app = renderer.createApp(defineComponent({
+    setup: () => () => (shown.value ? h(Inner) : null),
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+  assert.equal(display.value?.data, 7, '先成功一份，画面有内容可冻')
+
+  // 再让这一格失败一次：失败出口有内容，数据出口仍留着上一次成功（ADR-63）。
+  mode = 'fail'
+  api.refresh()
+  await tick()
+  assert.notEqual(api.failure.value, null, '失败出口先有内容')
+
+  // 销毁协调者：结果表条目随 `releaseIfUnused` 清空，读取面必须跟着清——否则页面读的是
+  // 一个已经不存在的协调者留下的最后一帧，且再也没有任何东西会叫醒它。
+  manager.dispose()
+  await tick()
+  assert.equal(currentCore(), null, '销毁后没有存活的协调者')
+  assert.equal(snapshotOf(), undefined, '观测面也拿不到一个已销毁的实例')
+  // 这里用 `assert.equal` 断言会把这个 `Ref` 收窄成「值恒为 null」，所以先各取一份再判。
+  const clearedDisplay = display.value
+  const clearedFailure = api.failure.value
+  assert.equal(clearedDisplay, null, '销毁后数据出口清空')
+  assert.equal(clearedFailure, null, '销毁后失败出口清空')
+
+  // 页面还活着，但协调者没了：这两个动作都不再产生事实（§2.4）。
+  assert.deepEqual(api.submit({ symbol: 'B' }), { status: 'cancelled' }, '没有协调者时 submit 回 cancelled')
+  api.refresh()
+  await tick()
+
+  // 原地接管：新协调者装上后，这一页**不用动任何配置 ref、也不用重新 submit**，新协调者就要按
+  // 重新报上的配置继续给这个身份取数——旧协调者手里的 `config` 槽已经没人读，新协调者不接旧槽；
+  // 不重报的话它永远停在 `every === null`，一次也不取数（这条由干净消费方的运行期场景先抓到）。
+  newManager(1, async () => 9)
+  app.use(managers[managers.length - 1]!)
+  const submitResult = api.submit({ symbol: 'A' }) // 接管后重新声明同一个身份：新协调者必须立刻取数
+  console.log('DEBUG submit =', JSON.stringify(submitResult), 'display =', JSON.stringify(display.value))
+  await until(() => {
+    const shown: RefreshDisplay<{ symbol: string }, number> | null = display.value
+    return shown?.data === 9
+  }, '接管后新协调者按重新报上的配置取数并上屏')
+  const takeover: RefreshDisplay<{ symbol: string }, number> | null = display.value
+  assert.equal(takeover?.args.symbol, 'A', '身份还是销毁前那个：不是靠重新 submit 才登记上的')
+
+  // 同一个句柄继续换身份也照旧。
+  api.submit({ symbol: 'C' })
+  await tick()
+  const next: RefreshDisplay<{ symbol: string }, number> | null = display.value
+  assert.equal(next?.args.symbol, 'C', '接管之后 submit 也照旧工作')
+
+  shown.value = false
   await tick()
   app.unmount()
 })

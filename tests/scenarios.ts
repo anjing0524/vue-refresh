@@ -158,8 +158,8 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await until(async () => (await d.snapshot()).queued === 1, 'new task queues')
     await sleep(200)
     const blocked = await d.snapshot()
-    // 「不自旋」的证据是这 200ms 里请求数没有增长（`calls.length === 1`）＋队列没被反复重建（`queued === 1`）；
-    check(!blocked.pending && !blocked.timer, '满槽时不自旋：既没有正在 flush，也没有唤醒定时器在跑')
+    // 「不自旋」的证据是这 200ms 里请求数没有增长（`calls.length === 1`）＋队列没被反复重建（`queued === 1`）。
+    // 原还断言「没有正在 flush、没有唤醒 Timer」，那两项投影已随 ADR-74 从观测面删除（见 DESIGN §4.2）。
     check(blocked.running === 1 && blocked.calls.length === 1 && blocked.queued === 1, 'a full slot must queue without spinning')
     await d.resolve(1, 111)
     await until(async () => (await d.snapshot()).calls.length === 2, 'real empty slot advances queue')
@@ -175,7 +175,8 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await d.resolve(1, 111)
     await until(async () => (await d.snapshot()).running === 0, 'late load settled')
     const now = await d.snapshot()
-    check(!now.timer, '卸载清理之后没有残留的唤醒定时器')
+    // 备注：`timer` 投影已随 ADR-74 从观测面删除，「卸载后没有残留唤醒 Timer」这条观测随之消失
+    // ——它由 `dispose` 自己的清理保证（见 DESIGN §4.2）。
     check(!now.resources && !now.queued && !Object.keys(now.entries).length && now.pages['甲'] === null, 'disposed state must stay empty')
   } },
 

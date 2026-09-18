@@ -4,6 +4,7 @@ import type { Component } from 'vue'
 import type { RefreshHandle } from '../src/public-types'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue'
 import type { RefreshCore, RefreshHttp } from '../src/core'
+import { snapshot } from '../tests/support/observe'
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
 import { demoHttp, log } from './sources'
@@ -37,8 +38,6 @@ export interface HarnessSnapshot {
   running: number
   queued: number
   resources: number
-  timer: boolean
-  pending: boolean
 }
 export interface HarnessBridge {
   snapshot(): HarnessSnapshot
@@ -55,7 +54,7 @@ export interface HarnessBridge {
 export interface ShellBridge {
   inspect(): {
     resources: number; declarers: number; entries: number
-    running: number; queued: number; scheduled: boolean
+    running: number; queued: number
   }
   log(): { calls: CallLog[]; events: string[] }
 }
@@ -210,7 +209,7 @@ function mountHarness(): void {
   const bridge: HarnessBridge = {
     snapshot() {
       // 只读观测面：示例面板与测试用同一个投影，不直接读核心的可变字段。
-      const view = core.snapshot()
+      const view = snapshot(core!)
       return {
         calls: calls.map(c => ({ id: c.id, aborted: c.signal.aborted, finished: c.finished })),
         events: [...events],
@@ -235,7 +234,6 @@ function mountHarness(): void {
           }])),
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,
-        timer: view.scheduled, pending: view.flushing,
       }
     },
     refresh(name: string, symbol: string) {
@@ -308,14 +306,13 @@ function mountShell(): void {
 
   window.pages = {
     inspect() {
-      const view = core!.snapshot()
+      const view = snapshot(core!)
       return {
         resources: view.resources.length,
-        // 声明者数＝各实例声明者之和（`snapshot()` 不再单列一个派生字段）。
+        // 声明者数＝各实例声明者之和（观测面不再单列一个派生字段）。
         declarers: view.resources.flatMap(resource => [...resource.declarers]).length,
         entries: view.results.length,
         running: view.running.length, queued: view.queued.length,
-        scheduled: view.scheduled,
       }
     },
     log: () => ({ calls: log.calls.map(call => ({ ...call })), events: [...log.events] }),

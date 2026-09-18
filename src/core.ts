@@ -53,7 +53,7 @@ export interface ResultSink {
   /** 写失败：**保留这一格已有的数据**，只换掉失败那一对字段。 */
   fail(url: string, key: string, error: unknown, failedAt: number): void
   remove(url: string, key: string): void
-  /** 只读列举：给 `snapshot()` 这个观测面用，不是包契约。 */
+  /** 只读列举：给观测面（测试侧的支撑模块）用，不是包契约。 */
   list(): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[]
 }
 
@@ -179,6 +179,22 @@ export function identityOf(url: string, key: string): string {
   return `${url}\u0000${key}`
 }
 
+/**
+ * 身份键拆回两级（`store.list()` 用）：与 `identityOf` 紧挨着放，改分隔符不会只改到拼的那一半。
+ *
+ * 分隔符只在这一对函数里出现。`identityOf` 的注释点过「两处各写一遍拼接就是一处会悄悄走样的重复」，
+ * 拆的那一半原先留在 `store.ts` 里（`indexOf('\0')` ＋ 两次 `slice`），正是同一类重复——而且走样时
+ * 没有断言拦得住：整条键会被当成 `key` 返回，观测面的 `results[].key` 悄悄变形。
+ *
+ * **前提**：入参一定是 `identityOf` 的产物（结果表的键只有那一个写入点），所以第一个 NUL 必然存在、
+ * 也必然是分界。不为不存在的输入补分支——真拿到不含分隔符的字符串时 `key` 会是空串、`url` 是整条，
+ * 比悄悄截掉一个字符更容易看出不对。
+ */
+export function splitIdentity(identity: string): { readonly url: string; readonly key: string } {
+  const sep = identity.indexOf('\u0000')
+  return { url: identity.slice(0, sep), key: identity.slice(sep + 1) }
+}
+
 /** 结果边界：拒绝 `undefined`，其余原生复制；业务合法性由请求适配器负责。 */
 function copyResult(input: unknown): unknown {
   if (input === undefined) throw new TypeError('取数结果不能是 undefined')
@@ -251,6 +267,21 @@ export class RefreshCore {
     this.flushSoon()
   }
 
+  /** 销毁：幂等、不可复用。未结束的执行仍会真实结束，并在自己的 `finally` 里释放槽位。 */
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.clearWakeup()
+    this.queue.clear()
+    // 逐个实例撤销声明并回收：abort 在途、删结果表条目。
+    // 不撤声明就回收不了，迟到的结果还会写进表（A17 把这条钉住了）。
+    for (const resource of this.all()) {
+      resource.declarers.clear()
+      this.releaseIfUnused(resource)
+    }
+    this.identities.clear()
+  }
+
   // ══════════════════════════ 页面操作 ══════════════════════════
 
   /**
@@ -310,44 +341,6 @@ export class RefreshCore {
     resource.declarers.delete(config)
     this.releaseIfUnused(resource)
     this.flushSoon()
-  }
-
-  // ══════════════════════════ 观测面 ══════════════════════════
-
-  /** 只读计数投影：给演示面板、基准脚本与集成测试看状态。**不属于包契约**，也不提供改状态的入口。 */
-  snapshot(): {
-    resources: readonly Resource[]
-    results: readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[]
-    queued: readonly Resource[]
-    running: readonly Resource[]
-    scheduled: boolean
-    flushing: boolean
-  } {
-    // `declarers` 不再单列：它是 `resources[].declarers` 的派生物（ADR-74）。`scheduled`／`flushing`
-    // 留着——它们各自观测一个推不出来的内部事实（队列已空但唤醒 Timer 已排、正在一轮 flush 中）。
-    return {
-      resources: [...this.identities.values()],
-      results: this.sink.list(),
-      queued: [...this.queue],
-      running: [...this.running],
-      scheduled: this.wakeup !== null,
-      flushing: this.flushing,
-    }
-  }
-
-  /** 销毁：幂等、不可复用。未结束的执行仍会真实结束，并在自己的 `finally` 里释放槽位。 */
-  dispose(): void {
-    if (this.disposed) return
-    this.disposed = true
-    this.clearWakeup()
-    this.queue.clear()
-    // 逐个实例撤销声明并回收：abort 在途、删结果表条目。
-    // 不撤声明就回收不了，迟到的结果还会写进表（A17 把这条钉住了）。
-    for (const resource of this.all()) {
-      resource.declarers.clear()
-      this.releaseIfUnused(resource)
-    }
-    this.identities.clear()
   }
 
   // ══════════════════════════ 身份注册表 ══════════════════════════

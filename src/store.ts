@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { shallowRef } from 'vue'
 import type { ShallowRef } from 'vue'
-import { identityOf } from './core.ts'
+import { identityOf, splitIdentity } from './core.ts'
 import type { ResultCell } from './core.ts'
 
 /**
@@ -9,7 +9,7 @@ import type { ResultCell } from './core.ts'
  *
  * **粒度对齐数据**：写一格只唤醒订阅这一格的 `watcher`（vue.ts 的读取副作用依赖的就是
  * 那一个 ref），其余 watcher 不会被多余唤醒。代价是失去 `results` 单一对象可观测——调试期
- * 用 `list()` 列举，或读 `cells.get(...)`。
+ * 用 `list()` 列举。
  *
  * **整 cell 不删**：实例释放时只把 ref 的值置为 `undefined`，不 `Map.delete`。这是因为
  * `watcher` 的依赖是那个具体的 ref 对象——若 `Map.delete` 后再有同一身份的写入，会建一个新
@@ -62,17 +62,18 @@ export const useRefreshStore = defineStore('vue-refresh', () => {
 
   const read = (url: string, key: string): ResultCell | undefined => refOf(url, key).value
 
-  /** 只读列举：给 `snapshot()` 这类观测面用，不是包契约；从未写过的格子不列。 */
+  /** 只读列举：给观测面（测试侧的支撑模块）用，不是包契约；从未写过的格子不列。 */
   const list = (): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[] => {
     const rows: { url: string; key: string; cell: ResultCell }[] = []
     for (const [k, ref] of cells) {
       const cell = ref.value
       if (cell === undefined) continue
-      const sep = k.indexOf('\0')
-      rows.push({ url: k.slice(0, sep), key: k.slice(sep + 1), cell })
+      // 拆键与 `core.ts` 的 `identityOf` 成对（唯一分隔符事实）：这里不再自己认 NUL。
+      const { url, key } = splitIdentity(k)
+      rows.push({ url, key, cell })
     }
     return rows
   }
 
-  return { cells, write, fail, remove, read, list }
+  return { write, fail, remove, read, list }
 })

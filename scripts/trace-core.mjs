@@ -9,6 +9,7 @@
 // 运行：node scripts/trace-core.mjs [> 轨迹文件]
 import { RefreshCore } from '../src/core.ts'
 import { prepareParameters } from '../src/source.ts'
+import { snapshot } from '../tests/support/observe.ts'
 
 /** 结果表替身：记录写入顺序，只暴露「结构」。 */
 function newTable() {
@@ -65,7 +66,7 @@ const params = args => prepareParameters(args)
 
 /** 一步一行：先打印这一步做了什么，再打印核心此刻的结构。 */
 function step(trace, label, core) {
-  const view = core.snapshot()
+  const view = snapshot(core)
   const running = view.running.length
   const queued = view.queued.length
   // 注意用**替身自己**的格子形状（`{data, failed}`），不要去读核心那套字段名。
@@ -74,7 +75,7 @@ function step(trace, label, core) {
     .sort()
   const order = view.queued.map(resource => resource.parameters.key).join(',')
   const declarers = view.resources.reduce((total, resource) => total + resource.declarers.size, 0)
-  trace.push(`${label} | resources=${view.resources.length} declarers=${declarers} queued=${queued}[${order}] running=${running} timer=${view.scheduled} cells=[${cells.join(',')}]`)
+  trace.push(`${label} | resources=${view.resources.length} declarers=${declarers} queued=${queued}[${order}] running=${running} cells=[${cells.join(',')}]`)
 }
 
 const trace = []

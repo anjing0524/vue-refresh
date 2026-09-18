@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { RefreshCore } from '../src/core.ts'
+import { identityOf, RefreshCore, splitIdentity } from '../src/core.ts'
 import type { Config, Resource, ResultCell, ResultSink } from '../src/core.ts'
 import { prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
 import type { RefreshDisplay, SubmitResult } from '../src/public-types.ts'
+import { snapshot } from './support/observe.ts'
 
 /** 每个用例结束时销毁核心：周期调度会留下唯一的唤醒 Timer，不销毁的话进程不会退出。 */
 const cores: RefreshCore[] = []
@@ -195,7 +196,7 @@ function page(
  *   它只决定画面跟不跟随新结果（冻结见 ADR-60），不决定实例在不在。
  */
 function declared(core: RefreshCore, view: Page): Resource | undefined {
-  return core.snapshot().resources.find(resource => resource.declarers.has(view.config))
+  return snapshot(core).resources.find(resource => resource.declarers.has(view.config))
 }
 
 /**
@@ -217,7 +218,7 @@ function eligible(core: RefreshCore, view: Page): boolean {
  * 第二个入队路径，它会红。
  */
 function assertQueueConsistent(core: RefreshCore): void {
-  const view = core.snapshot()
+  const view = snapshot(core)
   for (const resource of view.queued) {
     assert.notEqual(resource.controller, null, '在队的实例必须带着这次执行的 controller')
     assert.equal(view.running.includes(resource), false, '在队的实例不可能同时在跑')
@@ -308,7 +309,7 @@ test('A20 同一个 URL 就是同一个身份：两处各声明一份定义仍�
   assert.equal(calls, 1, 'URL 与参数值相同就是同一个共享实例')
   assert.equal(first.writes(), 1)
   assert.equal(second.writes(), 1)
-  assert.equal(core.snapshot().resources.length, 1)
+  assert.equal(snapshot(core).resources.length, 1)
 
   // 反向：URL 不同就是不同身份，即便参数值一模一样。
   const otherSource = '/api/core/identity-2'
@@ -316,7 +317,18 @@ test('A20 同一个 URL 就是同一个身份：两处各声明一份定义仍�
   third.submit({ id: 1 })
   await settle()
   assert.equal(calls, 2, 'URL 不同则各有一次取数')
-  assert.equal(core.snapshot().resources.length, 2)
+  assert.equal(snapshot(core).resources.length, 2)
+})
+
+test('A20 身份键的拼与拆是同一处规则：往返还原两级，内层键里出现分隔符也不会串级', () => {
+  const key = '{"symbol":"BTC","note":"a=b&c"}'
+  const identity = identityOf('https://api.test/quote?x=1', key)
+  assert.deepEqual(splitIdentity(identity), { url: 'https://api.test/quote?x=1', key }, '往返还原两级')
+
+  // 分隔符是 NUL：第一个 NUL 就是分界，因此 key 里再出现 NUL 也只是 key 的一部分，
+  // 不会被拆到 url 那一侧（拼接端只写一个 NUL，拆分端只认第一个）。
+  const tricky = identityOf('https://api.test/x', 'a\u0000b')
+  assert.deepEqual(splitIdentity(tricky), { url: 'https://api.test/x', key: 'a\u0000b' })
 })
 
 test('A04/A05 配置原地改写不改变声明：改 every／暂停／配置非法，声明者都还在（ADR-66 的可变配置槽）', async () => {
@@ -345,7 +357,7 @@ test('A04/A05 配置原地改写不改变声明：改 every／暂停／配置非
   view.set(null) // 配置非法：声明仍然留着（A04），修正后按到期恢复
   await settle()
   assert.equal(declared(core, view), resource, '配置非法不撤销声明')
-  assert.equal(core.snapshot().resources.length, 1, '声明还在：实例不回收')
+  assert.equal(snapshot(core).resources.length, 1, '声明还在：实例不回收')
 })
 
 test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', async () => {
@@ -526,17 +538,17 @@ test('A04/A06 浏览器隐藏与组件失活只失去资格：要求被撤销、
   await settle()
   view.refresh()
   await settle()
-  assert.equal(core.snapshot().resources.length, 1, '声明让实例留在册')
+  assert.equal(snapshot(core).resources.length, 1, '声明让实例留在册')
 
   core.setVisible(false)
   await settle()
   assert.equal(eligible(core, view), false, '隐藏即失去读者身份')
   assert.notEqual(declared(core, view), undefined, '声明还在')
-  assert.equal(core.snapshot().resources.length, 1, '隐藏只失去资格：实例与在途都留着（ADR-61）')
+  assert.equal(snapshot(core).resources.length, 1, '隐藏只失去资格：实例与在途都留着（ADR-61）')
 
   view.refresh()
   await settle()
-  assert.equal(core.snapshot().resources.length, 1, '隐藏期间刷新不新建实例')
+  assert.equal(snapshot(core).resources.length, 1, '隐藏期间刷新不新建实例')
   assert.equal(calls, 1, '隐藏期间刷新不发请求（入口闸：激活且浏览器可见）')
 })
 
@@ -554,7 +566,7 @@ test('A06 组件失活只失去资格：点过的那次刷新继续等当前请�
   await settle()
   assert.equal(eligible(core, view), false, '失活即失去读者身份')
   assert.notEqual(declared(core, view), undefined, '声明还在')
-  assert.equal(core.snapshot().resources.length, 1, '失活只失去资格：当前请求仍在跑，实例不释放')
+  assert.equal(snapshot(core).resources.length, 1, '失活只失去资格：当前请求仍在跑，实例不释放')
 })
 
 test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实例与结果一并消失', async () => {
@@ -574,14 +586,14 @@ test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实�
 
   core.undeclare(view.config)
   assert.equal(signal?.aborted, true)
-  assert.equal(core.snapshot().resources.length, 0)
+  assert.equal(snapshot(core).resources.length, 0)
   // 实例没了，但那次请求还在跑：它仍占着并发账本（`abandoned`），直到真实结束自己交还（ADR-65）。
-  assert.equal(core.snapshot().running.length, 1, '被弃的在途请求继续占着槽位')
-  assert.equal(core.snapshot().queued.length, 0)
+  assert.equal(snapshot(core).running.length, 1, '被弃的在途请求继续占着槽位')
+  assert.equal(snapshot(core).queued.length, 0)
 
   finish?.(9)
   await settle()
-  assert.equal(core.snapshot().running.length, 0, '真实结束后交还槽位')
+  assert.equal(snapshot(core).running.length, 0, '真实结束后交还槽位')
 })
 
 test('A06 刷新不留账：刷新之后立刻卸载，实例当场回收，不等这一轮的结果', async () => {
@@ -596,15 +608,15 @@ test('A06 刷新不留账：刷新之后立刻卸载，实例当场回收，不�
   await settle()
   view.refresh() // 刷新发起第二轮：旧口径里它是一张欠条，会让实例活到结算为止
   await settle()
-  assert.equal(core.snapshot().running.length, 1, '刷新已经发起第二轮取数')
+  assert.equal(snapshot(core).running.length, 1, '刷新已经发起第二轮取数')
 
   core.undeclare(view.config)
-  assert.equal(core.snapshot().resources.length, 0, '刷新不留账：卸载当场回收实例')
-  assert.equal(core.snapshot().running.length, 1, '在途请求仍占着槽位，直到真实结束')
+  assert.equal(snapshot(core).resources.length, 0, '刷新不留账：卸载当场回收实例')
+  assert.equal(snapshot(core).running.length, 1, '在途请求仍占着槽位，直到真实结束')
   resolvers[1]?.(2)
   await settle()
-  assert.equal(core.snapshot().running.length, 0, '真实结束后交还槽位')
-  assert.equal(core.snapshot().results.length, 0, '实例已经回收：迟到的结果写不进表')
+  assert.equal(snapshot(core).running.length, 0, '真实结束后交还槽位')
+  assert.equal(snapshot(core).results.length, 0, '实例已经回收：迟到的结果写不进表')
 })
 
 test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数；最后一个声明者退出则连实例一起销毁', async () => {
@@ -631,7 +643,7 @@ test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数
 
   core.undeclare(view.config)
   core.undeclare(other.config)
-  assert.equal(core.snapshot().resources.length, 0, '最后一个需求退出后实例与结果一起消失')
+  assert.equal(snapshot(core).resources.length, 0, '最后一个需求退出后实例与结果一起消失')
 })
 
 test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', async () => {
@@ -670,7 +682,7 @@ test('A05 暂停只失去资格：已点过的那次刷新继续等当前请求�
   // ADR-66 之后核心不再记「谁在等」，要求是身份级的一个位）。
   assert.equal(eligible(core, view), false, '暂停即失去取数资格')
   assert.notEqual(declared(core, view), undefined, '声明还在')
-  assert.equal(core.snapshot().resources.length, 1, '实例不释放、在途不取消')
+  assert.equal(snapshot(core).resources.length, 1, '实例不释放、在途不取消')
 
   // 暂停不撤销已点过的那次刷新：它由当前这个请求的结果满足，既不另发一次也不必等下个周期。
   resolvers[0]?.(7)
@@ -678,9 +690,9 @@ test('A05 暂停只失去资格：已点过的那次刷新继续等当前请求�
   assert.equal(resolvers.length, 1, '暂停期间不追发请求，本次刷新用现有这一次')
   // 要求被这一次结果满足；但**声明还在**，所以实例与结果都不回收（ADR-61）：暂停/失活不再删结果。
   // 「画面冻结」与「恢复后读回」是适配层的事，由 tests/vue.test.ts 验证；核心这一层断言的是声明与结果表的事实。
-  assert.equal(core.snapshot().results.length, 1, '声明还在：结果表条目保留（ADR-61）')
+  assert.equal(snapshot(core).results.length, 1, '声明还在：结果表条目保留（ADR-61）')
   assert.equal(view.last?.data, 7, '核心这一层：按身份仍能读到那一份结果')
-  assert.equal(core.snapshot().resources.length, 1, '暂停不释放实例：声明还在')
+  assert.equal(snapshot(core).resources.length, 1, '暂停不释放实例：声明还在')
 })
 
 test('A13 共享请求失败：保留旧址、把失败写进该身份那一格、下个周期继续', async () => {
@@ -731,7 +743,7 @@ test('A13/A14 暂停页显式刷新失败：没有回执，失败写进该身份
 
   assert.ok(paused.failedAt(), '未订阅页面按身份从结果表读到失败')
   assert.equal(paused.writes(), 0, '失败不写结果')
-  assert.equal(core.snapshot().resources.length, 1, '失败不留账：声明还在，实例不释放')
+  assert.equal(snapshot(core).resources.length, 1, '失败不留账：声明还在，实例不释放')
 })
 
 test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结果', async () => {
@@ -779,7 +791,7 @@ test('A09 并发上限约束真实在途请求：满槽排队，不自旋', asyn
   two.submit({ id: 2 })
   await settle()
   assert.equal(resolvers.length, 1)
-  assert.equal(core.snapshot().queued.length, 1)
+  assert.equal(snapshot(core).queued.length, 1)
   assertQueueConsistent(core)
 
   resolvers[0]?.(1)
@@ -864,7 +876,7 @@ test('A16 零回调：传输失败只写结果表，核心不认识页面也不�
 
   assert.equal(normal.last?.data, 3, '一个读者拿到的结果不受另一个影响')
   assert.equal(hostile.last?.data, 3, '两个读者读的是结果表里同一份结果')
-  assert.equal(core.snapshot().resources.length, 1, '页面回调失败不影响实例与结果')
+  assert.equal(snapshot(core).resources.length, 1, '页面回调失败不影响实例与结果')
 
   // 传输失败只是这个身份那一格的事实：两个声明者都能读到它，框架状态照旧。
   const failing = '/api/core/643'
@@ -880,7 +892,7 @@ test('A16 零回调：传输失败只写结果表，核心不认识页面也不�
 
   // 零回调（ADR-64）：配置槽只有数据，释放与销毁都不需要页面配合——下面这条在类型层面就钉住它。
   core.undeclare(victim.config)
-  assert.equal(core.snapshot().resources.flatMap(resource => [...resource.declarers]).includes(victim.config), false,
+  assert.equal(snapshot(core).resources.flatMap(resource => [...resource.declarers]).includes(victim.config), false,
     '释放只动声明，不调用任何页面代码')
   assert.equal(declared(core, witness)?.declarers.size, 1, '另一个需求的声明不受影响')
   const pure: Config = { enabled: true, every: 1000, active: true }
@@ -902,14 +914,13 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
 
   core.dispose()
   assert.equal(core.isDisposed(), true)
-  assert.equal(core.snapshot().resources.flatMap(resource => [...resource.declarers]).length, 0,
+  assert.equal(snapshot(core).resources.flatMap(resource => [...resource.declarers]).length, 0,
     '销毁只动自己的名册：没有任何页面回调参与')
   assert.deepEqual(view.submit({ id: 2 }), { status: 'cancelled' })
   view.refresh()
-  const empty = core.snapshot()
-  assert.equal(empty.scheduled, false, '销毁后没有残留的唤醒定时器')
-  // 备注：`declarers` 是 `resources[].declarers` 的派生物，已从 `snapshot()` 删除（ADR-74），
-  // 这条观测随之消失（销毁清 Timer 由 `dispose` 自己保证，见 DESIGN）。
+  const empty = snapshot(core)
+  // 备注：`declarers`／`scheduled`／`flushing` 三个投影已随 ADR-74 从观测面删除（`snapshot()` 只剩四个
+  // 字段）。「销毁后没有残留唤醒 Timer」这条观测随之消失——它由 `dispose` 自己的清理保证（见 DESIGN §4.2）。
   assert.deepEqual([
     empty.resources.flatMap(resource => [...resource.declarers]).length,
     empty.resources.length,
@@ -920,7 +931,7 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
   resolvers[0]?.(9)
   await settle()
   assert.equal(view.writes(), delivered, '迟到的结束不再写任何事实')
-  assert.equal(core.snapshot().running.length, 0, '未结束的执行到真实结束才释放槽位')
+  assert.equal(snapshot(core).running.length, 0, '未结束的执行到真实结束才释放槽位')
   core.dispose()
 })
 
@@ -932,7 +943,7 @@ test('A04/A05 配置非法时不取数、不刷新、不通知；声明仍在，
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
   await settle()
   assert.equal(eligible(core, view), false, '配置非法：没有资格，不算读者')
-  assert.equal(core.snapshot().resources.length, 1, '身份已声明（实例在册），但不取数')
+  assert.equal(snapshot(core).resources.length, 1, '身份已声明（实例在册），但不取数')
   assert.equal(view.writes(), 0)
 
   view.refresh()
@@ -1037,7 +1048,7 @@ test('边界总账：运行期失败只走返回值或结果表这一格，公�
     assert.doesNotThrow(() => { view.submit({ id: 1 }) })
     await settle()
     assert.ok(view.failedAt(), '运行期失败写进该格，入口不抛错')
-    assert.equal(core.snapshot().running.length, 0)
+    assert.equal(snapshot(core).running.length, 0)
   }
 
   // 参数侧：复制失败、编码不出，一律只给同步 `rejected`（不通知），也不产生实例。
@@ -1052,9 +1063,9 @@ test('边界总账：运行期失败只走返回值或结果表这一格，公�
     assert.equal(status, 'rejected')
   }
   assert.equal(view.failedAt(), null, '输入非法一律不进结果表')
-  assert.equal(core.snapshot().resources.length, 0)
+  assert.equal(snapshot(core).resources.length, 0)
 
   // 刷新侧：入口状态不成立（这里是没有身份）时直接返回，不抛错、不需要 try/catch。
   assert.doesNotThrow(() => { view.refresh() })
-  assert.equal(core.snapshot().resources.length, 0, '未声明身份的刷新不产生实例或请求')
+  assert.equal(snapshot(core).resources.length, 0, '未声明身份的刷新不产生实例或请求')
 })
