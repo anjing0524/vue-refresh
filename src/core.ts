@@ -103,6 +103,26 @@ export class Resource {
     return visible && config.every !== null && config.active
   }
 
+  /** 这个身份此刻**有没有执行**（在队或在跑）。 */
+  hasExecution(): boolean {
+    return this.controller !== null
+  }
+
+  /**
+   * 这次执行**还是不是当前执行**？
+   *
+   * 不是就整段丢掉：实例被释放、页面换了身份、协调者销毁，都会把把手清空（`place` 是唯一写入点）。
+   * 迟到的结果与迟到的异常都靠它判「还算不算数」。
+   */
+  isCurrent(controller: AbortController): boolean {
+    return this.controller === controller
+  }
+
+  /** 还有人要它吗：有声明者，或有没结算的刷新要求。没有就该回收（G4）。 */
+  isWanted(): boolean {
+    return this.declarers.size > 0 || this.waiters.size > 0
+  }
+
   /** 一个声明者此刻是否有资格取数：环境允许 ＋ 开启意愿为真。 */
   isEligible(config: Config, visible: boolean): boolean {
     return this.isPresent(config, visible) && config.enabled
@@ -266,19 +286,19 @@ export class RefreshCore {
   refresh(config: Config, url: string, key: string): boolean {
     if (this.disposed) return false
     if (!config.active || config.every === null || !this.visible) return false
-    const resource = this.identities.get(identityOf(url, key))
+    const resource = this.find(url, key)
     if (resource === undefined) return false
 
     // 有执行就直接用它的结果；没有就当场登记一次。同一个页面重复刷新只留一份要求（标志不是队列）。
     resource.waiters.add(config)
-    if (resource.controller === null) this.enqueue(resource)
+    if (!resource.hasExecution()) this.enqueue(resource)
     this.flushSoon()
     return true
   }
 
   /** 这一份配置此刻有没有取数资格：有资格 ＝ 环境允许 ＋ 开启意愿（G3/G4 的判定）。 */
   isEligible(config: Config, url: string, key: string): boolean {
-    return this.identities.get(identityOf(url, key))?.isEligible(config, this.visible) ?? false
+    return this.find(url, key)?.isEligible(config, this.visible) ?? false
   }
 
   /** 释放一页：撤销它未完成的要求与声明（组件卸载、销毁都由它收尾）。撤销后若实例没人要了就地回收。 */
@@ -354,6 +374,11 @@ export class RefreshCore {
     return resource
   }
 
+  /** 按身份键找实例；只查不建。找不到＝这个身份不成立（没声明过，或已经被回收）。 */
+  private find(url: string, key: string): Resource | undefined {
+    return this.identities.get(identityOf(url, key))
+  }
+
   /**
    * 这份配置登记在哪个实例上；只查不建。
    *
@@ -371,7 +396,7 @@ export class RefreshCore {
    * 没有声明者也没有未完成的要求：删实例、abort 在途、删结果表条目。迟到的结束在身份复核处失效。**核心私有**。
    */
   private releaseIfUnused(resource: Resource): void {
-    if (resource.declarers.size > 0 || resource.waiters.size > 0) return
+    if (resource.isWanted()) return
     this.identities.delete(identityOf(resource.url, resource.parameters.key))
 
     // 结果随实例释放即删：结果表里没有「没人要的」条目，读的人也就不会读到过期数据。
@@ -412,7 +437,7 @@ export class RefreshCore {
 
   /** 本轮结束后还有未满足的要求时补一次；唯一来源是写表触发的同步重入（DESIGN §3.9）。 */
   private refill(resource: Resource): void {
-    if (resource.waiters.size === 0 || resource.controller !== null) return
+    if (resource.waiters.size === 0 || resource.hasExecution()) return
     this.enqueue(resource)
   }
 
@@ -443,15 +468,15 @@ export class RefreshCore {
         { signal: controller.signal },
       )
       // 复制结果前后各复核一次「这次还是不是当前执行」：释放实例、换身份、销毁都会把它置空。
-      if (resource.controller !== controller) return
+      if (!resource.isCurrent(controller)) return
       const data = copyResult(response.data)
-      if (resource.controller !== controller) return
+      if (!resource.isCurrent(controller)) return
       const at = Date.now()
       const satisfied = resource.settle(at)
       this.writeResult(resource, data, at)
       for (const config of satisfied) this.settleRequest(resource, config)
     } catch (error) {
-      if (resource.controller !== controller) return
+      if (!resource.isCurrent(controller)) return
       const at = Date.now()
       const satisfied = resource.fail(at)
       this.writeFailure(resource, error, at)
@@ -497,7 +522,7 @@ export class RefreshCore {
     let next = Infinity
     for (const resource of this.all()) {
       // 有当前执行的实例不重复入队（A08）。
-      if (resource.controller !== null) continue
+      if (resource.hasExecution()) continue
       const due = resource.dueAt(now, this.visible)
       // `Infinity` ＝ 这个身份没有有资格的声明者：不取数，也不参与唤醒时刻。
       if (due <= now) this.enqueue(resource)

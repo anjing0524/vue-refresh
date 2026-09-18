@@ -121,7 +121,7 @@ flowchart LR
 | Source | `name`（取数 URL，身份的一半）、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立（URL 必须非空）；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给消费者（`validate`／每轮请求体）时各复制一份；`display.args` 每次抄写再复制一份（它是身份键那份值）；配置槽与实例释放后回收 |
 | Config | `{ enabled, every, active }`；**每页一个对象**，适配层在 `useRefresh` 里建立（初值 `enabled=false`、`every=null`、`active=false`） | 适配层**唯一写**：`vue.ts` 的 `applyConfig` 在一个同步块里原地改写三格（单一写入口）；核心只读，不重新调用业务 getter。**它同时就是这一页在核心里的登记**——这个对象挂在哪个实例的 `declarers` 里，就等于这一页声明了哪个身份，因此没有第二份名册（ADR-66）。`every === null` ＝ 这一拍配置非法（不取数、不刷新、不算有资格），它与「暂停」（`config.enabled=false` 而 `every` 仍有效）是两件事（A04、A05）。随本页作用域释放（`onScopeDispose` → `released` ＋ `undeclare`）；核心不 import 定义对象，也没有任何回调字段（ADR-64） |
-| Resource | 类：`url`、`parameters`（一个身份只保留一份参数对象）、`declarers` 空集合、`waiters` 空集合（两者都是 `Set<Config>`）、`settledAt=null`、`controller=null` | 首次声明创建；**一个身份只保留一份参数对象**：首次声明采用那份已准备参数，后续同键加入者复用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`declarers` 与 `waiters` 都空时由 `releaseIfUnused` 删除注册、结果表条目、排队执行并 abort 在途。**一个身份内的状态与判定都是它自己的方法**：`dueAt` / `eligibleEvery` / `isPresent` / `isEligible` / `settle(at)` / `fail(at)`——后两个只记结算时刻并**交出这一批未完成的要求**（`readonly Config[]`），写表与回收由核心做；实例不持有核心（ADR-65），核心越出实例边界只碰 `controller`（只经 `place`，§3.5 第 4 条）与 `declarers` / `waiters` 的增删（`submit` / `refresh` / `undeclare` / `settleRequest`）。**`waiters` 必须按页记**：它提供的是「哪个页面已经有未满足的要求」这一事实，一个身份级布尔不够（§3.6 的注） |
+| Resource | 类：`url`、`parameters`（一个身份只保留一份参数对象）、`declarers` 空集合、`waiters` 空集合（两者都是 `Set<Config>`）、`settledAt=null`、`controller=null` | 首次声明创建；**一个身份只保留一份参数对象**：首次声明采用那份已准备参数，后续同键加入者复用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`declarers` 与 `waiters` 都空时由 `releaseIfUnused` 删除注册、结果表条目、排队执行并 abort 在途。**一个身份内的状态与判定都是它自己的方法**：`dueAt` / `eligibleEvery` / `isPresent` / `isCurrent` / `hasExecution` / `isWanted` / `isEligible` / `settle(at)` / `fail(at)`——后两个只记结算时刻并**交出这一批未完成的要求**（`readonly Config[]`），写表与回收由核心做；实例不持有核心（ADR-65），核心越出实例边界只碰 `controller`（只经 `place`，§3.5 第 4 条）与 `declarers` / `waiters` 的增删（`submit` / `refresh` / `undeclare` / `settleRequest`）。**`waiters` 必须按页记**：它提供的是「哪个页面已经有未满足的要求」这一事实，一个身份级布尔不够（§3.6 的注） |
 | 结果表（`store.ts`） | `cells`：`URL → 参数键 → ShallowRef<ResultCell \| undefined>`，`ResultCell = { data, updatedAt, error, failedAt }` 四字段全平（`updatedAt === null` ⟺ 从未成功过，`failedAt === null` ⟺ 自最后一次成功以来没失败过）；初值 `undefined` | 模块级 `defineStore`，一个 Pinia 实例一张表；写入端只由内核用（`write(url, key, data, updatedAt)` 写成功、`fail(url, key, error, failedAt)` 写失败、`releaseIfUnused` 删、`snapshot` 列举），读出口是 `read`；**整格换新对象**（`shallowRef`，格与 `ResultCell` 都当不可变用）——读取面比较引用就知道变没变，因此不引版本号（ADR-63）；失败**保留**已有的 `data` 与 `updatedAt`；实例释放时只把格置 `undefined`（cell ref 不删，依赖关系才稳定），条目随之消失（A06） |
 | RefreshCore | `identities`（身份键 → 实例，一层）/ `queue` / `running` 空集合（后两者直接装 `Resource`，没有独立的执行对象）；`wakeup=null`；`flushing=false`；`visible=true`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`isDisposed` / `isVisible` / `setVisible` / `reconcile` / `submit` / `refresh` / `isEligible` / `undeclare` / `snapshot` / `dispose`）；这 10 个是全部公开面，其余内部转换全部 `private`；核心私有的动作是 `resourceOf`（**扫描**注册表找出这份配置登记在哪个实例上，不存反向字段，ADR-57）、`resourceFor`（查／建实例）、`releaseIfUnused`（回收：`declarers` 与 `waiters` 都空才注销）、`place`（执行位置的唯一迁移点，四态：在队 `queued` ／ 在跑 `running` ／ 被弃 `abandoned` ／ 都不在 `idle`）、`settleRequest`（结算一条要求并判断回收）、`writeResult` / `writeFailure`（写表）、`refill`（补后继请求）、`enqueue`（登记一次执行）、`run`（收尾顺序的唯一处）；`dispose` 先失效再清理：逐个实例清空 `declarers` 与 `waiters` 后再 `releaseIfUnused`，最后 `identities.clear`。**核心不持有任何回调**（`setCleanup` 随 ADR-64 删除）：可见性监听的拆卸由适配层自己做（§6.3） |
 
@@ -477,13 +477,14 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 `core.ts` 里的守卫不是重复代码。它们只防三件事，读之前先认出是哪一件：
 
-| 防什么 | 长相 | 作用 |
+| 防什么 | 长相（具名判定，ADR-69） | 作用 |
 |---|---|---|
-| 已销毁 / 已释放 | 入口第一行的 `this.disposed` 检查；适配层自己的 `released`（`onScopeDispose` 置位：`submit` 返回 `cancelled`、`refresh` 无副作用） | 销毁或释放之后任何入口都不再产生事实（§2.4「取消只有一个来源」） |
-| 当前执行已被替换 | `resource.controller !== controller`（也有 `=== controller` 的反面） | 每个 `await` 与每次外部效果之后：丢弃迟到结束，不写结果、不动结果表；`place` 撤销当前执行时同样认人 |
-| 身份不成立 / 此拍不可取 | `resourceOf(config)` 返回 `undefined`；`identities` 里查不到身份键；`refresh` 入口的 `!config.active \|\| config.every === null \|\| !this.visible` | 没有身份、配置非法或隐藏时不登记要求、不发请求 |
+| 已销毁 / 已释放 | 入口第一行的 `this.disposed`；适配层自己的 `released`（`onScopeDispose` 置位：`submit` 返回 `cancelled`、`refresh` 无副作用） | 销毁或释放之后任何入口都不再产生事实（§2.4「取消只有一个来源」） |
+| 身份不成立 | `find(url, key)` 返回 `undefined`（＝这个身份没声明过，或已经回收）；`resourceOf(config)` 返回 `undefined` | 没有身份时不登记要求、不发请求、不判资格 |
+| 这次执行已不是当前执行 | `!resource.isCurrent(controller)` | 每个 `await` 与每次外部效果之后：丢弃迟到的结束与迟到的异常，不写结果、不动结果表 |
+| 这个身份还有没有执行 / 还有没有人要 | `resource.hasExecution()`、`resource.isWanted()` | 有执行就不重复入队（A08）、不补发；没人要（`declarers` 与 `waiters` 都空）才回收（G4） |
+| 写表那一刻的同步重入 | **不是 `if` 而是顺序**：`settle` / `fail` 先交出这一批要求 → 核心写表 → 再逐条 `settleRequest`；写表期间新登记的要求由 `refill` 补一次（`hasExecution()` 判要不要补） | 页面在 watcher 里当场 `refresh()` 时，那条要求不属于这一批，也不会被这一批清掉（§3.9 第一条） |
 
-**这三组守卫是承重的，不是冗余。** 核心**不再有名册**（ADR-66）：一页是否已释放是适配层 `released` 的事实，
-`isDisposed` 才是核心自己的事实；`submit` / `refresh` / `isEligible` 都按 URL ＋ key 现查注册表，
-因此不存在「名册与实例两侧一致」这类需要复核的状态。
-把剩下的守卫收成具名判定（让每个 `if` 读起来是一句话）是**尚未裁决**的下一步。
+**这些守卫是承重的，不是冗余**；能叫出名字的都叫了名字，读的时候不必自己反推「这个 `if` 防的是哪一件」。
+核心**不再有名册**（ADR-66）：一页是否已释放是适配层 `released` 的事实，`isDisposed` 才是核心自己的事实；
+`submit` / `refresh` / `isEligible` 都按 URL ＋ key 现查注册表，因此不存在「名册与实例两侧一致」这类需要复核的状态。
