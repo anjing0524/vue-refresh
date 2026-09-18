@@ -137,8 +137,9 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(shown(now.pages['甲']) === 222 && stored(now.entries[id]) === 222, '旧身份的结果不会覆盖新身份那一份')
     check(now.resources === 2, '两个身份各一个实例（旧身份由仍暂停的乙声明着）')
     check(!now.events.some(e => e.includes('失败')), '两个身份都不产生失败通知')
-    // 乙仍在暂停：不是读者，画面冻结；重新激活后直接读回自己身份当前那一份（不重复取数）。
-    check(shown(now.pages['乙']) === null, 'paused page stays frozen')
+    // 乙仍在暂停，而且它还没读到过任何一版：没有读取时间就直接读——那一份结果照常上屏；此后它有了
+    // 上次读取时间，就冻在那儿不再跟随（ADR-72）。重新激活后直接读回自己身份当前那一份（不重查）。
+    check(shown(now.pages['乙']) === 111, 'paused page without a last-read time reads the first version, then freezes')
     await d.enable('乙', true)
     await until(async () => await d.price('乙') === '111', 'restored page reads the current value of its own identity')
     check((await d.snapshot()).calls.length === 2, 'restoring reads the existing entry without a new request')

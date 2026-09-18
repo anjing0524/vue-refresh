@@ -268,7 +268,8 @@ test('A04/A06 点过刷新之后失活：缓存里那一帧仍会更新；失活
   assert.equal(loads, 2, '失活期间点刷新不发请求、也不进入欠一份')
   shown.value = true
   await tick()
-  assert.equal(loads, 2, '重新激活只读回已有结果')
+  await tick()
+  assert.equal(loads, 2, '重新激活只读回已有结果，不重查')
   assert.equal(cached.display.value?.data, 2)
   app.unmount()
 })
@@ -497,7 +498,7 @@ test('A17 未安装协调者时 useRefresh 直接抛错', () => {
   app.unmount()
 })
 
-test('A05/A11 暂停页不点刷新就不上屏；自己点一次才上屏，之后重新冻结', async () => {
+test('A05/A11 暂停页还没有读取时间时跟着第一份数据上屏一次，此后冻结；自己点刷新那一次照样上屏', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>('/api/vue/903')
   const manager = newManager(1, async () => { loads++; return loads })
@@ -526,25 +527,23 @@ test('A05/A11 暂停页不点刷新就不上屏；自己点一次才上屏，之
   await tick()
   assert.equal(loads, 1, '共享身份只取一次')
   assert.equal(reader.display.value?.data, 1)
-  const frozen = paused.display.value
-  assert.equal(frozen, null, '暂停页没点过刷新：结果到达也不上屏（画面冻结）')
+  assert.equal(paused.display.value?.data, 1, '暂停页还没有读取时间：没有时间就直接读，上屏第一份')
 
   // 同一格再来一拍：暂停页仍然什么都不抄——读闸门只认「刚点过刷新、基线已置空」。
   reader.refresh()
   await tick()
   assert.equal(reader.display.value?.data, 2)
-  const stillFrozen = paused.display.value
-  assert.equal(stillFrozen, null, '暂停页不跟随新结果')
+  assert.equal(paused.display.value?.data, 1, '它此后有上次读取时间了：窗口内不换画面（冻结）')
 
   // 暂停页自己点名要的那一拍照样放行（A05）。
   paused.refresh()
   await tick()
-  assert.equal(paused.display.value?.data, 3, '显式刷新会把这一页带到最新一版')
+  assert.equal(paused.display.value?.data, 3, '显式刷新把上次读取时间置 null：这一拍照样上屏')
 
   // 之后再来的新结果不再进这一页：冻结回到最后一帧。
   reader.refresh()
   await tick()
   assert.equal(reader.display.value?.data, 4)
-  assert.equal(paused.display.value?.data, 3, '这一次它没点刷新，画面停在自己拿到的那一版')
+  assert.equal(paused.display.value?.data, 3, '没点刷新的那一拍不再跟随：停在自己拿到的那一版')
   app.unmount()
 })

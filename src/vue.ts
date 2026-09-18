@@ -120,21 +120,13 @@ export function useRefresh<P extends object, T>(
    */
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
   /**
-   * **上次读取时间**：上一份抄进画面的格——它的 `updatedAt` 就是这一页的读取基准。
-   * `undefined` ＝ 还没有读取过（第一次读取，或基准刚被清掉）。
+   * **上次读取时间**：上一次抄进画面的那一版数据的时间（`ResultCell.updatedAt`）。
+   * `null` ＝ 还没有读取过——第一次读取、刚点过刷新、刚换身份、刚重新成为读者（ADR-72）。
    *
-   * 判定只有一句话：watch 到的最新数据 `cell` 的 `updatedAt` 距它满一个本页 `every` 才换画面。
-   * 没有基准就直接读——第一次读取本来就没有时间；**换身份、重新成为读者这两处边沿也只是把基准
-   * 清掉**，于是它们都回到「没有时间就直接读」这同一条规则（ADR-71）。
-   * 引用比较就是版本比较，因此不引版本号（ADR-43／45／47）；`cell === sampled` 的提前返回同时
-   * 保住下面那个 `pending`——版本没变的那一拍不算「看到了那一拍」。
+   * 判定只有一句话：`上次读取时间 ＋ 本页 every > 新数据的 updatedAt` 就不换画面；没有读取时间
+   * 就直接读。刷新不动别的东西，只把这一页的上次读取时间置 `null`——数据一到自然就换了。
    */
-  let sampled: ResultCell | undefined
-  /**
-   * 这一页点过刷新、还没看到那一拍。**它不是读取时间的一部分**，而是读闸门的一半：暂停页自己点的
-   * 那一次要能上屏（A05、G6）。删不掉——两次实测见 ADR-70：它与「上一份读到的是什么」无关。
-   */
-  let pending = false
+  let lastReadAt: number | null = null
 
   watchEffect(() => {
     const key = identity.value
@@ -142,21 +134,20 @@ export function useRefresh<P extends object, T>(
     eligible.value
     // 从来没有写过这一格：没有可抄的东西，画面停在上一帧（不发布空副本）。
     if (key === null || cell === undefined) return
-    // 读闸门里属于这一页的那一半：**点过一次刷新、还没看到那一拍**（`pending`）。它只认这一个值——
-    // 不能用「读取基准为空」这类更宽的条件替代：那样「从未上过屏的暂停页」会在下一份结果到达时当场
-    // 显示，冻结语义就没了（真 Chrome 的 A11 用例把这条钉住了）。也不补 `active` 这类条件——入口闸在
-    // **点的那一刻**已经判过环境，之后这一页失活（KeepAlive 缓存）仍允许它更新那一帧（确认人
-    // 2026-09-17 的裁决「允许它更新一帧呗」，见 ADR-67 的一处角落）。
-    if (!core.isEligible(config, source.name, key) && !(pending && core.isVisible())) return
-    if (cell === sampled) return
-    // 本页那份与新格都成功过、又不欠份：新格距展示中那份不足一个本页 `every` 就不换画面
-    // （这就是「按 updatedAt 时间差节流」）。任一份从未成功过（首查失败／失败后的首份成功）
-    // 不受节流——失败与恢复的事实必须立刻可见。配置非法（`every === null`）时不抄。
+    // 读闸门：有资格（声明着它、配置有效、开启、激活且浏览器可见），或**还没读取过**（第一次，或
+    // 刚点过刷新）且此刻浏览器可见。第二项就是「没有读取时间就直接读」——它是暂停页自己点刷新那
+    // 一次能上屏的唯一机制（A05、G6）。入口闸在点的那一刻已经判过环境，所以这里不补 `active`。
+    if (!core.isEligible(config, source.name, key) && !(lastReadAt === null && core.isVisible())) return
+    // 同一版不抄第二遍：格子的数据时间与失败位都跟画面里那份一样，就是「没有新东西」。它不需要另存
+    // 状态——画面本身就是已经抄到的那一版；失败那一笔`updatedAt` 不动、只有失败位变，靠这一行才看得见。
+    const shown = display.value
+    if (shown !== null && cell.updatedAt === shown.updatedAt && cell.failedAt === shown.failedAt) return
+    // 上次读取时间 ＋ 本页 every > 新数据的时间 ⇒ 窗口没到，不换画面（慢页面要的就是不跟快页面跳）。
+    // 上一次从未成功过、或本页还没读到过：没有可比的时间，直接读。配置非法（`every === null`）不抄。
     const every = config.every
-    if (!pending && sampled !== undefined && every !== null
-      && sampled.updatedAt !== null
+    if (lastReadAt !== null && every !== null
       && cell.updatedAt !== null
-      && sampled.updatedAt + every > cell.updatedAt) return
+      && lastReadAt + every > cell.updatedAt) return
     if (declared === null) return
     display.value = {
       args: structuredClone(declared.args) as unknown as ReadonlySnapshot<P>,
@@ -165,8 +156,7 @@ export function useRefresh<P extends object, T>(
       error: cell.error,
       failedAt: cell.failedAt,
     }
-    sampled = cell
-    pending = false
+    lastReadAt = cell.updatedAt
   }, { flush: 'sync' })
 
   /** 这一页是否挂载/激活（KeepAlive 失活为假）。它与「浏览器可见」是两件事，后者由核心统一监听。 */
@@ -178,12 +168,14 @@ export function useRefresh<P extends object, T>(
   const stopWatching = watch(() => readConfig(options, active.value), read => {
     applyConfig(config, read)
     core.reconcile()
-    eligible.value += 1
-    // 边沿的意图只有一半需要动基准：**重新成为读者**（激活、开起来、修好配置）要「没有读取时间就
-    // 直接读」，立刻读回；**失去资格**那一侧（暂停、失活、隐藏）不动——画面要冻结，而且清基准会让
-    // 这一拍把当前这一版重抄一次、顺手把 `pending` 用掉，点过刷新的那一帧反而上不了屏（ADR-71）。
+    // 重新成为读者（激活、开起来、修好配置）：把上次读取时间置 `null`，下一份内容因此不等窗口。
+    // **失去资格那一侧（暂停、失活、隐藏）不动**——那一侧若也置 `null`，读闸门第二项就会把整个
+    // 失活期都放行，画面在后台一路跟下去，「失活冻结」就没了（ADR-72）。
+    // 顺序：**先改状态、再触发**——`eligible` 是同步副作用的触发点（`flush: 'sync'`），置后一步它会
+    // 带着旧的读取时间去判定，那一拍就白跑了（ADR-72 的用例抓到过）。
     const changed = identity.value
-    if (changed !== null && core.isEligible(config, source.name, changed)) sampled = undefined
+    if (changed !== null && core.isEligible(config, source.name, changed)) lastReadAt = null
+    eligible.value += 1
   }, { flush: 'sync', immediate: true })
 
   // 拆卸由这一层自己做：核心不再持有任何回调配额，所以释放时是这里主动停表、再把它摘出名册。
@@ -219,9 +211,9 @@ export function useRefresh<P extends object, T>(
       const result = core.submit(config, source.name, parameters)
       if (result.status === 'accepted') {
         declared = parameters
-        // 新身份的第一份内容不等节流（换个身份本来就没有读取基准）：否则慢页面上屏要等一个 `every`，
-        // 看起来像坏了。
-        sampled = undefined
+        // 新身份的第一份内容不等窗口（换了身份就没有可比的上次读取时间）：否则慢页面上屏要等一个
+        // `every`，看起来像坏了。
+        lastReadAt = null
         identity.value = parameters.key
       }
       return result
@@ -230,9 +222,9 @@ export function useRefresh<P extends object, T>(
       if (released || core.isDisposed()) return
       const key = identity.value
       if (key === null) return
-      // 用户点名要的那一次不等窗口、也不问资格：结果一到就抄（这是「显式刷新一定会被看见」的全部
-      // 机制）。核心没有回执，所以只能这样问一声；读取基准**不动**——「不等窗口」由这一个位置接表达。
-      if (core.refresh(config, source.name, key)) pending = true
+      // 用户点名要的那一次不等窗口、也不问资格：把上次读取时间置 `null`，数据一到就抄——这就是
+      // 「显式刷新一定会被看见」的全部机制（核心没有回执，所以只能这样问一声）。
+      if (core.refresh(config, source.name, key)) lastReadAt = null
     },
   }
 }
