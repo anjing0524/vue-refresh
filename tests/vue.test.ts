@@ -58,7 +58,7 @@ const tick = async (): Promise<void> => {
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
-/** 采样是真实定时器上的事，断言不能假设精确时刻，只能等到条件成立或超时。 */
+/** 节流与调度是真实定时器上的事，断言不能假设精确时刻，只能等到条件成立或超时。 */
 async function until(condition: () => boolean, message: string, budget = 2_000): Promise<void> {
   const end = Date.now() + budget
   while (!condition()) {
@@ -249,7 +249,7 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写�
   app.unmount()
 })
 
-test('A21 采样：慢页面不跟着快页面跳，只在自己的拍上抄；显式刷新不等拍', async () => {
+test('A21 节流：慢页面不跟着快页面跳，节流窗口内的新版本不换画面；显式刷新不等节流', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>('/api/vue/203')
   const manager = newManager(2, async () => { loads++; return loads })
@@ -283,19 +283,55 @@ test('A21 采样：慢页面不跟着快页面跳，只在自己的拍上抄；�
     const cell = currentCore()?.snapshot().results[0]?.cell
     return cell === undefined || cell.updatedAt === null ? null : cell.data
   }
-  // 新身份的第一份内容不等拍：两个页面都立即拿到首查结果。
+  // 新身份的第一份内容不等节流：两个页面都立即拿到首查结果。
   assert.equal(slow.display.value?.data, 1, '慢页面的第一份内容立即上屏')
   assert.equal(quick.display.value?.data, 1, '快页面的第一份内容立即上屏')
 
-  // 快页面 20ms 一拍、结果表一直有新版本；慢页面 100 秒一拍，所以它停在首查那一帧。
+  // 快页面把共享取数推到 20ms 一次、结果表一直有新版本；慢页面 100 秒的节流窗口内
+  // 任何新格都到不了「距展示中那份满一个 every」，所以它停在首查那一帧。
   await until(() => loads >= 4, '快页面把共享取数推到第 4 次')
   await until(() => quick.display.value?.data === latest(), '快页面跟到最新一版')
-  assert.equal(slow.display.value?.data, 1, '两拍之间结果表的新版本不改变慢页面的画面')
+  assert.equal(slow.display.value?.data, 1, '节流窗口内结果表的新版本不改变慢页面的画面')
   assert.notEqual(latest(), 1, '结果表确实一直在变（否则这一条什么也没证明）')
 
-  // 显式刷新不等拍：用户点名要的那一次，结果一到就抄进画面。
+  // 显式刷新不等节流：用户点名要的那一次，结果一到就抄进画面。
   slow.refresh()
   await until(() => slow.display.value?.data === latest(), '慢页面显式刷新后立即读到最新一版')
+  app.unmount()
+})
+
+test('A21 写端稀于本页 every 时写入即抄：节流不丢数据，新格一到就上屏', async () => {
+  let loads = 0
+  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/204')
+  // 传输带 80ms 延迟：写入流的间隔（every ＋ 延迟）比本页 every（20ms）稀。
+  const manager = newManager(1, async () => {
+    loads++
+    await sleep(80)
+    return loads
+  })
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh(quote, { enabled: ref(true), every: ref(20) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+
+  // 先等首帧上屏再取基线：`before` 是「已经看到的那一份」，没有它这条断言什么也证明不了
+  // （写成 `undefined + 2` 会得到 NaN，`until` 只会空转到超时）。
+  await until(() => typeof api.display.value?.data === 'number', '首帧上屏')
+  // 每次写入都距上一份至少一个 every（写入间隔 > every），因此写入即抄、一版不落。
+  const before = api.display.value?.data as number
+  await until(() => (api.display.value?.data as number) >= before + 2, '画面跟到两版之后', 5_000)
+  const seen = api.display.value?.data as number
+  await until(() => loads >= seen + 1, '又有一次写入落表')
+  await until(() => (api.display.value?.data as number) >= seen + 1, '那次写入立刻进了画面')
   app.unmount()
 })
 
@@ -338,6 +374,39 @@ test('A13 失败写进结果表那一格：首查失败也读得到，成功后�
   await until(() => api.display.value?.failedAt !== null, '失败重新可读')
   assert.equal(api.display.value?.data, 2, '失败不覆盖旧址（数据仍是上一次成功的）')
   assert.equal(api.display.value?.updatedAt !== null, true, '失败不动结果的产生时间')
+  app.unmount()
+})
+
+test('A17/A06 释放一页之后：submit 返回 cancelled、refresh 不产生事实（§2.4「取消只有一个来源」）', async () => {
+  let loads = 0
+  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/265')
+  const manager = newManager(1, async () => { loads++; return 1 })
+  const shown = ref(true)
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const Inner = defineComponent({
+    setup() {
+      api = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const app = renderer.createApp(defineComponent({
+    setup: () => () => (shown.value ? h(Inner) : null),
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+  assert.equal(loads, 1)
+
+  shown.value = false // 只卸载这一页：协调者还活着，所以「已释放」只能由适配层自己判定
+  await tick()
+  assert.deepEqual(api.submit({ symbol: 'B' }), { status: 'cancelled' }, '释放后不再声明身份')
+  api.refresh()
+  await tick()
+  assert.equal(loads, 1, '释放后不再取数')
+  assert.equal(currentCore()?.snapshot().resources.length, 0, '释放后实例与结果一并回收')
   app.unmount()
 })
 

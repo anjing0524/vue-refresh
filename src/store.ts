@@ -6,7 +6,7 @@ import type { ResultCell } from './core.ts'
 /**
  * 结果表：每个 (url, key) 一份独立 `shallowRef`，格子里装的是**最后一次成功 ＋ 最近一次失败**（四个平字段）。
  *
- * **粒度对齐数据**：写一格只唤醒订阅这一格的 `watcher`（vue.ts 的采样副作用依赖的就是
+ * **粒度对齐数据**：写一格只唤醒订阅这一格的 `watcher`（vue.ts 的读取副作用依赖的就是
  * 那一个 ref），其余 watcher 不会被多余唤醒。代价是失去 `results` 单一对象可观测——调试期
  * 用 `list()` 列举，或读 `cells.get(...)`。
  *

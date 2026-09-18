@@ -57,7 +57,7 @@ const PairCard = defineComponent({
           'data-testid': `sp-toggle-${props.label}`,
           onClick: () => { options.enabled.value = !options.enabled.value },
         }, options.enabled.value ? '暂停本页' : '恢复本页'),
-        // 显式刷新一次：暂停页也能用（A05），而且这一次不等采样拍，结果一到就上屏（ADR-63）。
+        // 显式刷新一次：暂停页也能用（A05），而且这一次不等节流窗口，结果一到就上屏（ADR-63）。
         h('button', {
           'data-testid': `sp-once-${props.label}`,
           onClick: () => { task.refresh() },

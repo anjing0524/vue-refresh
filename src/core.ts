@@ -2,36 +2,29 @@ import type { SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
 
 /**
- * 共享取数与调度核心：**只管跨实例的事**——注册表、需求名册、可见性与销毁、FIFO 队列、并发槽、
- * 唯一唤醒 Timer、只读投影。一个身份自己的全部状态与操作在 `Resource` 里。
+ * 共享取数与调度核心：**只管一个身份自己的账**——谁声明着它、还要不要再取一次、什么时候到期、
+ * 哪一次执行还算数。跨实例的事只有三件：身份注册表、FIFO 队列与并发槽、唯一唤醒 Timer。
  *
- * 一次取数与交付的链路（唯一路径）见 DESIGN §2.1；「同一份关系不另立镜像」的理由见 DESIGN §3.1。
+ * `Resource` 是**合并请求、排队与终止的单位**：同一个「URL ＋ 参数值」就是同一个实例，
+ * 一次取数由它发起、由它的结果满足；核心不认识页面——一个页面交给它的全部内容就是自己那份
+ * 配置快照（`Config`），按身份挂在实例的 `declarers` 里（ADR-66）。
+ *
+ * 核心也不执行任何调用方代码（ADR-64）：拨出去的外部调用只剩传输 `http.post` 与结果表
+ * `sink.write／fail／remove／list` 两个注入端口。一次取数与交付的链路见 DESIGN §2.1。
  */
-
-/** 配置快照：开启意愿、刷新间隔、这一页是否激活三项，由适配层写入；读不出时为 `null`（后果见 DESIGN §6.1）。 */
-export interface Config {
-  readonly enabled: boolean
-  readonly every: number
-  /** 这一页是否挂载/激活（KeepAlive 失活为假）。它与「浏览器可见」是两件事，后者在核心上是全局的一项。 */
-  readonly active: boolean
-}
 
 /**
- * 一个页面对某个身份的**需求**：核心认识的全部内容。它**只有数据**——URL（身份的一半）、
- * 配置快照（开启意愿／间隔／是否激活）、已声明的身份（另一半）；没有定义对象、没有回调，
- * 核心因此不执行任何调用方代码：参数准入与准备都在适配层的提交边界完成（ADR-64）。
+ * 一页报给核心的配置快照。**它同时就是这一页在核心里的登记**：每页一个对象、适配层原地改写，
+ * 因此「谁声明了这个身份」不需要第二份名册（ADR-66）。
  *
- * 两件事不存字段：**是否已释放**是 `RefreshCore.demands` 的名册成员资格（DESIGN §3.7）、
- * **声明了哪个身份**是那个实例 `declarers` 的成员资格（DESIGN §3.5 第 1 条）；
- * **资格**（开启意愿 ＋ 激活 ＋ 浏览器可见）由配置快照与核心的全局可见性现算，不另存。
+ * `every === null` 表示这一拍配置非法（读不出、或不是正安全整数）：不取数、不刷新、不算有资格。
+ * 它与「暂停」（`enabled` 为假、`every` 仍有效）是两件事——暂停页还保有资格判定里的环境，
+ * 因此仍可手动刷一次（A04、A05）。
  */
-export interface Demand {
-  /** 取数 URL：身份的一半，也决定结果表分区的第一级。适配层从定义点取，核心只读。 */
-  readonly url: string
-  /** 最近一次配置快照；适配层每读到新值就改写，核心只读。 */
-  config: Config | null
-  /** 已声明的身份（URL ＋ 参数键）；核心独占写入，未声明时为 `null`。 */
-  parameters: Parameters | null
+export interface Config {
+  enabled: boolean
+  every: number | null
+  active: boolean
 }
 
 /**
@@ -65,32 +58,35 @@ export interface ResultSink {
 }
 
 /**
- * 一个「URL ＋ 参数值」的共享实例：同一个身份的**账本与算法**——谁声明着它、谁在等、什么时候到期、
- * 这次执行还会不会算数。**它不持有核心**：写表、回收、排队都是核心的动作（ADR-65）。
+ * 一个「URL ＋ 参数值」的共享实例：这个身份的**全部状态与判定**都在这个类里。
  *
- * 因此「一个身份的一生」要读两处：这个类给出状态与判定，核心给出动作与顺序。
+ * 它不持有核心、也不持有页面：谁声明着它（`declarers` 的成员资格）、谁还没拿到结果
+ * （`waiters`）、什么时候到期（`settledAt`）、哪一次执行还算数（`controller`）——
+ * 写表、回收、排队都是核心越过去做的动作，因此两方之间没有环（ADR-65、ADR-66）。
  */
 export class Resource {
   /** 取数 URL：身份的一半，也是结果表分区的第一级。 */
   readonly url: string
   readonly parameters: Parameters
   /**
-   * 声明了本身份的需求（页面挂载期间一直算，暂停/失活/隐藏都不撤销）。
+   * 声明了本身份的配置（页面挂载期间一直算，暂停、失活、隐藏都不撤销）。
    *
-   * 「声明」决定实例与结果的生死，「资格」只决定要不要取数——两条正交规则。资格由
-   * `config.enabled && config.active && 核心的全局可见性` 现算，不在这里维护第二份集合。
+   * 「声明」决定实例与结果的生死（G4：最后一个声明者离开才回收），「资格」只决定要不要取数——
+   * 两条正交规则，资格由 `config` 与核心的全局可见性现算，不在这里维护第二份集合。
    */
-  readonly declarers = new Set<Demand>()
-  /** 仍想要一次取数的需求（显式刷新登记的要求）。它是**标志**而不是队列：重复刷新同一个需求只留一份。 */
-  readonly waiters = new Set<Demand>()
+  readonly declarers = new Set<Config>()
+  /**
+   * 仍想要一次取数的配置（显式刷新登记的要求）。它是**标志而不是队列**：同一个页面重复刷新只留一份，
+   * 而且只结算一次（§0.2「刷新要求」）——「这个页面已经在等」这件事必须按页记，否则写表期间的重入
+   * 会被反复当成新要求，补发没有上界（A12/A14 的用例把这条钉住了）。
+   */
+  readonly waiters = new Set<Config>()
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
   settledAt: number | null = null
   /**
    * 这次执行的身份与取消把手；`null` ＝ 本实例此刻没有执行。
    *
    * 一个字段回答两件事：**取消**（释放实例时 abort）与**认人**（迟到的结束不再是当前执行就丢弃）。
-   * 后者过去由一个独立的 `Task` 对象承担；删掉框架自带的取数上限之后，一个实例同时只会有一个执行，
-   * 于是「一次执行」不再需要一个对象，`null` 就是唯一的事实（ADR-65）。
    */
   controller: AbortController | null = null
 
@@ -100,27 +96,25 @@ export class Resource {
   }
 
   /**
-   * 环境允许：这一页激活且浏览器可见。它与「开启意愿」是两件事——暂停只关掉意愿，
+   * 环境允许：这一页激活、配置有效、浏览器可见。它与「开启意愿」是两件事——暂停只关掉意愿，
    * 环境仍然允许，所以暂停页仍可显式刷新一次（A05）。
    */
-  isPresent(demand: Demand, visible: boolean): boolean {
-    const config = demand.config
-    return visible && config !== null && config.active
+  isPresent(config: Config, visible: boolean): boolean {
+    return visible && config.every !== null && config.active
   }
 
   /** 一个声明者此刻是否有资格取数：环境允许 ＋ 开启意愿为真。 */
-  isEligible(demand: Demand, visible: boolean): boolean {
-    const config = demand.config
-    return this.isPresent(demand, visible) && config !== null && config.enabled
+  isEligible(config: Config, visible: boolean): boolean {
+    return this.isPresent(config, visible) && config.enabled
   }
 
   /** 有效间隔现算：**有资格**的声明者里最小的 `every`；没有有资格的人就是 `Infinity`（不取数）。 */
   eligibleEvery(visible: boolean): number {
     let every = Infinity
-    for (const demand of this.declarers) {
-      if (!this.isEligible(demand, visible)) continue
-      const config = demand.config
-      if (config) every = Math.min(every, config.every)
+    for (const config of this.declarers) {
+      if (!this.isEligible(config, visible)) continue
+      const value = config.every
+      if (value !== null) every = Math.min(every, value)
     }
     return every
   }
@@ -136,22 +130,21 @@ export class Resource {
   }
 
   /**
-   * 成功结算：记下结算时刻，把**这一批要求**交回核心（写表与回收都由核心做）。
+   * 成功结算：记下结算时刻，并把**这一批**未完成的要求交回核心（写表与回收都由核心做，ADR-65）。
    *
-   * 为什么先交出这一批、再由核心写表：写表会同步触发页面代码（例如 `flush: 'sync'` 的 watcher），
-   * 它可能当场 `refresh()`——那条新要求不属于这一批，只能由核心补的后继请求满足（DESIGN §3.9 第一条）。
+   * 必须在写表**之前**调用、并且先取快照：写表会同步触发页面代码（例如 `flush: 'sync'` 的 watcher），
+   * 它可能当场 `refresh()`——那条要求不属于这一批，只能由核心补的后继请求满足（DESIGN §3.9）。
    */
-  settle(at: number): readonly Demand[] {
+  settle(at: number): readonly Config[] {
     this.settledAt = at
     return [...this.waiters]
   }
 
-  /** 失败结算：与 `settle` 同形（记时刻、交出这一批要求）；失败记录由核心写，数据保持原样。 */
-  fail(at: number): readonly Demand[] {
+  /** 失败结算：与 `settle` 同形（失败也算结算，因此不自动重试——A13）；失败记录由核心写。 */
+  fail(at: number): readonly Config[] {
     this.settledAt = at
     return [...this.waiters]
   }
-
 }
 
 /** `setTimeout` 的平台上限（约 24.8 天）；更远的到期分段等待。 */
@@ -168,7 +161,12 @@ export interface RefreshHttp {
   post(url: string, data: unknown, config: { readonly signal: AbortSignal }): Promise<{ readonly data: unknown }>
 }
 
-/** 跨实例的协调者：实例注册表、需求名册、FIFO 队列与并发槽、唯一唤醒 Timer、可见性与销毁。 */
+/**
+ * 跨身份的协调者：身份注册表、FIFO 队列与并发槽、唯一唤醒 Timer、可见性与销毁。
+ *
+ * 它**不持有页面**：页面侧的全部内容就是挂在各自实例 `declarers` 里的 `Config`；
+ * 本对象自己的状态只有上面那几项跨实例的事（ADR-66）。
+ */
 export class RefreshCore {
   private readonly maxConcurrent: number
   /** 取数用的 axios 实例；内核只调它的 `post`，因此 core.ts 仍然零运行时依赖。 */
@@ -177,17 +175,15 @@ export class RefreshCore {
   private readonly sink: ResultSink
   /** URL → 参数键 → 实例。 */
   private readonly buckets = new Map<string, Map<string, Resource>>()
-  /** 全部需求；可见性变化时按它们重新协调。 */
-  private readonly demands = new Set<Demand>()
   /** FIFO 待执行的实例（一个实例至多一个执行）。 */
   private readonly queue = new Set<Resource>()
   /** 真实尚未结束的请求；并发槽的唯一事实（含实例已回收、但请求仍在途的那一次）。 */
   private readonly running = new Set<Resource>()
-  /** 唯一 Timer 的取消句柄；调用即取消。 */
+  /** 唯一 Timer 的取消句柄；调用即取消。框架自己的闭包，不是页面回调。 */
   private wakeup: (() => void) | null = null
   /** 已安排、尚未执行的一轮合并调度。 */
   private flushing = false
-  /** 浏览器可见性这一项事实。 */
+  /** 浏览器可见性这一项事实（适配层的读闸门要用它，所以有一个只读出口）。 */
   private visible = true
   private disposed = false
 
@@ -204,80 +200,85 @@ export class RefreshCore {
     return this.disposed
   }
 
-  /** 浏览器可见性：隐藏时当场退订（取消立即结算），不等下一轮调度。 */
+  /** 浏览器此刻是否可见。读闸门在适配层，但这一项事实只有核心知道（ADR-66）。 */
+  isVisible(): boolean {
+    return this.visible
+  }
+
+  /** 浏览器可见性：隐藏让所有页面失去资格，下一轮调度不再取数；**已经发出的请求不受影响**。 */
   setVisible(visible: boolean): void {
     if (this.disposed || this.visible === visible) return
     this.visible = visible
-    for (const demand of [...this.demands]) this.coordinate(demand)
-    this.flushSoon()
-  }
-
-  /** 登记一个需求并协调它。调用方保证协调者尚未销毁：`useRefresh` 在造出需求之前就查过 `isDisposed`。 */
-  addDemand(demand: Demand): void {
-    this.demands.add(demand)
-    this.reconcile(demand)
-  }
-
-  /** 释放一个需求：先结算它的刷新要求，再撤销声明并停止接纳。名册成员资格就是「是否已释放」。 */
-  removeDemand(demand: Demand): void {
-    if (!this.demands.has(demand)) return
-    this.demands.delete(demand)
-    // 撤销声明要按身份找实例，因此必须在清空 `parameters` 之前（它与 `clearRefreshes` 都读身份）。
-    this.clearRefreshes(demand)
-    this.dropDeclaration(demand)
-    demand.parameters = null
     this.flushSoon()
   }
 
   /**
-   * 配置或生命周期变化后的唯一入口：先协调关系，再安排一次合并调度。
+   * 配置或生命周期变化后：重新算一次到期与唤醒。
    *
-   * 两步必须分开：`coordinate` 在 `flush` 遍历需求时也要跑，而那里不能再排一轮 flush。
+   * 不需要传「是谁变了」——资格与最小间隔都是现算的，读数就在各实例的 `declarers` 里（ADR-66），
+   * 所以这里只是一次合并调度。
    */
-  reconcile(demand: Demand): void {
-    this.coordinate(demand)
+  reconcile(): void {
     this.flushSoon()
   }
 
   // ══════════════════════════ 页面操作 ══════════════════════════
 
   /**
-   * 声明或更新身份；相同参数值幂等。
+   * 声明或更新身份；相同身份幂等。
    *
-   * **参数先由适配层准备好再交进来**——复制、值域检查、身份键编码与 `validate` 都在提交边界完成（ADR-64），
-   * 因此这里没有 try/catch，也不会产生 `rejected`：输入问题由适配层自己的同步返回值说清楚（ADR-51），
-   * 而核心从头到尾不执行调用方代码。无效声明不改动任何状态。
+   * **参数先由适配层准备好再交进来**——复制、值域检查、身份键编码与 `validate` 都在提交边界完成（ADR-64）。
+   * 换身份＝把这份配置从旧实例的 `declarers` 里摘掉、挂到新实例上；旧实例若因此没人要了就地回收。
    */
-  submit(demand: Demand, parameters: Parameters): SubmitResult {
-    if (this.disposed || !this.demands.has(demand)) return { status: 'cancelled' }
-    const declared = demand.parameters
-    if (declared && declared.key === parameters.key) return { status: 'accepted' }
+  submit(config: Config, url: string, parameters: Parameters): SubmitResult {
+    if (this.disposed) return { status: 'cancelled' }
 
-    // 顺序固定：先用旧身份撤销刷新要求（它可能落在旧实例上），再撤掉旧身份的声明，最后换身份并重新协调。
-    this.clearRefreshes(demand)
-    this.dropDeclaration(demand)
-    demand.parameters = parameters
-    this.reconcile(demand)
+    const current = this.resourceOf(config)
+    if (current && current.url === url && current.parameters.key === parameters.key) {
+      return { status: 'accepted' }
+    }
+    if (current) {
+      // 顺序固定：先撤销旧身份上未完成的要求，再摘掉声明（要求还在就回收不了，§3.6）。
+      current.waiters.delete(config)
+      current.declarers.delete(config)
+      this.releaseIfUnused(current)
+    }
+    this.resourceFor(url, parameters).declarers.add(config)
+    this.flushSoon()
     return { status: 'accepted' }
   }
 
   /**
-   * 显式刷新：有当前请求就直接用它的结果，没有就当场登记一次；不恢复自动刷新，也不改写调用方的开关。
+   * 显式刷新：没有执行就当场登记一次，有执行就把「还要再取一次」置起（本轮结果满足不了它）。
    *
-   * **不回执**：成功与失败都只经结果表（`display` 那一侧）。入口条件不成立时直接返回、不产生副作用也不写表。
+   * 返回值只说**这句命令收下了没有**（入口条件不成立时 `false`），不是取数回执：成功与失败都只经结果表。
+   * 适配层用它决定自己那一页要不要跟着这一拍（读闸门在适配层，ADR-66）。
    */
-  refresh(demand: Demand): void {
-    if (this.disposed || !this.demands.has(demand)) return
-    const config = demand.config
-    if (config === null) return
-    if (!(config.active && this.visible)) return
-    const parameters = demand.parameters
-    if (parameters === null) return
+  refresh(config: Config, url: string, key: string): boolean {
+    if (this.disposed) return false
+    if (!config.active || config.every === null || !this.visible) return false
+    const resource = this.buckets.get(url)?.get(key)
+    if (resource === undefined) return false
 
-    const resource = this.resourceFor(demand.url, parameters)
-    // 有执行就直接用它的结果；没有就当场登记一次。同一个需求重复刷新只留一份要求。
-    resource.waiters.add(demand)
+    // 有执行就直接用它的结果；没有就当场登记一次。同一个页面重复刷新只留一份要求（标志不是队列）。
+    resource.waiters.add(config)
     if (resource.controller === null) this.enqueue(resource)
+    this.flushSoon()
+    return true
+  }
+
+  /** 这一份配置此刻有没有取数资格：有资格 ＝ 环境允许 ＋ 开启意愿（G3/G4 的判定）。 */
+  isEligible(config: Config, url: string, key: string): boolean {
+    return this.buckets.get(url)?.get(key)?.isEligible(config, this.visible) ?? false
+  }
+
+  /** 释放一页：撤销它未完成的要求与声明（组件卸载、销毁都由它收尾）。撤销后若实例没人要了就地回收。 */
+  undeclare(config: Config): void {
+    const resource = this.resourceOf(config)
+    if (resource === undefined) return
+    resource.waiters.delete(config)
+    resource.declarers.delete(config)
+    this.releaseIfUnused(resource)
     this.flushSoon()
   }
 
@@ -285,7 +286,7 @@ export class RefreshCore {
 
   /** 只读计数投影：给演示面板、基准脚本与集成测试看状态。**不属于包契约**，也不提供改状态的入口。 */
   snapshot(): {
-    demands: readonly Demand[]
+    declarers: readonly Config[]
     resources: readonly Resource[]
     results: readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[]
     queued: readonly Resource[]
@@ -294,11 +295,15 @@ export class RefreshCore {
     flushing: boolean
   } {
     const resources: Resource[] = []
+    const declarers: Config[] = []
     for (const bucket of this.buckets.values()) {
-      for (const resource of bucket.values()) resources.push(resource)
+      for (const resource of bucket.values()) {
+        resources.push(resource)
+        for (const config of resource.declarers) declarers.push(config)
+      }
     }
     return {
-      demands: [...this.demands],
+      declarers,
       resources,
       results: this.sink.list(),
       queued: [...this.queue],
@@ -314,40 +319,23 @@ export class RefreshCore {
     this.disposed = true
     this.clearWakeup()
     this.queue.clear()
-    for (const demand of [...this.demands]) this.removeDemand(demand)
+    // 逐个实例撤销声明与未完成的要求并回收：abort 在途、删结果表条目。
+    // 只清声明不够——要求还在就回收不了，迟到的结果还会写进表（A17 把这条钉住了）。
+    for (const resource of this.all()) {
+      resource.declarers.clear()
+      resource.waiters.clear()
+      this.releaseIfUnused(resource)
+    }
     this.buckets.clear()
   }
 
-  // ══════════════════════════ 需求关系 ══════════════════════════
+  // ══════════════════════════ 身份注册表 ══════════════════════════
 
-  /**
-   * 按最新配置与生命周期协调一个需求；资格成立则接入或更新订阅，否则退订。
-   *
-   * 四组事实缺一不可：存活、已声明身份、环境允许（激活且浏览器可见）、配置明确开启且有周期。
-   * 刷新要求不参与资格：它由 `refresh` 的入口闸与 `waiters` 的归属表达，因此暂停页仍可刷新。
-   */
-  private coordinate(demand: Demand): void {
-    if (this.disposed || !this.demands.has(demand)) return
-    const parameters = demand.parameters
-
-    // 失去身份就等于撤销声明：实例与结果随最后一个声明者离开而回收（A06）。
-    if (parameters === null) {
-      this.dropDeclaration(demand)
-      return
-    }
-    // 声明即归属：页面挂载期间一直算（暂停、失活、隐藏都不撤销），取数才看资格。
-    const resource = this.resourceOf(demand)
-    const target = resource ?? this.resourceFor(demand.url, parameters)
-    // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值）。这份是框架私有权威副本，
-    // 外发给每个消费者（`validate`／每轮请求体）时各复制一份（ADR-52）。
-    demand.parameters = target.parameters
-    target.declarers.add(demand)
-
-    // 撤销刷新要求只看**环境**（失活、隐藏、卸载）：暂停只关掉开启意愿，环境仍允许，
-    // 因此暂停页刚登记的那次刷新不会被下一轮 flush 抹掉（A05、G6）。
-    // 资格只影响自动取数与读者身份：没有资格就不再是读者（画面冻结，ADR-60），但声明还留着，
-    // 所以在途请求不取消、结果也不删（失活/暂停恢复后直接读回）。
-    if (!target.isPresent(demand, this.visible)) this.clearRefreshes(demand)
+  /** 全部实例的一份快照（遍历时可能回收，所以先取出来）。 */
+  private all(): Resource[] {
+    const resources: Resource[] = []
+    for (const bucket of this.buckets.values()) for (const resource of bucket.values()) resources.push(resource)
+    return resources
   }
 
   /** 按「URL ＋ 完整参数值稳定键」查找，没有就建立实例。 */
@@ -365,23 +353,23 @@ export class RefreshCore {
     return resource
   }
 
-  /** 本页已声明身份所在的实例；只查不建（协调资格、结算刷新要求、退订都用它）。 */
-  private resourceOf(demand: Demand): Resource | undefined {
-    const parameters = demand.parameters
-    return parameters ? this.buckets.get(demand.url)?.get(parameters.key) : undefined
-  }
-
-  /** 撤销一个需求的声明；撤销后若声明与要求都空了，实例随之被回收。 */
-  private dropDeclaration(demand: Demand): void {
-    const resource = this.resourceOf(demand)
-    if (!resource?.declarers.delete(demand)) return
-    this.releaseIfUnused(resource)
+  /**
+   * 这份配置登记在哪个实例上；只查不建。
+   *
+   * 扫描是「不存反向字段」的代价（ADR-57）：`declarers` 的成员资格是唯一事实，
+   * 一次换身份／一次卸载各扫一遍注册表（用户动作级，规模是几十个身份）。
+   */
+  private resourceOf(config: Config): Resource | undefined {
+    for (const bucket of this.buckets.values()) {
+      for (const resource of bucket.values()) {
+        if (resource.declarers.has(config)) return resource
+      }
+    }
+    return undefined
   }
 
   /**
-   * 没有声明者也没有刷新要求：删实例与排队项，abort 在途；迟到的结束在身份复核处失效。**核心私有**。
-   * 只判「都空」就够：注销是唯一的删除路径，此刻这个键指向的必定是它自己（§3.5 第 11 条）。
-   * 注意「声明」与「资格」是两件事：暂停、失活、隐藏都不撤销声明，所以它们不会把实例收掉。
+   * 没有声明者也没有未完成的要求：删实例、abort 在途、删结果表条目。迟到的结束在身份复核处失效。**核心私有**。
    */
   private releaseIfUnused(resource: Resource): void {
     if (resource.declarers.size > 0 || resource.waiters.size > 0) return
@@ -397,39 +385,6 @@ export class RefreshCore {
       this.place(resource, this.running.has(resource) ? 'abandoned' : 'idle')
       controller.abort()
     }
-  }
-
-  /**
-   * 这个需求此刻算不算该身份的**读者**：声明着它并且有资格（开启意愿 ＋ 激活 ＋ 浏览器可见），
-   * 或在它上面有未撤销的刷新要求。
-   *
-   * 视图层据此决定「要不要跟随结果表的新值」：读者跟随，不是读者（暂停、失活、隐藏、卸载中）
-   * 就冻结在最后一帧；暂停页自己 `refresh()` 那一次仍在要求里，因此那次结果照样更新画面（A05、G6）。
-   */
-  isReader(demand: Demand): boolean {
-    const resource = this.resourceOf(demand)
-    if (resource === undefined) return false
-    return resource.declarers.has(demand)
-      && (resource.isEligible(demand, this.visible) || resource.waiters.has(demand))
-  }
-
-  /**
-   * 撤销一个需求的刷新要求；它可能是本实例的最后一个需求，因此顺手判断这个实例还要不要留着。
-   * **核心私有**：实例只交出「谁在等」，回收由核心决定（ADR-65）。
-   */
-  private settleRequest(resource: Resource, demand: Demand): void {
-    if (!resource.waiters.delete(demand)) return
-    this.releaseIfUnused(resource)
-  }
-
-  /** 把一次成功写进结果表（表在 `sink` 手上，实例不碰它）。 */
-  private writeResult(resource: Resource, data: unknown, updatedAt: number): void {
-    this.sink.write(resource.url, resource.parameters.key, data, updatedAt)
-  }
-
-  /** 把一次失败写进结果表同一格（数据保留）。与 `writeResult` 对称。 */
-  private writeFailure(resource: Resource, error: unknown, failedAt: number): void {
-    this.sink.fail(resource.url, resource.parameters.key, error, failedAt)
   }
 
   // ══════════════════════════ 后台执行 ══════════════════════════
@@ -458,15 +413,23 @@ export class RefreshCore {
     this.place(resource, 'queued')
   }
 
-  /** 一次执行结束后仍有未完成的要求时补一次请求；唯一来源是写表触发的同步重入（DESIGN §3.9 第一条）。 */
+  /** 本轮结束后还有未满足的要求时补一次；唯一来源是写表触发的同步重入（DESIGN §3.9）。 */
   private refill(resource: Resource): void {
     if (resource.waiters.size === 0 || resource.controller !== null) return
     this.enqueue(resource)
   }
 
   /**
-   * 执行一次后台请求：写表 → 结算这一批要求 → 释放槽位 → 补后继请求，
-   * 「一次取数的收尾顺序」只有这一处，读一遍就够（ADR-65）。
+   * 撤销一个配置的刷新要求；它可能是本实例最后一个要求，因此顺手判断这个实例还要不要留着。
+   * **核心私有**：实例只交出「谁在等」，回收由核心决定（ADR-65）。
+   */
+  private settleRequest(resource: Resource, config: Config): void {
+    if (!resource.waiters.delete(config)) return
+    this.releaseIfUnused(resource)
+  }
+
+  /**
+   * 执行一次后台请求：结算 → 写表 → 释放槽位 → 补后继请求，「一次取数的收尾顺序」只有这一处（ADR-65）。
    *
    * 框架**不设自己的取数上限**：请求必然终止由注入的传输负责（axios 的 `timeout`、反向代理，
    * 或宿主自己的截止）。因此一个实例同时只会有一个执行，一个请求也只占一个槽位。
@@ -489,27 +452,28 @@ export class RefreshCore {
       const at = Date.now()
       const satisfied = resource.settle(at)
       this.writeResult(resource, data, at)
-      for (const demand of satisfied) this.settleRequest(resource, demand)
+      for (const config of satisfied) this.settleRequest(resource, config)
     } catch (error) {
       if (resource.controller !== controller) return
       const at = Date.now()
       const satisfied = resource.fail(at)
       this.writeFailure(resource, error, at)
-      for (const demand of satisfied) this.settleRequest(resource, demand)
+      for (const config of satisfied) this.settleRequest(resource, config)
     } finally {
-      // 释放槽位与补后继请求都要认人：写表可能已经把实例回收掉了（`place` 会把它移出账本）。
       this.place(resource, 'idle')
       this.refill(resource)
       this.flushSoon()
     }
   }
 
-  // ══════════════════════════ 刷新要求 ══════════════════════════
+  /** 把一次成功写进结果表（表在 `sink` 手上，实例不碰它）。 */
+  private writeResult(resource: Resource, data: unknown, updatedAt: number): void {
+    this.sink.write(resource.url, resource.parameters.key, data, updatedAt)
+  }
 
-  /** 撤销一个需求未完成的刷新要求（失去身份、卸载、销毁都由它收尾）。 */
-  private clearRefreshes(demand: Demand): void {
-    const resource = this.resourceOf(demand)
-    if (resource) this.settleRequest(resource, demand)
+  /** 把一次失败写进结果表同一格（数据保留）。与 `writeResult` 对称。 */
+  private writeFailure(resource: Resource, error: unknown, failedAt: number): void {
+    this.sink.fail(resource.url, resource.parameters.key, error, failedAt)
   }
 
   // ══════════════════════════ 调度 ══════════════════════════
@@ -521,43 +485,35 @@ export class RefreshCore {
     queueMicrotask(() => { this.flush() })
   }
 
-  /** 一次 flush：协调需求 → 到期入队 → 按 FIFO 用可用槽位启动 → 设置唯一唤醒 Timer。 */
+  /** 一次 flush：到期入队 → 按 FIFO 用可用槽位启动 → 设置唯一唤醒 Timer。 */
   private flush(): void {
     this.flushing = false
     if (this.disposed) return
     this.clearWakeup()
-    this.coordinateAll()
     const next = this.enqueueDue(Date.now())
     this.startQueued()
     this.scheduleWakeup(next)
   }
 
-  /** 第一步：让每个在册需求按最新事实重新协调（资格变化在这里被吸收）。 */
-  private coordinateAll(): void {
-    for (const demand of [...this.demands]) this.coordinate(demand)
-  }
-
-  /** 第二步：把到期的实例登记进队列，返回最早的下次到期时刻（`Infinity`＝没有要等的）。 */
+  /** 第一步：把到期的实例登记进队列，返回最早的下次到期时刻（`Infinity`＝没有要等的）。 */
   private enqueueDue(now: number): number {
     let next = Infinity
-    for (const bucket of this.buckets.values()) {
-      for (const resource of bucket.values()) {
-        // 有当前执行的实例不重复入队（A08）。
-        if (resource.controller !== null) continue
-        const due = resource.dueAt(now, this.visible)
-        // `Infinity` ＝ 这个身份没有有资格的声明者：不取数，也不参与唤醒时刻。
-        if (due <= now) this.enqueue(resource)
-        else next = Math.min(next, due)
-      }
+    for (const resource of this.all()) {
+      // 有当前执行的实例不重复入队（A08）。
+      if (resource.controller !== null) continue
+      const due = resource.dueAt(now, this.visible)
+      // `Infinity` ＝ 这个身份没有有资格的声明者：不取数，也不参与唤醒时刻。
+      if (due <= now) this.enqueue(resource)
+      else next = Math.min(next, due)
     }
     return next
   }
 
   /**
-   * 第三步：按 FIFO 用当前可用槽位启动。
+   * 第二步：按 FIFO 用当前可用槽位启动。
    *
    * 队列里只装「还没有执行、且确实在等」的实例——`queue` 的唯一写入者是 `place`，它进入 `queued`
-   * 时就建好这次执行的 `controller`（§3.5 第 4 条）。因此这里不再需要复核归属。
+   * 时就建好这次执行的 `controller`（DESIGN §3.5 第 4 条）。因此这里不再需要复核归属。
    * 满槽时由请求真实结束唤醒（不自旋）；本轮内新增的请求留给下一轮。
    */
   private startQueued(): void {
@@ -568,7 +524,7 @@ export class RefreshCore {
     }
   }
 
-  /** 第四步：队列已清空且还有明确的到期时刻时，安排唯一唤醒 Timer。 */
+  /** 第三步：队列已清空且还有明确的到期时刻时，安排唯一唤醒 Timer。 */
   private scheduleWakeup(next: number): void {
     if (this.queue.size === 0 && next < Infinity) this.setWakeup(next)
   }

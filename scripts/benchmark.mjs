@@ -107,13 +107,13 @@ async function measure() {
   await sleep(duration)
   const elapsed = performance.now() - started
   const view = core.snapshot()
-  const observed = { resources: view.resources.length, demands: view.demands.length, running: view.running.length }
+  const observed = { resources: view.resources.length, declarers: view.declarers.length, running: view.running.length }
 
   app.unmount()
   manager.dispose()
   const after = core.snapshot()
   const residue = {
-    resources: after.resources.length, demands: after.demands.length, queued: after.queued.length,
+    resources: after.resources.length, declarers: after.declarers.length, queued: after.queued.length,
     running: after.running.length, entries: after.results.length,
   }
   const heapAfter = process.memoryUsage().heapUsed
@@ -143,7 +143,7 @@ for (const [index, result] of results.entries()) {
   console.log(`[bench] 第 ${index + 1} 次：实际 ${result.elapsed}ms 内取数 ${result.loads} 次`
     + `（收敛比 ${result.convergence}；按订阅计的反事实 ${result.perSubscriberCounterfactual} 次）`
     + ` · 在途峰值 ${result.peakInFlight}（框架 running 投影峰值 ${result.peakRunning}）/ 上限 ${maxConcurrent}`
-    + ` · 结束瞬间 Resource ${result.observed.resources} 需求 ${result.observed.demands}`
+    + ` · 结束瞬间 Resource ${result.observed.resources} 声明 ${result.observed.declarers}`
     + ` · 后台失败 ${result.failures} · 堆增量 ${result.heapDeltaKb}KB`)
 }
 console.log(`[bench] 中位：取数 ${median('loads')} 次 · 收敛比 ${median('convergence')}`

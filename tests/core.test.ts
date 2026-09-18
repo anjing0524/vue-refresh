@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { RefreshCore } from '../src/core.ts'
-import type { Config, Demand, Resource, ResultCell, ResultSink } from '../src/core.ts'
+import type { Config, Resource, ResultCell, ResultSink } from '../src/core.ts'
 import { defineRefresh, prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
 import type { RefreshDisplay, RefreshSource, SubmitResult } from '../src/public-types.ts'
@@ -87,17 +87,20 @@ afterEach(() => {
 /**
  * 配置快照的两项默认值：挂载且激活、开启意愿、超长周期。
  *
- * ADR-61 把「这一页是否激活」并进了快照，所以旧契约里 `addDemand` 之后紧跟的那次 `activate`
- * 现在等价于默认快照里的 `active: true`。
+ * ADR-61 把「这一页是否激活」并进了快照，所以旧契约里 `activate` 那一步现在等价于默认快照里的 `active: true`。
  */
 const DEFAULT_CONFIG: Config = { enabled: true, every: 100_000, active: true }
 /** 只给要改的那几项；`null` 表示整份快照非法。 */
 type PartialConfig = { enabled?: boolean; every?: number; active?: boolean }
 
-/** 一页：需求 ＋ 按身份读结果表。与集成测试同一口径，直接驱动核心；画面按身份从结果表现读。 */
+/** 一页：一份配置槽 ＋ 按身份读结果表。与适配层同一分工（ADR-64、ADR-66）。 */
 interface Page {
-  readonly demand: Demand
+  /** 这一页在核心里的**全部内容**：一份配置快照，原地改写，按身份挂在实例的 `declarers` 里。 */
+  readonly config: Config
+  readonly url: string
   readonly last: RefreshDisplay<object, unknown> | undefined
+  /** 已声明身份的参数键；没有身份时为 `null`（参数准备在调用方这一侧，与适配层同形）。 */
+  key(): string | null
   /** 本页**当前身份**那一格上最近一次失败的时刻；没有身份、成功过、从未写过都是 `null`（ADR-63）。 */
   failedAt(): number | null
   /** 本页**当前身份**那一格上最近一次失败的原始异常。 */
@@ -106,7 +109,7 @@ interface Page {
   writes(): number
   submit(args: object): SubmitResult
   refresh(): void
-  /** 合并式写快照：只给要改的那项，其余沿用当前值（ADR-61 的单一写入口）。 */
+  /** 合并式写快照：只给要改的那项，其余沿用当前值（ADR-61 的单一写入口）；`null` 表示配置非法。 */
   set(next: PartialConfig | null): void
 }
 
@@ -116,29 +119,29 @@ function page(
   initial: PartialConfig | null = {},
 ): Page {
   const table = tableOf(core)
-  // 交给核心的只有数据（URL／配置快照／身份）；定义与参数准备留在这一层——与适配层同一分工（ADR-64）。
-  const demand: Demand = {
-    url: source.name,
-    config: initial === null ? null : { ...DEFAULT_CONFIG, ...initial },
-    parameters: null,
-  }
-  core.addDemand(demand)
+  const url = source.name
+  // 交给核心的只有数据：URL、配置快照与身份（参数准备在提交边界做）——与适配层同一分工（ADR-64、ADR-66）。
+  const config: Config = initial === null
+    ? { enabled: false, every: null, active: false }
+    : { ...DEFAULT_CONFIG, ...initial }
+  /** 本页已声明身份的副本：页面 → 身份这条映射归调用方（核心只按身份登记，ADR-66）。 */
+  let declared: Parameters | null = null
   return {
-    demand,
+    config,
+    url,
+    key: () => declared?.key ?? null,
     writes(): number {
-      const parameters = demand.parameters
-      if (parameters === null) return 0
-      return table.writes.filter(write => write.url === demand.url && write.key === parameters.key).length
+      const key = declared?.key
+      if (key === undefined) return 0
+      return table.writes.filter(write => write.url === url && write.key === key).length
     },
     failedAt(): number | null {
-      const parameters = demand.parameters
-      if (parameters === null) return null
-      return table.failedAt(demand.url, parameters.key)
+      const key = declared?.key
+      return key === undefined ? null : table.failedAt(url, key)
     },
     error(): unknown {
-      const parameters = demand.parameters
-      if (parameters === null) return undefined
-      return table.error(demand.url, parameters.key)
+      const key = declared?.key
+      return key === undefined ? undefined : table.error(url, key)
     },
     // 与适配层同形：准备失败就地变成 `rejected`，核心拿到的永远是可用身份（ADR-64）。
     submit: args => {
@@ -148,31 +151,31 @@ function page(
       } catch (error) {
         return { status: 'rejected', error }
       }
-      return core.submit(demand, parameters)
+      const result = core.submit(config, url, parameters)
+      if (result.status === 'accepted') declared = parameters
+      return result
     },
-    refresh: () => core.refresh(demand),
+    refresh: () => {
+      if (declared === null) return
+      core.refresh(config, url, declared.key)
+    },
     set(next) {
       if (next === null) {
-        demand.config = null
-        core.reconcile(demand)
-        return
+        config.every = null
+      } else {
+        config.enabled = next.enabled ?? config.enabled
+        config.every = next.every ?? config.every
+        config.active = next.active ?? config.active
       }
-      const current = demand.config ?? DEFAULT_CONFIG
-      demand.config = {
-        enabled: next.enabled ?? current.enabled,
-        every: next.every ?? current.every,
-        active: next.active ?? current.active,
-      }
-      core.reconcile(demand)
+      core.reconcile()
     },
     get last() {
-      const parameters = demand.parameters
-      if (parameters === null) return undefined
-      const cell = table.read(demand.url, parameters.key)
+      if (declared === null) return undefined
+      const cell = table.read(url, declared.key)
       if (!cell) return undefined
       // `display` 的形状：`args` 每次读取复制一份（身份键所描述的那份值），`data` 是结果表里同一个对象。
       return {
-        args: structuredClone(parameters.args),
+        args: structuredClone(declared.args),
         data: cell.updatedAt === null ? null : cell.data,
         updatedAt: cell.updatedAt,
         error: cell.error,
@@ -191,11 +194,18 @@ function page(
  *   它只决定画面跟不跟随新结果（冻结见 ADR-60），不决定实例在不在。
  */
 function declared(core: RefreshCore, view: Page): Resource | undefined {
-  return core.snapshot().resources.find(resource => resource.declarers.has(view.demand))
+  return core.snapshot().resources.find(resource => resource.declarers.has(view.config))
 }
 
-function reader(core: RefreshCore, view: Page): boolean {
-  return core.isReader(view.demand)
+/**
+ * 这一页此刻有没有取数资格（环境 ＋ 开启意愿）。
+ *
+ * 注意这里**只问资格**：ADR-66 把「谁该跟随结果表」的读闸门搬到了适配层
+ * （`pending && isVisible`），核心不再回答那个问题——读闸门的效果由 tests/vue.test.ts 的 A05 用例证明。
+ */
+function eligible(core: RefreshCore, view: Page): boolean {
+  const key = view.key()
+  return key !== null && core.isEligible(view.config, view.url, key)
 }
 
 /**
@@ -308,6 +318,35 @@ test('A20 同一个 URL 在两处各声明一份定义仍然合并：只发一�
   assert.equal(core.snapshot().resources.length, 2)
 })
 
+test('A04/A05 配置原地改写不改变声明：改 every／暂停／配置非法，声明者都还在（ADR-66 的可变配置槽）', async () => {
+  const source = defineRefresh<{ id: number }, number>('/api/core/900')
+  const core = newCore(1, async () => 1)
+  const view = page(core, source)
+
+  view.submit({ id: 1 })
+  await settle()
+  const resource = declared(core, view)
+  assert.notEqual(resource, undefined)
+  assert.equal(resource?.declarers.size, 1)
+  assert.equal(view.key(), '{"id":1}')
+
+  view.set({ every: 5_000 }) // 改间隔：槽被原地改写，成员资格必须不变
+  await settle()
+  assert.equal(declared(core, view), resource, '还是同一个实例、同一份声明')
+  assert.equal(resource?.declarers.size, 1, '声明者数不变')
+
+  view.set({ enabled: false }) // 暂停：只失去资格，声明留着（A05）
+  await settle()
+  assert.equal(eligible(core, view), false)
+  assert.equal(resource?.declarers.size, 1, '暂停不撤销声明')
+  assert.equal(view.key(), '{"id":1}', '暂停不撤销身份')
+
+  view.set(null) // 配置非法：声明仍然留着（A04），修正后按到期恢复
+  await settle()
+  assert.equal(declared(core, view), resource, '配置非法不撤销声明')
+  assert.equal(core.snapshot().resources.length, 1, '声明还在：实例不回收')
+})
+
 test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>('/api/core/142')
@@ -332,11 +371,11 @@ test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（�
 
   view.submit({ id: 1 })
   await settle()
-  const before = view.demand.parameters
+  const before = view.key()
   const instance = declared(core, view)
 
   assert.equal(view.submit({ id: -1 }).status, 'rejected')
-  assert.equal(view.demand.parameters, before)
+  assert.equal(view.key(), before)
   assert.equal(declared(core, view), instance)
   // 校验失败不改动任何状态：旧身份仍然在后台继续取数；输入问题也不进结果表（ADR-51）。
   assert.equal(view.failedAt(), null, '参数被拒只走同步返回值')
@@ -347,7 +386,7 @@ test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（�
   })
   const victim = page(core, throwing)
   assert.equal(victim.submit({ id: 1 }).status, 'rejected')
-  assert.equal(victim.demand.parameters, null, '被拒的声明不改动状态')
+  assert.equal(victim.key(), null, '被拒的声明不改动状态')
   assert.equal(victim.failedAt(), null, '被拒的声明不产生失败')
 })
 
@@ -445,7 +484,7 @@ test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷
   await settle()
   await sleep(40)
   assert.equal(calls, 1, '暂停后不再有周期请求')
-  assert.equal(reader(core, view), false, '暂停即失去读者身份（画面冻结）')
+  assert.equal(eligible(core, view), false, '暂停即失去读者身份（画面冻结）')
   assert.notEqual(declared(core, view), undefined, '声明还在：实例与结果都不回收')
 
   view.refresh()
@@ -469,7 +508,7 @@ test('A04/A06 浏览器隐藏与组件失活只失去资格：要求被撤销、
 
   core.setVisible(false)
   await settle()
-  assert.equal(reader(core, view), false, '隐藏即失去读者身份')
+  assert.equal(eligible(core, view), false, '隐藏即失去读者身份')
   assert.notEqual(declared(core, view), undefined, '声明还在')
   assert.equal(core.snapshot().resources.length, 1, '隐藏只失去资格：实例与在途都留着（ADR-61）')
 
@@ -491,7 +530,7 @@ test('A06 组件失活撤销本页未完成的刷新要求，声明与实例都�
 
   view.set({ active: false })
   await settle()
-  assert.equal(reader(core, view), false, '失活即失去读者身份')
+  assert.equal(eligible(core, view), false, '失活即失去读者身份')
   assert.notEqual(declared(core, view), undefined, '声明还在')
   assert.equal(core.snapshot().resources.length, 1, '失活只失去资格：要求被撤销，实例不释放')
 })
@@ -511,7 +550,7 @@ test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实�
   await settle()
   assert.equal(signal?.aborted, false)
 
-  core.removeDemand(view.demand)
+  core.undeclare(view.config)
   assert.equal(signal?.aborted, true)
   assert.equal(core.snapshot().resources.length, 0)
   // 实例没了，但那次请求还在跑：它仍占着并发账本（`abandoned`），直到真实结束自己交还（ADR-65）。
@@ -519,6 +558,26 @@ test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实�
   assert.equal(core.snapshot().queued.length, 0)
 
   finish?.(9)
+  await settle()
+  assert.equal(core.snapshot().running.length, 0, '真实结束后交还槽位')
+})
+
+test('A06 卸载撤销这一页未完成的要求：要求还在就回收不了，所以先撤要求再摘声明', async () => {
+  const resolvers: Array<(value: number) => void> = []
+  const source = defineRefresh<{ id: number }, number>('/api/core/901')
+  const core = newCore(1, () => new Promise<number>(resolve => resolvers.push(resolve)))
+  const view = page(core, source)
+
+  view.submit({ id: 1 })
+  await settle()
+  view.refresh() // 先登记一次要求：它会让实例活到结算为止
+  await settle()
+  assert.equal(core.snapshot().resources[0]?.waiters.size, 1, '要求已登记')
+
+  core.undeclare(view.config)
+  assert.equal(core.snapshot().resources.length, 0, '卸载撤销要求与声明：实例当场回收')
+  assert.equal(core.snapshot().running.length, 1, '在途请求仍占着槽位，直到真实结束')
+  resolvers[0]?.(1)
   await settle()
   assert.equal(core.snapshot().running.length, 0, '真实结束后交还槽位')
 })
@@ -545,8 +604,8 @@ test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数
   assert.equal(view.last?.data, 1)
   assert.equal(calls, 1, '恢复读到历史结果，不重复取数')
 
-  core.removeDemand(view.demand)
-  core.removeDemand(other.demand)
+  core.undeclare(view.config)
+  core.undeclare(other.config)
   assert.equal(core.snapshot().resources.length, 0, '最后一个需求退出后实例与结果一起消失')
 })
 
@@ -582,11 +641,11 @@ test('A05 暂停只失去资格：已发起的刷新要求继续等当前请求�
 
   view.set({ enabled: false, every: 100_000 })
   await settle()
-  // 暂停只失去「自动取数」的资格；这一页此刻还持有未撤销的刷新要求，所以在要求结算之前**仍是读者**
-  // （ADR-60 的读者 = 有资格的声明 ∪ 未撤销要求；要求结算之后它才冻结）。
-  assert.equal(reader(core, view), true, '暂停但仍持有未撤销的刷新要求：读者身份保留到这次结算')
+  // 暂停只失去「自动取数」的资格（读者身份与画面冻结是适配层的事，由 tests/vue.test.ts 的 A05 用例证明；
+  // ADR-66 之后核心不再记「谁在等」，要求是身份级的一个位）。
+  assert.equal(eligible(core, view), false, '暂停即失去取数资格')
   assert.notEqual(declared(core, view), undefined, '声明还在')
-  assert.equal(core.snapshot().resources.length, 1, '刷新要求还没满足，实例不释放、在途不取消')
+  assert.equal(core.snapshot().resources.length, 1, '实例不释放、在途不取消')
 
   // 暂停不撤销已发起的刷新要求：它由当前这个请求的结果满足，既不另发一次也不必等下个周期。
   resolvers[0]?.(7)
@@ -597,7 +656,6 @@ test('A05 暂停只失去资格：已发起的刷新要求继续等当前请求�
   assert.equal(core.snapshot().results.length, 1, '声明还在：结果表条目保留（ADR-61）')
   assert.equal(view.last?.data, 7, '核心这一层：按身份仍能读到那一份结果')
   assert.equal(core.snapshot().resources.length, 1, '暂停不释放实例：声明还在')
-  assert.equal(reader(core, view), false, '要求已结算：暂停页不再是读者，画面冻结在最后一帧')
 })
 
 test('A13 共享请求失败：保留旧址、把失败写进该身份那一格、下个周期继续', async () => {
@@ -633,7 +691,7 @@ test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重
   rejecters[0]?.(new Error('down'))
   await settle()
   assert.ok(view.failedAt(), '失败写进该身份那一格：刷新没有回执')
-  assert.ok(reader(core, view), '资格与开启意愿都保留')
+  assert.ok(eligible(core, view), '资格与开启意愿都保留')
   assert.equal(resolvers.length, 1, '失败不自动重试')
 })
 
@@ -745,7 +803,7 @@ test('A11 交付面：null 之外的任何结果都整体替换，读者拿到�
   await settle()
   assert.deepEqual(late.last?.data, { rows: [1, 2] })
   assert.equal(late.last?.data, view.last?.data, '两个读者拿到的是结果表里同一个对象')
-  assert.equal(view.demand.parameters?.key, '{"id":1}')
+  assert.equal(view.key(), '{"id":1}')
 })
 
 test('A04/A17 两个协调者互不共享：同 Source 同参数各自取数', async () => {
@@ -795,13 +853,13 @@ test('A16 零回调：传输失败只写结果表，核心不认识页面也不�
   assert.equal(victim.error() instanceof Error, true, '原始异常原样带出')
   assert.equal(declared(core, victim)?.declarers.size, 2)
 
-  // 零回调（ADR-64）：`Demand` 只有数据，释放与销毁都不需要页面配合——下面这条在类型层面就钉住它。
-  core.removeDemand(victim.demand)
-  assert.equal(core.snapshot().demands.includes(victim.demand), false, '释放只动名册，不调用任何页面代码')
+  // 零回调（ADR-64）：配置槽只有数据，释放与销毁都不需要页面配合——下面这条在类型层面就钉住它。
+  core.undeclare(victim.config)
+  assert.equal(core.snapshot().declarers.includes(victim.config), false, '释放只动声明，不调用任何页面代码')
   assert.equal(declared(core, witness)?.declarers.size, 1, '另一个需求的声明不受影响')
-  const pure: Demand = { url: '/api/core/pure', config: null, parameters: null }
-  // @ts-expect-error `Demand` 没有回调字段：核心不持有任何可调用的东西（ADR-64）
-  const withCallback: Demand = { ...pure, cleanup: () => {} }
+  const pure: Config = { enabled: true, every: 1000, active: true }
+  // @ts-expect-error `Config` 没有回调字段：核心不持有任何可调用的东西（ADR-64、ADR-66）
+  const withCallback: Config = { ...pure, cleanup: () => {} }
   void withCallback
 })
 
@@ -818,11 +876,11 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
 
   core.dispose()
   assert.equal(core.isDisposed(), true)
-  assert.equal(core.snapshot().demands.length, 0, '销毁只动自己的名册：没有任何页面回调参与')
+  assert.equal(core.snapshot().declarers.length, 0, '销毁只动自己的名册：没有任何页面回调参与')
   assert.deepEqual(view.submit({ id: 2 }), { status: 'cancelled' })
   view.refresh()
   const empty = core.snapshot()
-  assert.deepEqual([empty.demands.length, empty.resources.length, empty.queued.length, empty.scheduled], [0, 0, 0, false])
+  assert.deepEqual([empty.declarers.length, empty.resources.length, empty.queued.length, empty.scheduled], [0, 0, 0, false])
 
   const delivered = view.writes()
   resolvers[0]?.(9)
@@ -839,7 +897,7 @@ test('A04/A05 配置非法时不取数、不刷新、不通知；声明仍在，
 
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
   await settle()
-  assert.equal(reader(core, view), false, '配置非法：没有资格，不算读者')
+  assert.equal(eligible(core, view), false, '配置非法：没有资格，不算读者')
   assert.equal(core.snapshot().resources.length, 1, '身份已声明（实例在册），但不取数')
   assert.equal(view.writes(), 0)
 
@@ -878,13 +936,13 @@ test('A18 参数编码与值域：键按 JSON 语义稳定排序，坏参数一�
     assert.throws(() => prepareParameters({ box }), /参数只能是普通对象、数组与 JSON 标量/, `${box.constructor.name} 被拒绝`)
     assert.equal(view.submit({ box }).status, 'rejected', `${box.constructor.name} 的提交被拒绝`)
   }
-  assert.equal(view.demand.parameters, null, '值域不合格的参数不改动任何状态')
+  assert.equal(view.key(), null, '值域不合格的参数不改动任何状态')
 
   // 循环引用编码不出身份：同样按非法参数拒绝，且不改动任何状态。
   const cyclic: Record<string, unknown> = {}
   cyclic.self = cyclic
   assert.equal(view.submit(cyclic).status, 'rejected')
-  assert.equal(view.demand.parameters, null)
+  assert.equal(view.key(), null)
 
   // 编码得出身份的参数照常接纳并取数。
   assert.equal(view.submit({ id: 1 }).status, 'accepted')

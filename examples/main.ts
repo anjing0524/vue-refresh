@@ -55,7 +55,7 @@ export interface HarnessBridge {
 /** 外壳的只读观测面；同样只给示例与测试用。 */
 export interface ShellBridge {
   inspect(): {
-    resources: number; demands: number; entries: number
+    resources: number; declarers: number; entries: number
     running: number; queued: number; scheduled: boolean
   }
   log(): { calls: CallLog[]; events: string[] }
@@ -311,7 +311,7 @@ function mountShell(): void {
     inspect() {
       const view = core!.snapshot()
       return {
-        resources: view.resources.length, demands: view.demands.length,
+        resources: view.resources.length, declarers: view.declarers.length,
         entries: view.results.length,
         running: view.running.length, queued: view.queued.length, scheduled: view.scheduled,
       }

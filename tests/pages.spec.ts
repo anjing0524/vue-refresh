@@ -184,8 +184,14 @@ test('双组件共享：1s/5s 同参共享、单页暂停后画面冻结、重�
   const inFlight = (await state(request)).find(row => row.id === second)!
   expect(inFlight.status).toBe('pending')
   await release(request, second)
-  // 乙的 every 是 5 秒，而画面按本页 every 采样（ADR-63）：这一份不是它的首查，最多要等一个周期才上屏。
-  await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + second}.00`, { timeout: 15_000 })
+  // 乙的 every 是 5 秒，而画面按本页 every 节流（ADR-67）：窗口用**结果时间戳之差**度量，
+  // 所以窗口内到达的 102 会被**故意跳过**——乙要等下一个距「已展示那一版」满 5 秒的写入才换画面。
+  // 那一次写入是乙自己的周期请求：等它出现（最多一个周期，所以给足预算）再放行，验证它跳过中间版本后仍跟到新结果。
+  await expect.poll(async () => lastId(await state(request), row => row.status === 'pending') ?? 0, { timeout: 12_000 })
+    .toBeGreaterThan(0)
+  const third = lastId(await state(request), row => row.status === 'pending')!
+  await release(request, third)
+  await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + third}.00`, { timeout: 15_000 })
   // 暂停页不是该身份的读者（既没订阅也没未撤销的要求），画面冻结在最后一帧——别人刷新的结果它不跟（ADR-60）。
   await expect(page.getByTestId('sp-price-甲')).toHaveText(`${100 + first}.00`)
 
@@ -225,7 +231,7 @@ test('双组件共享：1s/5s 同参共享、单页暂停后画面冻结、重�
   await page.getByTestId('sp-unmount-all').click()
   await expect.poll(async () => (await inspect(page)).resources).toBe(0)
   expect((await inspect(page)).entries).toBe(0)
-  expect((await inspect(page)).demands).toBe(0)
+  expect((await inspect(page)).declarers).toBe(0)
 
   // 重新进入两页：分区已删除，重新首查。
   await page.getByTestId('sp-remount').click()
@@ -267,6 +273,6 @@ test('A05/A14 无启停按钮，前次失败后在同一个同步块里开启意
   const background = (await state(request))[2]!
   expect(symbolOf(background)).toBe('B09-NEW')
   await release(request, background.id)
-  // 同上：b09 这一页 every 是 5 秒，且这不是它的首查结果，按采样最多等一个周期。
+  // 同上：b09 这一页 every 是 5 秒，且这不是它的首查结果，按节流要等新格距展示中那份满一个 every。
   await expect(page.getByTestId('b09-price')).toHaveText(`${100 + background.id}.00`, { timeout: 15_000 })
 })
