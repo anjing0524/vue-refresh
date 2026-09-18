@@ -13,17 +13,15 @@ export type ReadonlySnapshot<T> =
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
 
 /**
- * 固定资源定义：一个 URL 加上可选的参数准入规则。**取数由框架按 URL 发起**（`createRefreshManager`
- * 注入的 axios 实例发 POST，请求体就是参数值），所以定义里不再有取数函数；`T` 只用来携带这个接口的
- * 原始返回结构。
+ * 一个取数资源的**声明**：URL 字符串本身，带上它的参数类型 `P` 与原始返回结构 `T`。
  *
- * `validate` 写成**方法**而不是函数属性：方法参数按双变比较，具体 Source 因此可以直接进入框架的
- * 擦除视图，接收点不必留类型断言（代价见 ADR-24）。`P` 的值域约束见 DESIGN §4.1。
+ * 它**不是一个对象**：框架按 URL 发 POST、请求体就是参数值，所以声明里没有取数函数、没有准入规则、
+ * 也没有别的字段（ADR-74）。带 `P`／`T` 只为**在定义点声明一次**——`defineRefresh` 的返回值带上它们，
+ * `useRefresh` 从它推出句柄类型；直接写字符串字面量也行，但那时要在 `useRefresh` 上写明类型参数。
  */
-export interface RefreshSource<P extends object, T> {
-  /** 身份的一半：POST 的 URL 路径。参数值（请求体）是另一半，两者一起决定共享哪个实例。 */
-  readonly name: string
-  validate?(args: ReadonlySnapshot<P>): boolean
+export type RefreshSource<P, T> = string & {
+  readonly __params?: P
+  readonly __result?: T
 }
 
 /**

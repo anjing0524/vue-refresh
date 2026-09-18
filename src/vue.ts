@@ -6,7 +6,7 @@ import type { Pinia } from 'pinia'
 import { RefreshCore } from './core.ts'
 import type { Config, RefreshHttp, ResultCell } from './core.ts'
 import { prepareParameters } from './source.ts'
-import type { Parameters } from './source.ts'
+import type { JsonParameters, Parameters } from './source.ts'
 import { useRefreshStore } from './store.ts'
 import type {
   ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions, RefreshSource,
@@ -66,10 +66,11 @@ function applyConfig(target: Config, read: readonly [unknown, unknown, boolean])
  *
  * 必须在组件的 `setup` 中同步调用，且此前已安装一个存活的协调者。
  */
-export function useRefresh<P extends object, T>(
-  source: RefreshSource<P, T>,
+export function useRefresh<P extends JsonParameters<P>, T>(
+  url: RefreshSource<P, T>,
   options: RefreshOptions,
 ): RefreshHandle<P, T> {
+  if (url.length === 0) throw new TypeError('useRefresh 需要一个非空的 URL：它是身份的一半')
   if (!getCurrentInstance()) throw new Error('useRefresh 必须在组件的 setup 中同步调用')
   if (!current || current.isDisposed()) throw new Error('需要先安装一个存活的刷新协调者')
   const core = current
@@ -78,7 +79,7 @@ export function useRefresh<P extends object, T>(
 
   /**
    * 这一页在核心里的**全部内容**：一页一份配置快照，原地改写，按身份挂在实例的 `declarers` 里。
-   * 定义（含 `validate`）与参数准备留在这一层，核心因此不认识页面、也不执行任何调用方代码（ADR-64、ADR-66）。
+   * 参数准备留在这一层，核心因此不认识页面、也不执行任何调用方代码（ADR-64、ADR-66）。
    */
   const config: Config = { enabled: false, every: null, active: false }
 
@@ -128,13 +129,13 @@ export function useRefresh<P extends object, T>(
 
   watchEffect(() => {
     const key = identity.value
-    const cell = store.read(source.name, key ?? '')
+    const cell = store.read(url, key ?? '')
     // 从来没有写过这一格：没有可抄的东西，画面停在上一帧（不发布空副本）。
     if (key === null || cell === undefined) return
     // 读闸门：有资格（声明着它、配置有效、开启、激活且浏览器可见），或**还没读取过**（第一次，或
     // 刚点过刷新）且此刻浏览器可见。第二项就是「没有读取时间就直接读」——它是暂停页自己点刷新那
     // 一次能上屏的唯一机制（A05、G6）。入口闸在点的那一刻已经判过环境，所以这里不补 `active`。
-    if (!core.isEligible(config, source.name, key) && !(lastReadAt === null && core.isVisible())) return
+    if (!core.isEligible(config, url, key) && !(lastReadAt === null && core.isVisible())) return
     // 同一版不抄第二遍：格子的数据时间与失败位都跟画面里那份一样，就是「没有新东西」。它不需要另存
     // 状态——画面本身就是已经抄到的那一版；失败那一笔`updatedAt` 不动、只有失败位变，靠这一行才看得见。
     const shown = display.value
@@ -170,7 +171,7 @@ export function useRefresh<P extends object, T>(
     // 失活期都放行，画面在后台一路跟下去，「失活冻结」就没了（ADR-72）。
     // 这里**不需要**再叫醒副作用：它只由数据写入与换身份唤醒，配置变化只影响「下一份写入怎么判定」。
     const changed = identity.value
-    if (changed !== null && core.isEligible(config, source.name, changed)) lastReadAt = null
+    if (changed !== null && core.isEligible(config, url, changed)) lastReadAt = null
   }, { flush: 'sync', immediate: true })
 
   // 拆卸由这一层自己做：核心不再持有任何回调配额，所以释放时是这里主动停表、再把它摘出名册。
@@ -195,15 +196,15 @@ export function useRefresh<P extends object, T>(
     submit: args => {
       // 释放之后这一页不再产生任何事实（§2.4「取消只有一个来源（句柄或协调者已销毁）」）。
       if (released || core.isDisposed()) return { status: 'cancelled' }
-      // 参数准备（复制、值域、编码、`validate`）是这一层的活：输入问题在这里就地变成 `rejected`，
+      // 参数准备（复制、值域、编码）是这一层的活：输入问题在这里就地变成 `rejected`，
       // 核心拿到的一定是一份可用身份——它没有 try/catch，也不会执行调用方代码（ADR-64）。
       let parameters: Parameters
       try {
-        parameters = prepareParameters(args, source)
+        parameters = prepareParameters(args)
       } catch (error) {
         return { status: 'rejected', error }
       }
-      const result = core.submit(config, source.name, parameters)
+      const result = core.submit(config, url, parameters)
       if (result.status === 'accepted') {
         declared = parameters
         // 新身份的第一份内容不等窗口（换了身份就没有可比的上次读取时间）：否则慢页面上屏要等一个
@@ -219,7 +220,7 @@ export function useRefresh<P extends object, T>(
       if (key === null) return
       // 用户点名要的那一次不等窗口、也不问资格：把上次读取时间置 `null`，数据一到就抄——这就是
       // 「显式刷新一定会被看见」的全部机制（核心没有回执，所以只能这样问一声）。
-      if (core.refresh(config, source.name, key)) lastReadAt = null
+      if (core.refresh(config, url, key)) lastReadAt = null
     },
   }
 }

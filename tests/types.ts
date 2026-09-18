@@ -4,12 +4,10 @@ import type { RefreshSource } from '../src/index.ts'
 interface Params { account: string; symbol: string; filter?: { page: number } }
 interface Quote { price: number }
 // URL 与参数值决定身份；`Quote` 是**声明**的原始返回结构（框架不做响应转换，所以没有取数函数可绑定）。
-const source = defineRefresh<Params, Quote>('/api/quote', { validate: p => p.account.length > 0 })
+const source = defineRefresh<Params, Quote>('/api/quote')
 // Compile-only function: never executed outside component setup.
 function contract() {
   const task = useRefresh(source, { enabled: ref(true), every: ref(1000) })
-  // @ts-expect-error validation belongs to the fixed source definition
-  useRefresh(source, { enabled: ref(true), every: 1000, validate: () => true })
   task.submit({ account: 'demo', symbol: 'A', filter: { page: 1 } })
   // @ts-expect-error missing required interface field
   task.submit({ account: 'demo' })
@@ -47,8 +45,8 @@ function contract() {
   task.display.value!.failedAt = null
   // @ts-expect-error 失败不再由框架推送：`onError` 这一项已删除（ADR-63）
   useRefresh(source, { enabled: ref(true), every: ref(1000), onError: () => {} })
-  // Source 的成员是方法，按双变比较：具体 Source 可以直接进入框架的擦除视图
-  // （`RefreshSource<object, unknown>`），因此异构注册表不必在接收点保留类型断言。
+  // 具体 Source 是**带类型标记的字符串**（ADR-74），因此可以直接进入框架的擦除视图
+  // （`RefreshSource<object, unknown>`），异构注册表不必在接收点保留类型断言。
   const erased: RefreshSource<object, unknown> = source
   void erased
   // 反向的代价换了个位置：擦除视图仍然可以注册，但读出来的数据收不窄成具体 DTO。
@@ -58,7 +56,7 @@ function contract() {
   void erasedPrice
 }
 // @ts-expect-error 定义必须给出 URL：它是身份的一半，缺了就无法与其它资源区分
-defineRefresh<Params, Quote>({ validate: () => true })
+defineRefresh<Params, Quote>()
 // 参数值域（ADR-52）：对象型只能是普通对象或数组。这两条是**反向探针**——`JsonParameters` 的写法
 // 换个形状（例如加 `readonly` 修饰符）会静默失效，那时这两条 `@ts-expect-error` 会变成「未使用的指令」而报错。
 // @ts-expect-error Date 的内容对编码不可见，请传 ISO 字符串

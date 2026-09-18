@@ -107,13 +107,16 @@ async function measure() {
   await sleep(duration)
   const elapsed = performance.now() - started
   const view = core.snapshot()
-  const observed = { resources: view.resources.length, declarers: view.declarers.length, running: view.running.length }
+  const declarers = view.resources.reduce((total, resource) => total + resource.declarers.size, 0)
+  const observed = { resources: view.resources.length, declarers, running: view.running.length }
 
   app.unmount()
   manager.dispose()
   const after = core.snapshot()
   const residue = {
-    resources: after.resources.length, declarers: after.declarers.length, queued: after.queued.length,
+    resources: after.resources.length,
+    declarers: after.resources.reduce((total, resource) => total + resource.declarers.size, 0),
+    queued: after.queued.length,
     running: after.running.length, entries: after.results.length,
   }
   const heapAfter = process.memoryUsage().heapUsed

@@ -119,8 +119,9 @@ function page(
   initial: PartialConfig | null = {},
 ): Page {
   const table = tableOf(core)
-  const url = source.name
+  const url = source
   // 交给核心的只有数据：URL、配置快照与身份（参数准备在提交边界做）——与适配层同一分工（ADR-64、ADR-66）。
+  // `RefreshSource` 现在就是 URL 字符串本身（带类型），没有对象、也没有准入回调（ADR-74）。
   const config: Config = initial === null
     ? { enabled: false, every: null, active: false }
     : { ...DEFAULT_CONFIG, ...initial }
@@ -147,7 +148,7 @@ function page(
     submit: args => {
       let parameters: Parameters
       try {
-        parameters = prepareParameters(args, source)
+        parameters = prepareParameters(args)
       } catch (error) {
         return { status: 'rejected', error }
       }
@@ -291,11 +292,11 @@ test('A02 身份是「URL ＋ 完整参数值」：字段顺序无关，数组�
   assert.equal(calls, 2, '数组顺序影响身份')
 })
 
-test('A20 同一个 URL 在两处各声明一份定义仍然合并：只发一次取数，两个读者读到同一份结果', async () => {
+test('A20 同一个 URL 就是同一个身份：两处各声明一份定义仍然合并，只发一次取数', async () => {
   let calls = 0
-  // 两份定义：URL 相同，validate 是各自写的箭头函数（它跟参数走，不参与身份）。
-  const firstSource = defineRefresh<{ id: number }, number>('/api/core/identity', { validate: p => p.id > 0 })
-  const secondSource = defineRefresh<{ id: number }, number>('/api/core/identity', { validate: p => p.id >= 0 })
+  // 两份定义：URL 相同——`defineRefresh` 只做类型声明，返回值就是这个字符串，因此是同一个身份。
+  const firstSource = defineRefresh<{ id: number }, number>('/api/core/identity')
+  const secondSource = defineRefresh<{ id: number }, number>('/api/core/identity')
   const core = newCore(2, async () => { calls++; return 42 })
   const first = page(core, firstSource)
   const second = page(core, secondSource)
@@ -365,7 +366,7 @@ test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', a
 })
 
 test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（输入问题只走同步返回值）', async () => {
-  const source = defineRefresh<{ id: number }, number>('/api/core/159', { validate: args => args.id > 0 })
+  const source = defineRefresh<{ id: number }, number>('/api/core/159')
   const core = newCore(2, async () => 1)
   const view = page(core, source)
 
@@ -374,18 +375,17 @@ test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（�
   const before = view.key()
   const instance = declared(core, view)
 
-  assert.equal(view.submit({ id: -1 }).status, 'rejected')
+  // 值域外的容器（`Date`）在提交边界被拒：业务准入由调用方自己判，框架只管值域与编码。
+  assert.equal(view.submit({ id: new Date() }).status, 'rejected')
   assert.equal(view.key(), before)
   assert.equal(declared(core, view), instance)
   // 校验失败不改动任何状态：旧身份仍然在后台继续取数；输入问题也不进结果表（ADR-51）。
   assert.equal(view.failedAt(), null, '参数被拒只走同步返回值')
 
-  // 业务 validate 自己抛错时同样按 rejected 返回：异常由提交边界收住，不冒泡到调用方。
-  const throwing = defineRefresh<{ id: number }, number>('/api/core/159-throwing', {
-    validate: () => { throw new Error('bad rule') },
-  })
+  // 复制不出来（函数）时同样按 rejected 返回：异常由提交边界收住，不冒泡到调用方。
+  const throwing = defineRefresh<{ id: number }, number>('/api/core/159-throwing')
   const victim = page(core, throwing)
-  assert.equal(victim.submit({ id: 1 }).status, 'rejected')
+  assert.equal(victim.submit({ id: () => 1 }).status, 'rejected')
   assert.equal(victim.key(), null, '被拒的声明不改动状态')
   assert.equal(victim.failedAt(), null, '被拒的声明不产生失败')
 })
@@ -880,7 +880,8 @@ test('A16 零回调：传输失败只写结果表，核心不认识页面也不�
 
   // 零回调（ADR-64）：配置槽只有数据，释放与销毁都不需要页面配合——下面这条在类型层面就钉住它。
   core.undeclare(victim.config)
-  assert.equal(core.snapshot().declarers.includes(victim.config), false, '释放只动声明，不调用任何页面代码')
+  assert.equal(core.snapshot().resources.flatMap(resource => [...resource.declarers]).includes(victim.config), false,
+    '释放只动声明，不调用任何页面代码')
   assert.equal(declared(core, witness)?.declarers.size, 1, '另一个需求的声明不受影响')
   const pure: Config = { enabled: true, every: 1000, active: true }
   // @ts-expect-error `Config` 没有回调字段：核心不持有任何可调用的东西（ADR-64、ADR-66）
@@ -901,11 +902,19 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
 
   core.dispose()
   assert.equal(core.isDisposed(), true)
-  assert.equal(core.snapshot().declarers.length, 0, '销毁只动自己的名册：没有任何页面回调参与')
+  assert.equal(core.snapshot().resources.flatMap(resource => [...resource.declarers]).length, 0,
+    '销毁只动自己的名册：没有任何页面回调参与')
   assert.deepEqual(view.submit({ id: 2 }), { status: 'cancelled' })
   view.refresh()
   const empty = core.snapshot()
-  assert.deepEqual([empty.declarers.length, empty.resources.length, empty.queued.length, empty.scheduled], [0, 0, 0, false])
+  assert.equal(empty.scheduled, false, '销毁后没有残留的唤醒定时器')
+  // 备注：`declarers` 是 `resources[].declarers` 的派生物，已从 `snapshot()` 删除（ADR-74），
+  // 这条观测随之消失（销毁清 Timer 由 `dispose` 自己保证，见 DESIGN）。
+  assert.deepEqual([
+    empty.resources.flatMap(resource => [...resource.declarers]).length,
+    empty.resources.length,
+    empty.queued.length,
+  ], [0, 0, 0])
 
   const delivered = view.writes()
   resolvers[0]?.(9)
@@ -980,11 +989,9 @@ test('A18 参数编码与值域：键按 JSON 语义稳定排序，坏参数一�
  * 而 `Map.set` / `Set.add` / `Date.setTime` 写的是内部槽，规范上冻不住；框架私有那份既然不外发，
  * 就不需要任何「冻得住」的假设。
  */
-test('A19 参数副本：validate、每轮 load 与每个接收者各拿一份副本，改自己的不影响别人', async () => {
+test('A19 参数副本：每轮请求与每个接收者各拿一份副本，改自己的不影响别人', async () => {
   const seen: { id: number; tags: string[] }[] = []
-  const source = defineRefresh<{ id: number; tags: string[] }, number>('/api/core/748', {
-    validate: args => { (args as unknown as { tags: string[] }).tags.push('validate 改的'); return true },
-  })
+  const source = defineRefresh<{ id: number; tags: string[] }, number>('/api/core/748')
   const core = newCore(2, async (_url, body) => {
     const box = body as unknown as { id: number; tags: string[] }
     seen.push(box)
@@ -997,7 +1004,7 @@ test('A19 参数副本：validate、每轮 load 与每个接收者各拿一份�
   assert.equal(a.submit({ id: 1, tags: [] }).status, 'accepted')
   await settle()
   assert.deepEqual(seen[0]?.tags, ['load 改的'], 'load 改的是交给自己那份')
-  assert.deepEqual(a.last?.args, { id: 1, tags: [] }, 'validate 与 load 的改写都没有进到身份里')
+  assert.deepEqual(a.last?.args, { id: 1, tags: [] }, 'load 的改写没有进到身份里')
 
   a.refresh()
   await settle()
@@ -1033,24 +1040,16 @@ test('边界总账：运行期失败只走返回值或结果表这一格，公�
     assert.equal(core.snapshot().running.length, 0)
   }
 
-  // 参数侧：复制失败、编码不出、`validate` 拒绝，一律只给同步 `rejected`（不通知），也不产生实例。
-  const source = defineRefresh<object, number>('/api/core/800', {
-    validate: args => (args as { valid?: boolean }).valid !== false,
-  })
+  // 参数侧：复制失败、编码不出，一律只给同步 `rejected`（不通知），也不产生实例。
+  const source = defineRefresh<object, number>('/api/core/800')
   const core = newCore(1, async () => 1)
   const view = page(core, source)
   const cyclic: Record<string, unknown> = {}
   cyclic.self = cyclic
-  for (const bad of [cyclic, { f: () => 1 }, { valid: false }]) {
+  for (const bad of [cyclic, { f: () => 1 }]) {
     let status = ''
     assert.doesNotThrow(() => { status = view.submit(bad).status })
     assert.equal(status, 'rejected')
-  }
-  for (const validate of [
-    (): never => { throw new Error('校验炸') },
-    (): never => Promise.resolve(true) as never,
-  ]) {
-    assert.equal(page(newCore(1, async () => 1), defineRefresh<object, number>('/api/core/813', { validate })).submit({}).status, 'rejected')
   }
   assert.equal(view.failedAt(), null, '输入非法一律不进结果表')
   assert.equal(core.snapshot().resources.length, 0)

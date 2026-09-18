@@ -87,17 +87,11 @@ function readList(body: unknown, page: number): ListResult {
   return { rows, page, requestId: data.requestId }
 }
 
-const MARKETS = ['SH', 'SZ', 'HK']
+// 参数准入由调用方在 `submit` 之前自己判（框架不再替调用方跑任何回调，ADR-74），因此这里只有 URL：
+// 声明一次参数类型与原始返回结构，同一个 URL 的多次声明合并成同一个实例。
+export const listSource = defineRefresh<ListParams, ListResult>('/api/list')
 
-export const listSource = defineRefresh<ListParams, ListResult>('/api/list', {
-  // validate 属于资源定义：所有使用方共用同一套业务规则，只检查业务条件。
-  validate: p => p.account.length > 0 && MARKETS.includes(p.market)
-    && Number.isSafeInteger(p.page) && p.page >= 1,
-})
-
-export const quoteSource = defineRefresh<QuoteParams, QuoteResult>('/api/quote', {
-  validate: p => p.account.length > 0 && p.symbol.length > 0,
-})
+export const quoteSource = defineRefresh<QuoteParams, QuoteResult>('/api/quote')
 
 /** 相对时间按当前时刻重算（随交付重渲染）；页面不为此自建 Timer。 */
 export function ageLine(updatedAt: number): string {

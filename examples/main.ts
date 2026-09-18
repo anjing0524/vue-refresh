@@ -107,9 +107,8 @@ function mountHarness(): void {
       events.push(`请求${id}：执行结束`)
     }
   }
-  const source = defineRefresh<QuoteParams, Quote>('/api/quote', {
-    validate: params => params.account.length > 0 && params.symbol.length > 0,
-  })
+  // 参数准入由调用方在 `submit` 之前自己判（框架不再跑任何调用方回调，ADR-74）。
+  const source = defineRefresh<QuoteParams, Quote>('/api/quote')
   // 传输：框架只要求一个 post；controlled 模式的手动结算就在这个函数里。
   const http: RefreshHttp = {
     post: async (_url, body, { signal }) => ({ data: await readQuote(body as QuoteParams, { signal }) }),
@@ -311,9 +310,12 @@ function mountShell(): void {
     inspect() {
       const view = core!.snapshot()
       return {
-        resources: view.resources.length, declarers: view.declarers.length,
+        resources: view.resources.length,
+        // 声明者数＝各实例声明者之和（`snapshot()` 不再单列一个派生字段）。
+        declarers: view.resources.flatMap(resource => [...resource.declarers]).length,
         entries: view.results.length,
-        running: view.running.length, queued: view.queued.length, scheduled: view.scheduled,
+        running: view.running.length, queued: view.queued.length,
+        scheduled: view.scheduled,
       }
     },
     log: () => ({ calls: log.calls.map(call => ({ ...call })), events: [...log.events] }),

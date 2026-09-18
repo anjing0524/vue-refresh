@@ -318,7 +318,6 @@ export class RefreshCore {
 
   /** 只读计数投影：给演示面板、基准脚本与集成测试看状态。**不属于包契约**，也不提供改状态的入口。 */
   snapshot(): {
-    declarers: readonly Config[]
     resources: readonly Resource[]
     results: readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[]
     queued: readonly Resource[]
@@ -326,15 +325,10 @@ export class RefreshCore {
     scheduled: boolean
     flushing: boolean
   } {
-    const resources: Resource[] = []
-    const declarers: Config[] = []
-    for (const resource of this.identities.values()) {
-      resources.push(resource)
-      for (const config of resource.declarers) declarers.push(config)
-    }
+    // `declarers` 不再单列：它是 `resources[].declarers` 的派生物（ADR-74）。`scheduled`／`flushing`
+    // 留着——它们各自观测一个推不出来的内部事实（队列已空但唤醒 Timer 已排、正在一轮 flush 中）。
     return {
-      declarers,
-      resources,
+      resources: [...this.identities.values()],
       results: this.sink.list(),
       queued: [...this.queue],
       running: [...this.running],

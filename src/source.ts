@@ -2,7 +2,7 @@ import stringify from 'fast-json-stable-stringify'
 import type { ReadonlySnapshot, RefreshSource } from './public-types.ts'
 
 /**
- * 参数边界：固定资源定义（`defineRefresh`）与提交边界的一次准备（`prepareParameters`）。
+ * 参数边界：提交边界的一次准备（`prepareParameters`）。
  *
  * 两条根需求是**身份稳定**（同样参数值共享同一次请求）与**隔离**（任何持有者都改不到别人的参数）；
  * 值域、标量语义与「为什么对象型只收普通对象或数组」见 DESIGN §4.1。
@@ -10,7 +10,7 @@ import type { ReadonlySnapshot, RefreshSource } from './public-types.ts'
 
 /** 一次已准备的请求参数。 */
 export interface Parameters {
-  /** 提交边界复制的**框架私有副本**，不外发；每个消费者（`validate`／`load`／`display`）各拿一份副本。 */
+  /** 提交边界复制的**框架私有副本**，不外发；每一轮请求与每个 `display` 各拿一份副本（ADR-52）。 */
   readonly args: object
   /** 完整参数值的稳定编码；key 表示数据范围，不是实例生存期 id。 */
   readonly key: string
@@ -24,21 +24,20 @@ type JsonValue = string | number | boolean | null | undefined | readonly JsonVal
  *
  * 写成同态映射类型而不是 `Record<keyof P, …>`（后者会把可选字段变成必填）；`tests/types.ts` 里有反向探针。
  */
+export type { JsonParameters }
+
+/** 组件刷新的参数类型（`useRefresh` 的 `P`）必须整体落在 `JsonValue` 里；`tests/types.ts` 里有反向探针。 */
 type JsonParameters<P> = { [K in keyof P]: JsonValue }
 
 /**
- * 声明一种固定业务资源：`name` 是取数目标的 URL，`validate` 是参数准入规则。
+ * 声明一个取数资源：给它一个 URL，并在这里**声明一次**参数类型与原始返回结构。
  *
- * 身份就是 URL 与参数值，**同一个 URL 声明多少次都合并到同一个实例**；`definition` 仍建议放模块级常量，
- * 免得每个调用点各写一份 `validate`。空 URL 会把所有资源并成一条，因此在定义点直接拒绝。
+ * 返回值就是那个 URL 字符串（`RefreshSource` 只是带类型的别名，没有运行期结构、也不冻结任何对象）；
+ * 身份是「URL ＋ 参数值」，同一个 URL 声明多少次都合并到同一个实例。空 URL 会在 `useRefresh` 被拒
+ * （它会把所有资源并成一条），这里不做运行期检查。
  */
-export function defineRefresh<P extends JsonParameters<P>, T>(
-  name: string,
-  definition: { validate?: (args: ReadonlySnapshot<P>) => boolean } = {},
-): RefreshSource<P, T> {
-  if (typeof name !== 'string' || name.length === 0) throw new TypeError('defineRefresh 需要一个非空的 URL')
-  // 不冻结调用方对象：框架只持有复制出来的私有副本。
-  return Object.freeze({ name, validate: definition.validate })
+export function defineRefresh<P extends JsonParameters<P>, T>(url: string): RefreshSource<P, T> {
+  return url
 }
 
 /** 值域检查：对象型参数只能是普通对象或数组——`Date`／`Map`／`Set`／`RegExp`／`ArrayBuffer` 这类容器一律拒绝。 */
@@ -64,26 +63,17 @@ function parameterKey(input: object): string | null {
 }
 
 /**
- * 提交边界只执行一次：复制 → 值域检查 → 编码身份键 → 可选业务校验（消费者各拿副本）。
+ * 提交边界只执行一次：复制 → 值域检查 → 编码身份键（各消费者拿自己的副本）。
  *
- * 四步中任何一步失败（值域不合格、`validate` 返回假值或抛错、复制失败、编码不出身份）都抛错，
- * 由 `submit` 按非法参数拒绝，不产生实例或后台任务。
+ * 任何一步失败（值域不合格、复制失败、编码不出身份）都抛错，由 `submit` 按非法参数拒绝，
+ * 不产生实例或后台任务。**业务层面的准入由调用方自己在 `submit` 之前判**：输入是它自己的东西，
+ * 框架不再替它跑任何回调（ADR-74）。
  */
-export function prepareParameters(input: object, source?: RefreshSource<object, unknown>): Parameters {
+export function prepareParameters(input: object): Parameters {
   const args: object = structuredClone(input)
   assertJsonValue(args, new WeakSet())
   // 编码只有这一处入口：`parameterKey` 与提交边界共用同一条规则。
   const key = parameterKey(args)
   if (key === null) throw new TypeError('参数无法稳定编码：存在循环引用或无法序列化的值')
-  if (source?.validate) {
-    // 框架私有那份不外发：`validate` 拿到自己的副本，改不到身份键所描述的那份值（ADR-52）。
-    const valid: unknown = source.validate(structuredClone(args))
-    if (typeof valid !== 'boolean') {
-      // 返回 Promise 属于契约违约：同步抛错是给调用方的主信号，那个 Promise 也要观察掉，避免未处理拒绝。
-      void Promise.resolve(valid).catch(() => {})
-      throw new TypeError('validate 必须同步返回布尔值')
-    }
-    if (!valid) throw new TypeError('参数未通过 validate 校验')
-  }
   return { args, key }
 }

@@ -158,7 +158,9 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await until(async () => (await d.snapshot()).queued === 1, 'new task queues')
     await sleep(200)
     const blocked = await d.snapshot()
-    check(blocked.running === 1 && blocked.calls.length === 1 && !blocked.pending && !blocked.timer, 'a full slot must queue without spinning')
+    // 「不自旋」的证据是这 200ms 里请求数没有增长（`calls.length === 1`）＋队列没被反复重建（`queued === 1`）；
+    check(!blocked.pending && !blocked.timer, '满槽时不自旋：既没有正在 flush，也没有唤醒定时器在跑')
+    check(blocked.running === 1 && blocked.calls.length === 1 && blocked.queued === 1, 'a full slot must queue without spinning')
     await d.resolve(1, 111)
     await until(async () => (await d.snapshot()).calls.length === 2, 'real empty slot advances queue')
     check(shown((await d.snapshot()).pages['甲']) === 111, 'the first request delivers to its own identity')
@@ -173,7 +175,8 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await d.resolve(1, 111)
     await until(async () => (await d.snapshot()).running === 0, 'late load settled')
     const now = await d.snapshot()
-    check(!now.resources && !now.queued && !now.timer && !Object.keys(now.entries).length && now.pages['甲'] === null, 'disposed state must stay empty')
+    check(!now.timer, '卸载清理之后没有残留的唤醒定时器')
+    check(!now.resources && !now.queued && !Object.keys(now.entries).length && now.pages['甲'] === null, 'disposed state must stay empty')
   } },
 
   { name: 'A04/A06 真实浏览器下祖先 KeepAlive 失活与受控 visibilitychange', async run(d) {

@@ -61,8 +61,7 @@ function newCore(maxConcurrent) {
 }
 
 const config = (enabled, every = 100_000, active = true) => ({ enabled, every, active })
-const source = defineRefresh('/api/trace', {})
-const params = args => prepareParameters(args, source)
+const params = args => prepareParameters(args)
 
 /** 一步一行：先打印这一步做了什么，再打印核心此刻的结构。 */
 function step(trace, label, core) {
@@ -74,7 +73,8 @@ function step(trace, label, core) {
     .map(row => `${row.key}:${row.cell.data === undefined ? 'nodata' : 'data'}${row.cell.failed ? '+failed' : ''}`)
     .sort()
   const order = view.queued.map(resource => resource.parameters.key).join(',')
-  trace.push(`${label} | resources=${view.resources.length} declarers=${view.declarers.length} queued=${queued}[${order}] running=${running} timer=${view.scheduled} cells=[${cells.join(',')}]`)
+  const declarers = view.resources.reduce((total, resource) => total + resource.declarers.size, 0)
+  trace.push(`${label} | resources=${view.resources.length} declarers=${declarers} queued=${queued}[${order}] running=${running} timer=${view.scheduled} cells=[${cells.join(',')}]`)
 }
 
 const trace = []
