@@ -1,4 +1,4 @@
-import type { RefreshCore, Resource, ResultCell } from '../../src/core.ts'
+import type { RefreshCore, Resource, ResultCell } from '../src/core.ts'
 
 /**
  * 观测面投影：核心私有账本的一份只读计数副本。
@@ -29,7 +29,7 @@ interface CoreLedger {
   readonly sink: { list(): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[] }
 }
 
-const SHAPE_HINT = '（tests/support/observe.ts 的形状视图要同步）'
+const SHAPE_HINT = '（scripts/observe.ts 的形状视图要同步）'
 
 /** 读一份核心的只读计数投影；核心内部形状漂移立刻抛错。 */
 export function snapshot(core: RefreshCore): Snapshot {

@@ -5,7 +5,7 @@ import type { Config, Resource, ResultCell, ResultSink } from '../src/core.ts'
 import { prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
 import type { RefreshDisplay, SubmitResult } from '../src/public-types.ts'
-import { snapshot } from './support/observe.ts'
+import { snapshot } from '../scripts/observe.ts'
 
 /** 每个用例结束时销毁核心：周期调度会留下唯一的唤醒 Timer，不销毁的话进程不会退出。 */
 const cores: RefreshCore[] = []
@@ -33,6 +33,7 @@ function newTable() {
         table.onWrite?.()
       },
       remove(url: string, key: string): void { cells.delete(id(url, key)) },
+      read(url: string, key: string): ResultCell | undefined { return cells.get(id(url, key)) },
       list(): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[] {
         const rows: { url: string; key: string; cell: ResultCell }[] = []
         for (const [raw, cell] of cells) {
@@ -41,7 +42,7 @@ function newTable() {
         }
         return rows
       },
-    } satisfies ResultSink,
+    } satisfies ResultSink & { list(): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[] },
     writes,
     onWrite: null as (() => void) | null,
     read(url: string, key: string): ResultCell | undefined { return cells.get(id(url, key)) },

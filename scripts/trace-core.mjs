@@ -9,7 +9,7 @@
 // 运行：node scripts/trace-core.mjs [> 轨迹文件]
 import { RefreshCore } from '../src/core.ts'
 import { prepareParameters } from '../src/source.ts'
-import { snapshot } from '../tests/support/observe.ts'
+import { snapshot } from './observe.ts'
 
 /** 结果表替身：记录写入顺序，只暴露「结构」。 */
 function newTable() {

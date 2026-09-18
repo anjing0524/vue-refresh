@@ -6,7 +6,7 @@ import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import type { RefreshHttp } from '../src/core.ts'
 import type { RefreshDisplay, RefreshFailure, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
 import type { Ref } from 'vue'
-import { snapshot } from './support/observe.ts'
+import { snapshot } from '../scripts/observe.ts'
 
 /** 这几个用例验证浏览器路径：`install` 无条件注册可见性监听（本库只服务 SPA），因此先提供最小替身。 */
 Object.defineProperty(globalThis, 'document', {

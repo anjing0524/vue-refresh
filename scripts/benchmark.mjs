@@ -19,7 +19,7 @@ import { createRenderer, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore } from '../src/vue.ts'
 import { useRefresh } from '../src/vue.ts'
-import { snapshot } from '../tests/support/observe.ts'
+import { snapshot } from './observe.ts'
 
 const option = (name, fallback) => {
   const index = process.argv.indexOf(`--${name}`)

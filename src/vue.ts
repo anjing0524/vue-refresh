@@ -1,7 +1,6 @@
 import {
   getCurrentInstance, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, watch, watchEffect,
 } from 'vue'
-import type { App } from 'vue'
 import type { Pinia } from 'pinia'
 import { RefreshCore } from './core.ts'
 import type { Config, RefreshHttp, ResultCell } from './core.ts'
@@ -15,14 +14,14 @@ import type {
 /** Vue 适配层：把响应式配置与组件生命周期翻译成核心的登记与调度，并把结果表接到 Pinia。 */
 
 /**
- * 当前安装的协调者与它的结果表（两者同源）。`null` ＝ 没有存活的协调者。
+ * 当前安装的协调者（SPA 单例）。`null` ＝ 没有存活的协调者。
  * 它是读取副作用的依赖：协调者退场时置空，每一页因此重新判一次闸门。
  */
-const installed = shallowRef<{ readonly core: RefreshCore; readonly store: ReturnType<typeof useRefreshStore> } | null>(null)
+const installed = shallowRef<RefreshCore | null>(null)
 
 /** 读此刻活着的协调者；页面入口与演示面板、基准脚本共用这一个读点。 */
 export function currentCore(): RefreshCore | null {
-  return installed.value?.core ?? null
+  return installed.value
 }
 
 /** 读这一页的两个 `Ref` ＋ 生命周期；读不出或抛错都回 `[undefined, undefined, active]`。 */
@@ -54,12 +53,10 @@ export function useRefresh<P extends JsonParameters<P>, T>(
 ): RefreshHandle<P, T> {
   if (url.length === 0) throw new TypeError('useRefresh 需要一个非空的 URL：它是身份的一半')
   if (!getCurrentInstance()) throw new Error('useRefresh 必须在组件的 setup 中同步调用')
-  if (installed.value === null || installed.value.core.isDisposed()) throw new Error('需要先安装一个存活的刷新协调者')
-  // 协调者在页面里一律现读，这里只留结果表。
-  const { store } = installed.value
+  if (installed.value === null) throw new Error('需要先安装一个存活的刷新协调者')
 
   /** 本页此刻报给哪个协调者；`null` ＝ 此刻没有活着的协调者。 */
-  let slot: RefreshCore | null = installed.value.core
+  let slot: RefreshCore | null = installed.value
 
   /** 这一页在核心里的全部内容：一页一份配置快照，按身份挂在实例的 `declarers` 里。 */
   const config: Config = { enabled: false, every: null, active: false }
@@ -73,11 +70,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     viewer.reconcile()
   }
 
-  /** 本页此刻按哪个身份读结果；由提交成功那一刻确立。 */
-  const identity = shallowRef<string | null>(null)
-
-  /** 本页已提交身份的私有副本；`display.args` 从它复制。 */
-  let declared: Parameters | null = null
+  /** 本页已提交的声明（身份键 ＋ 参数副本）；`null` ＝ 还没提交过。 */
+  const submitted = shallowRef<Parameters | null>(null)
 
   /** 这一页是否已被释放；释放后 `submit`／`refresh` 一概不产生事实。 */
   let released = false
@@ -90,7 +84,7 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   let lastReadAt: number | null = null
 
   /** 数据出口：同一版不抄第二遍，只发布窗口已到的那一版。 */
-  const publishData = (cell: ResultCell): void => {
+  const publishData = (cell: ResultCell, parameters: Parameters): void => {
     const shown = display.value
     if (shown !== null && cell.updatedAt === shown.updatedAt) return
     // 窗口没到就不换画面；没有可比的时间（从未成功、或本页还没读到过）直接读。
@@ -98,9 +92,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     if (lastReadAt !== null && every !== null
       && cell.updatedAt !== null
       && lastReadAt + every > cell.updatedAt) return
-    if (declared === null) return
     display.value = {
-      args: structuredClone(declared.args) as unknown as ReadonlySnapshot<P>,
+      args: structuredClone(parameters.args) as unknown as ReadonlySnapshot<P>,
       data: cell.updatedAt === null ? null : cell.data as ReadonlySnapshot<T>,
       updatedAt: cell.updatedAt,
     }
@@ -118,10 +111,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     // 先读安装槽：它同时是这个副作用唯一的失效信号。
     const bound = installed.value
     // 换了协调者：槽跟着换，下一拍配置报给新的那一个。必须在任何提前返回之前。
-    if (bound !== null && bound.core !== slot) {
-      slot = bound.core
-    }
-    const key = identity.value
+    if (bound !== null && bound !== slot) slot = bound
+    const params = submitted.value
     // 没有协调者：两个出口一起清回 `null`。
     if (bound === null) {
       display.value = null
@@ -129,16 +120,16 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       lastReadAt = null
       return
     }
-    // 身份还没落定：没有可抄的格，也没有依赖可登记。
-    if (key === null) return
+    // 还没提交过：没有可抄的格，也没有依赖可登记。
+    if (params === null) return
     // 先读这一格（这一次读同时登记依赖），后面的写入才唤得醒这个副作用。
-    const cell = bound.store.read(url, key)
+    const cell = bound.readResult(url, params.key)
     // 没有写过这一格：画面停在上一帧。
     if (cell === undefined) return
     // 读闸门：有资格，或还没读取过且浏览器可见。
-    if (!bound.core.isEligible(config, url, key) && !(lastReadAt === null && bound.core.isVisible())) return
+    if (!bound.isEligible(config, url, params.key) && !(lastReadAt === null && bound.isVisible())) return
     publishFailure(cell)
-    publishData(cell)
+    publishData(cell, params)
   }, { flush: 'sync' })
 
   /** 这一页是否挂载/激活（KeepAlive 失活为假）。 */
@@ -150,8 +141,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     // 重新成为读者时清掉读取基准，下一份写入就不等窗口；失去资格那一侧不动。
     const viewer = currentCore()
     if (viewer === null) return
-    const changed = identity.value
-    if (changed !== null && viewer.isEligible(config, url, changed)) lastReadAt = null
+    const changed = submitted.value
+    if (changed !== null && viewer.isEligible(config, url, changed.key)) lastReadAt = null
   }, { flush: 'sync', immediate: true })
 
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。
@@ -163,7 +154,7 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     stopWatching()
     // 摘声明要摘「上一拍报给的那个协调者」。
     slot?.undeclare(config)
-    identity.value = null
+    submitted.value = null
   })
 
   return {
@@ -181,20 +172,19 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       }
       const result = bound.submit(config, url, parameters)
       if (result.status === 'accepted') {
-        declared = parameters
         // 新身份的第一份内容不等窗口。
         lastReadAt = null
-        identity.value = parameters.key
+        submitted.value = parameters
       }
       return result
     },
     refresh: () => {
       const bound = currentCore()
       if (released || bound === null) return
-      const key = identity.value
-      if (key === null) return
+      const params = submitted.value
+      if (params === null) return
       // 显式刷新不等窗口：清掉读取基准，数据一到就抄。
-      if (bound.refresh(config, url, key)) lastReadAt = null
+      if (bound.refresh(config, url, params.key)) lastReadAt = null
     },
   }
 }
@@ -211,31 +201,26 @@ export function createRefreshManager(options: {
   const store = useRefreshStore(options.pinia)
   // 结果表的四个动作签名与核心的端口一致，直接把 store 交进去。
   const core = new RefreshCore(options.maxConcurrent, options.axios, store)
-  /** 这个协调者装到了哪个 App；同一个实例只能装一个。 */
-  let boundApp: App | null = null
   /** 摘掉可见性监听。 */
   let stopWatchingVisibility: (() => void) | null = null
 
-  /** 从模块级的安装槽里退场；只有还装着「我」的时候才置空。 */
+  /** 从模块级的安装槽里退场。 */
   const uninstall = (): void => {
     stopWatchingVisibility?.()
     stopWatchingVisibility = null
-    if (installed.value !== null && installed.value.core === core) installed.value = null
+    if (installed.value === core) installed.value = null
   }
 
   return {
-    /** 安装到应用：接上可见性监听与卸载释放；同一实例只能装到一个 App。 */
+    /** 安装到应用：接上可见性监听与卸载释放。SPA 单例，已有存活实例时拒绝。 */
     install(app) {
-      if (core.isDisposed() || (boundApp !== null && boundApp !== app)) {
-        throw new Error('刷新协调者安装冲突：同一个实例不能安装到两个 App，已销毁的实例也不能再安装')
-      }
-      if (boundApp === app) return // 同实例同 App 重复安装无副作用。
-      // 单例：现有协调者还活着就拒绝；已销毁就直接替换。
-      if (installed.value !== null && !installed.value.core.isDisposed() && installed.value.core !== core) {
+      if (core.isDisposed()) throw new Error('已销毁的刷新协调者不能再安装')
+      const current = installed.value
+      if (current === core) return // 同一个实例重复安装无副作用。
+      if (current !== null && !current.isDisposed()) {
         throw new Error('刷新协调者安装冲突：同一进程里已有一个存活的实例')
       }
-      installed.value = { core, store }
-      boundApp = app
+      installed.value = core
 
       // 浏览器可见性由框架自己监听。
       const onVisibilityChange = (): void => core.setVisible(!document.hidden)

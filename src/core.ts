@@ -28,8 +28,8 @@ export interface ResultSink {
   /** 写失败：保留这一格已有的数据，只换掉失败那一对字段。 */
   fail(url: string, key: string, error: unknown, failedAt: number): void
   remove(url: string, key: string): void
-  /** 只读列举：给观测面用，不是包契约。 */
-  list(): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[]
+  /** 读这一格；读取面（适配层）用它。 */
+  read(url: string, key: string): ResultCell | undefined
 }
 
 /** 一个「URL ＋ 参数值」的共享实例：这个身份的全部状态与判定。它不持有核心、也不持有页面。 */
@@ -54,7 +54,7 @@ export class Resource {
   }
 
   /** 环境允许：这一页激活、配置有效、浏览器可见（与「开启意愿」是两件事）。 */
-  isPresent(config: Config, visible: boolean): boolean {
+  private isPresent(config: Config, visible: boolean): boolean {
     return visible && config.every !== null && config.active
   }
 
@@ -79,7 +79,7 @@ export class Resource {
   }
 
   /** 有效间隔现算：有资格的声明者里最小的 `every`；没有就是 `Infinity`。 */
-  eligibleEvery(visible: boolean): number {
+  private eligibleEvery(visible: boolean): number {
     let every = Infinity
     for (const config of this.declarers) {
       if (!this.isEligible(config, visible)) continue
@@ -225,6 +225,11 @@ export class RefreshCore {
   /** 这一份配置此刻有没有取数资格。 */
   isEligible(config: Config, url: string, key: string): boolean {
     return this.find(url, key)?.isEligible(config, this.visible) ?? false
+  }
+
+  /** 读这一格的结果；读取面（适配层）用它。 */
+  readResult(url: string, key: string): ResultCell | undefined {
+    return this.sink.read(url, key)
   }
 
   /** 释放一页：撤销它的声明；没人要了就就地回收。 */

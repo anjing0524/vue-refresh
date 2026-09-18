@@ -4,7 +4,7 @@ import type { Component } from 'vue'
 import type { RefreshHandle } from '../src/public-types'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue'
 import type { RefreshCore, RefreshHttp } from '../src/core'
-import { snapshot } from '../tests/support/observe'
+import { snapshot } from '../scripts/observe'
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
 import { demoHttp, log } from './sources'
