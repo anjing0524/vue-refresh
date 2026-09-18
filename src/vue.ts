@@ -4,8 +4,9 @@ import {
 import type { App } from 'vue'
 import type { Pinia } from 'pinia'
 import { RefreshCore } from './core.ts'
-import type { Config, Handle, RefreshHttp, ResultCell } from './core.ts'
+import type { Config, Demand, RefreshHttp, ResultCell } from './core.ts'
 import { prepareParameters } from './source.ts'
+import type { Parameters } from './source.ts'
 import { useRefreshStore } from './store.ts'
 import type {
   ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions, RefreshSource,
@@ -65,15 +66,10 @@ export function useRefresh<P extends object, T>(
   const store = currentStore
   if (!store) throw new Error('需要先安装一个存活的刷新协调者')
 
-  // Manager 保存异构 Source。P/T 只在这个适配边界还原：本句柄的 Source 不变，
-  // 且 DTO 的所有权已经在结果表那一侧定下来。
-  const handle: Handle<P, T> = {
-    source,
-    config: null,
-    cleanup: null,
-    parameters: null,
-  }
-  core.addHandle(handle)
+  // 交给核心的只有**数据**：URL、配置快照与已声明的身份。定义（含 `validate`）与参数准备留在这一层，
+  // 核心因此不认识页面、也不执行任何调用方代码（ADR-64）。
+  const demand: Demand = { url: source.name, config: null, parameters: null }
+  core.addDemand(demand)
 
   /**
    * 本页此刻按哪个身份读结果：由提交成功那一刻确立。
@@ -89,7 +85,7 @@ export function useRefresh<P extends object, T>(
   /**
    * 本页看到的画面：**某一拍的副本**，按本页 `every` 从结果表抄来。
    *
-   * - **读者才跟随**：`core.isReader(handle)`（声明着且够资格，或它上面有无撤销的刷新要求）为真时才抄；
+   * - **读者才跟随**：`core.isReader(demand)`（声明着且够资格，或它上面有无撤销的刷新要求）为真时才抄；
    *   暂停、失活、卸载中都不是读者，画面**冻结在最后一帧**。暂停页自己 `refresh()` 那一次仍在要求里，
    *   而且那一次不等拍（`immediate`），所以照样更新画面（A05、G6）。
    * - **按本页频率采样**（ADR-63）：脉搏每 `every` 毫秒敲一次，一拍最多抄一次；两拍之间结果表里的新版本
@@ -118,13 +114,13 @@ export function useRefresh<P extends object, T>(
     const cell = store.read(source.name, key ?? '')
     pulse.value
     eligible.value
-    if (key === null || cell === undefined || !core.isReader(handle)) return
+    if (key === null || cell === undefined || !core.isReader(demand)) return
     // 这一格既没成功过也没失败过：没有可抄的东西，画面停在上一帧（不发布空副本）。
     if (cell.entry === null && cell.failure === null) return
     if (cell === sampled) return
     // 本拍已经抄过、又不欠拍：让画面留到下一拍再看表（这就是「按本页频率采样」）。
     if (!immediate && pulse.value === sampledPulse) return
-    const parameters = handle.parameters
+    const parameters = demand.parameters
     if (parameters === null) return
     display.value = {
       args: structuredClone(parameters.args) as unknown as ReadonlySnapshot<P>,
@@ -154,25 +150,30 @@ export function useRefresh<P extends object, T>(
   const restartPulse = (config: Config | null): void => {
     stopPulse()
     if (config === null || !config.enabled || !config.active) return
-    pulseTimer = setInterval(() => { pulse.value += 1 }, Math.min(MAX_PULSE_DELAY, config.every))
+    pulseTimer = setInterval(() => {
+      // 协调者已经不在了（HMR、会话切换）：脉搏自己停掉，不必让核心回头叫这一页。
+      if (core.isDisposed()) { stopPulse(); return }
+      pulse.value += 1
+    }, Math.min(MAX_PULSE_DELAY, config.every))
   }
 
   // 唯一的配置写入口：两个 `Ref` ＋ 这一页的激活状态合成一份快照，再按当前资格协调。
   // 非法配置不通知——它是本页自己的输入事实，页面读自己的 refs 就知道；框架只负责不订阅、
   // 不请求，修正后自动恢复（ADR-51）。`active` 也在依赖里，所以挂载/激活/失活只需改它。
   const stopWatching = watch(() => readConfig(options, active.value), config => {
-    handle.config = config
-    core.reconcile(handle)
+    demand.config = config
+    core.reconcile(demand)
     eligible.value += 1
     // 配置或生命周期刚变：下一份内容不等拍（失活恢复直接读回、修正非法配置后立刻上屏都在这里）。
     immediate = true
     restartPulse(config)
   }, { flush: 'sync', immediate: true })
 
+  // 拆卸由这一层自己做：核心不再持有任何回调配额，所以释放时是这里主动停表、再把它摘出名册。
   if (core.isDisposed()) {
     stopWatching()
     stopPulse()
-  } else handle.cleanup = () => { stopWatching(); stopPulse() }
+  }
 
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。
   // 只改 `active`：快照、协调与脉搏由上面那个 `flush: 'sync'` 的 watcher 完成（单一写入口）。
@@ -180,25 +181,35 @@ export function useRefresh<P extends object, T>(
   onActivated(() => { active.value = true })
   onDeactivated(() => { active.value = false })
   onScopeDispose(() => {
-    core.removeHandle(handle)
+    stopWatching()
+    stopPulse()
+    core.removeDemand(demand)
     identity.value = null
   })
 
   return {
     display,
     submit: args => {
-      const result = core.submit(handle, () => prepareParameters(args, source))
+      // 参数准备（复制、值域、编码、`validate`）是这一层的活：输入问题在这里就地变成 `rejected`，
+      // 核心拿到的一定是一份可用身份——它没有 try/catch，也不会执行调用方代码（ADR-64）。
+      let parameters: Parameters
+      try {
+        parameters = prepareParameters(args, source)
+      } catch (error) {
+        return { status: 'rejected', error }
+      }
+      const result = core.submit(demand, parameters)
       if (result.status === 'accepted') {
         // 新身份的第一份内容不等拍：否则慢页面上屏要等一个 `every`，看起来像坏了。
         immediate = true
-        identity.value = handle.parameters?.key ?? null
+        identity.value = demand.parameters?.key ?? null
       }
       return result
     },
     refresh: () => {
       // 用户点名要的那一次不等拍：结果一到就抄（这是「显式刷新一定会被看见」的全部机制）。
       immediate = true
-      core.refresh(handle)
+      core.refresh(demand)
     },
   }
 }
@@ -226,6 +237,8 @@ export function createRefreshManager(options: {
     list: () => store.list(),
   })
   let installed: App | null = null
+  /** 摘掉可见性监听；装上过一次之后才有。核心不再持有任何回调，所以这由适配层自己收尾（ADR-64）。 */
+  let stopWatchingVisibility: (() => void) | null = null
 
   return {
     /** 安装到应用：接上可见性监听与卸载释放；同一实例只能装到一个 App。 */
@@ -245,11 +258,15 @@ export function createRefreshManager(options: {
       // 浏览器可见性由框架自己监听；本库是 SPA，不再有 SSR 分支。
       const onVisibilityChange = (): void => core.setVisible(!document.hidden)
       document.addEventListener('visibilitychange', onVisibilityChange)
-      core.setCleanup(() => document.removeEventListener('visibilitychange', onVisibilityChange))
+      stopWatchingVisibility = () => document.removeEventListener('visibilitychange', onVisibilityChange)
       core.setVisible(!document.hidden)
-      app.onUnmount(() => core.dispose())
+      app.onUnmount(() => { stopWatchingVisibility?.(); core.dispose() })
     },
 
-    dispose: () => core.dispose(),
+    dispose: () => {
+      stopWatchingVisibility?.()
+      stopWatchingVisibility = null
+      core.dispose()
+    },
   }
 }

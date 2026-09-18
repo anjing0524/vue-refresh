@@ -225,7 +225,7 @@ test('双组件共享：1s/5s 同参共享、单页暂停后画面冻结、重�
   await page.getByTestId('sp-unmount-all').click()
   await expect.poll(async () => (await inspect(page)).resources).toBe(0)
   expect((await inspect(page)).entries).toBe(0)
-  expect((await inspect(page)).handles).toBe(0)
+  expect((await inspect(page)).demands).toBe(0)
 
   // 重新进入两页：分区已删除，重新首查。
   await page.getByTestId('sp-remount').click()

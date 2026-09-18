@@ -15,22 +15,22 @@
 ```text
 public-types.ts            公共类型的唯一代码定义与状态取值常量；不依赖运行时模块
 source.ts                  固定资源定义（URL ＋ 参数准入）、提交边界准备与稳定键
-core.ts                    跨实例的协调者（注册表、名册、队列与并发、调度）＋ 一个身份的 Resource 类
+core.ts                    跨实例的协调者（注册表、需求名册、队列与并发、调度）＋ 一个身份的 Resource 类
 store.ts                   结果表（Pinia 模块级定义）：URL → 参数键 两级分组，整条替换，随实例释放即删
-vue.ts                     组件适配与安装：配置快照、句柄、生命周期、可见性、结果表接线
+vue.ts                     组件适配与安装：配置快照、需求（`Demand`）登记、生命周期、可见性、结果表接线
 index.ts                   包入口（三个函数与 7 个公共类型；没有常量对象）
 ```
 
 依赖方向单向：`public-types` ← `source` ← `core` ← `store` ← `vue` ← `index`。
 核心不依赖 Vue 或任何状态库，也不 import 任何 HTTP 客户端：取数用的 axios 实例由 `createRefreshManager` 注入，
-`core.ts` 只调它的 `post`。**`store.ts` 是唯一 import Pinia 的模块**，核心只经 `ResultSink` 的三个动作碰结果表。运行期只依赖 `fast-json-stable-stringify`（零依赖，参数键的确定性编码）。这条方向由 `pnpm check:docs` 校验：
+`core.ts` 只调它的 `post`。**`store.ts` 是唯一 import Pinia 的模块**，核心只经 `ResultSink` 的四个动作碰结果表。运行期只依赖 `fast-json-stable-stringify`（零依赖，参数键的确定性编码）。这条方向由 `pnpm check:docs` 校验：
 **运行期边必须严格向下**，同层或向上的运行期边必须同时在 `check-docs.mjs` 与本节登记，否则直接失败；
 类型回边只报告（运行期被擦除）。本版没有需要登记的例外边。
 
 `core.ts` 按职责分成七个分段：状态观测与生命周期、页面操作、观测面、需求关系、后台执行、刷新要求、调度。
-全部可变状态分三处：跨实例的挂在协调者上（注册表、名册、队列与并发、唯一唤醒 Timer），
+全部可变状态分三处：跨实例的挂在协调者上（注册表、需求名册、队列与并发、唯一唤醒 Timer），
 一个身份自己的在 `Resource` 类里（订阅、刷新要求、到期与当前任务），**结果住结果表**（`store.ts`，唯一真值）；
-越过实例边界只调核心的三个入口（`enqueue` / `releaseIfUnused` / `writeResult`）。
+越过实例边界只调核心的四个入口（`enqueue` / `releaseIfUnused` / `writeResult` / `writeFailure`）。
 `vue.ts` 只读公开入口、模块级单例（当前协调者与结果表）与结果表的读出口，`source.ts` 是无状态函数的边界。
 
 ## 2. 模块职责
@@ -39,9 +39,9 @@ index.ts                   包入口（三个函数与 7 个公共类型；没�
 |---|---|
 | `public-types.ts` | 公共契约类型（判别联合，没有常量对象）与 `RefreshSource`（成员是方法，靠双变进入框架的擦除视图） |
 | `source.ts` | `defineRefresh`（声明点用 `JsonParameters` 约束参数值域）、`Parameters`、`assertJsonValue`（值域检查：对象型限普通对象或数组）、`prepareParameters`（复制 → 值域检查 → 稳定编码 → 执行来源的 `validate`，消费者各拿副本）、定位 `parameterKey`；稳定编码用 `fast-json-stable-stringify` |
-| `core.ts` | `RefreshCore`：跨实例的协调者——实例注册表、句柄名册、唯一 Timer 与 FIFO 队列、并发槽、结果表写入端、只读计数投影；`Resource`：一个身份自己的状态与操作（订阅、刷新要求、到期、当前任务、成功与失败结算、回收），越过实例边界只调核心的三个入口（`enqueue` / `releaseIfUnused` / `writeResult`） |
-| `store.ts` | 结果表：模块级 `defineStore`，`URL → 参数键 → Entry` 两级分组，`shallowRef` 整条替换；写入端给内核（`write` / `remove` / `list`），读出口给页面（`read`） |
-| `vue.ts` | `useRefresh`（配置快照、句柄、指向结果表的 Display、生命周期）、`createRefreshManager`（安装、可见性监听、结果表接线、销毁） |
+| `core.ts` | `RefreshCore`：跨实例的协调者——实例注册表、需求名册、唯一 Timer 与 FIFO 队列、并发槽、结果表写入端、只读计数投影；`Resource`：一个身份自己的状态与操作（订阅、刷新要求、到期、当前任务、成功与失败结算、回收），越过实例边界只调核心的四个入口（`enqueue` / `releaseIfUnused` / `writeResult` / `writeFailure`） |
+| `store.ts` | 结果表：模块级 `defineStore`，`URL → 参数键 → Entry` 两级分组，`shallowRef` 整条替换；写入端给内核（`write` / `fail` / `remove` / `list`），读出口给页面（`read`） |
+| `vue.ts` | `useRefresh`（配置快照、内部需求（`Demand`）登记与公开 `RefreshHandle`、指向结果表的 Display、生命周期）、`createRefreshManager`（安装、可见性监听、结果表接线、销毁） |
 | `index.ts` | 包导出：三个函数、逐个列出的 7 个公共类型（不用 `export type *`）；工具型别名不导出 |
 
 ### 2.1 调用链路
@@ -55,11 +55,11 @@ useRefresh（组件 setup）
   ├─ refresh  → 入口闸（销毁／配置非法／失去存在／无身份）→ 实例 → 刷新要求
   │             → 有当前请求就直接用它的结果，没有才登记一次共享任务
   ├─ 读取面   → 采样脉搏（周期＝本页 every）＋ 三个不等拍的边沿 → store.read（已声明身份）→ 整格抄进 display
-  └─ 生命周期 → onMounted / onActivated / onDeactivated 改写配置快照里的 `active`；onScopeDispose → removeHandle ＋ 停脉搏
+  └─ 生命周期 → onMounted / onActivated / onDeactivated 改写配置快照里的 `active`；onScopeDispose → removeDemand ＋ 停脉搏
 
 reconcile  = coordinate ＋ flushSoon（两步必须分开：coordinate 在 flush 里也会跑，那里不能再排 flush）
 coordinate → 有身份就登记为**声明者**（挂载期间一直算）；没有资格就不再是读者并结算未完成的刷新要求，但不撤销声明
-flush      → 四步：coordinateAll（协调句柄）→ enqueueDue（到期入队并收齐最早到期时刻）→ startQueued（按 FIFO 占槽启动）→ scheduleWakeup（安排唯一唤醒 Timer）
+flush      → 四步：coordinateAll（协调需求）→ enqueueDue（到期入队并收齐最早到期时刻）→ startQueued（按 FIFO 占槽启动）→ scheduleWakeup（安排唯一唤醒 Timer）
 runTask    → http.post(URL, 参数副本) → 复核任务身份 → Resource.settle：写结果表 ＋ 记结算时刻 ＋ 结算这一批要求 → finally：清计时、释放槽位、补未满足的要求、再调度
 expire     → 上限到期：先撤销在册身份 → abort → 按请求失败结算 → 补后继 → 再调度
 Resource.settle  → 先写结果表（唯一真值），再结算这一批刷新要求（顺序不能反：结算可能让实例当场释放，而释放会删掉刚写的条目）
@@ -72,7 +72,7 @@ display（读取面）→ 一拍最多发布一次：读结果表 → 比对上�
 
 需求侧对应：`U01`–`U03` → `submit` 与 `resourceFor`；`U04`–`U06` → `coordinate`、`dropDeclaration`、`releaseIfUnused`；
 `U07`–`U10` → `Resource.dueAt`、`flush`、`runTask`、`expire`；`U11`–`U13` → `Resource.settle`（写结果表）、`Resource.fail`（写失败那一格）、`useRefreshStore`；
-`U14` → `refresh`、`Resource.clearRequest`、`clearRefreshes`、`Resource.refill`；`U15` → `prepareParameters`、`parameterKey`；`U16`–`U18` → `isolate`、`dispose`、`display` 的采样脉搏。
+`U14` → `refresh`、`Resource.clearRequest`、`clearRefreshes`、`Resource.refill`；`U15` → `prepareParameters`、`parameterKey`；`U16`–`U18` → `vue.ts` 提交边界（参数准备与 `validate` 的抛错就地变同步 `rejected`）、`dispose`、`display` 的采样脉搏。
 
 ## 3. 数据模型
 
@@ -83,31 +83,32 @@ display（读取面）→ 一拍最多发布一次：读结果表 → 比对上�
 ```mermaid
 flowchart LR
   Source[Source 固定业务定义] --> Parameters[Parameters 快照与 key]
-  Handle[Handle 页面需求] --> Params[parameters: 已声明身份]
-  Handle --> Config[config: 配置快照]
-  Handle -. 按身份读 .-> Table[结果表: URL → 参数键 → Entry]
-  Resource[Resource 共享实例] --> Decl[declarers: 声明该身份的句柄]
+  Source -. url .-> Demand[Demand 页面需求]
+  Demand --> Params[parameters: 已声明身份]
+  Demand --> Config[config: 配置快照]
+  Demand -. 按身份读 .-> Table[结果表: URL → 参数键 → Entry]
+  Resource[Resource 共享实例] --> Decl[declarers: 声明该身份的需求]
   Resource --> Waiters[waiters: 刷新要求]
   Resource --> Task[task: 当前执行]
-  Resource -. 成功写、释放删 .-> Table
-  Resource -. 三个入口 .-> Core[RefreshCore 注册表 / 名册 / 队列 / 槽位]
+  Resource -. 成功写、失败写、释放删 .-> Table
+  Resource -. 四个入口 .-> Core[RefreshCore 注册表 / 需求名册 / 队列 / 槽位]
   Core -. sink .-> Table
 ```
 
-`Handle.parameters` 是**声明的身份**，`Resource.parameters` 是**实例建立时用的参数**：前者是需求，后者是事实，
-不是同一份数据的两个副本。需求关系**只有一处事实**——实例侧 `declarers` 的成员资格（谁声明了这个身份），句柄上没有指向实例的
-反向字段，所以不存在「两侧一致」这类需要维护的不变量（ADR-57 删掉了旧的 `Handle.subscription`）。
+`Demand.parameters` 是**声明的身份**，`Resource.parameters` 是**实例建立时用的参数**：前者是需求，后者是事实，
+不是同一份数据的两个副本。需求关系**只有一处事实**——实例侧 `declarers` 的成员资格（谁声明了这个身份），需求上没有指向实例的
+反向字段，所以不存在「两侧一致」这类需要维护的不变量（ADR-57 删掉了旧的 `subscription` 字段）。
 **声明与资格是两件事**：声明由挂载/卸载与身份变化驱动；资格（配置开启、这一页激活、浏览器可见）只决定要不要取数，
 现算、不维护第二份集合（ADR-61）。
 
 `Resource` 是**类**而不是字段集合：一个身份内的转换都定义在它自己身上，核心不替它做决定；两者之间只有
-三个入口（`enqueue` / `releaseIfUnused` / `writeResult`）——核心因此不再需要中间接口，实例直接调它（ADR-42、ADR-44）。
+四个入口（`enqueue` / `releaseIfUnused` / `writeResult` / `writeFailure`）——核心因此不再需要中间接口，实例直接调它（ADR-42、ADR-44）。
 **结果不在实例上**：它住结果表，读的人按已声明身份自己取，因此没有「交付」这一步，也没有逐个接收者的副本（ADR-59）。
 
 ### 3.2 身份
 
 - URL（`RefreshSource.name`）＋ `Parameters.key` 定位实例；同一个 URL 与同一份参数值就是同一个实例，因此两处各写一份定义也照样合并。实例的生存期由订阅与刷新要求共同决定。
-- **没有第二套计数**：任务、结果与刷新要求都不记版本或代次，公开通知也不带「由谁触发」
+- **没有第二套计数**：任务、结果与刷新要求都不记版本或代次，读取面也不带「由谁触发」的标记
   （ADR-43 删掉等待者的版本下限、ADR-45 删掉任务版本、ADR-47 删掉声明代次）。
 
 ### 3.3 持久字段与唯一所有者
@@ -118,12 +119,12 @@ flowchart LR
 |---|---|---|
 | Source | `name`（取数 URL，身份的一半）、可选 `validate`；定义时冻结 | `defineRefresh` 唯一建立（URL 必须非空）；所有使用方释放引用后回收 |
 | Parameters | `args`、`key`；框架私有，不外发 | 提交边界复制/查值域/编码；外发给消费者（`validate`／每轮请求体）时各复制一份；`display.args` 每次读取再复制一份（它是身份键那份值）；需求与实例释放后回收 |
-| Handle | 组 A 端口与配置：`source` / `config=null`；组 B 状态：`parameters=null`；组 C 接驳：`cleanup=null` | 三种角色分开看（**本表是这三组角色的权威定义**）：**组 A** 适配层提供、核心只读——`source` 创建时给全，`config` 是会变的快照字段（适配层每读到新值就改写，核心只读字段、不调 getter）；**组 B** 核心独占写入，适配层只给初值、从不读；**组 C** `cleanup` 是唯一双向成员：适配层在 watcher 就绪后写一次（晚于 `addHandle` 才产生），核心在 `removeHandle` 读、清、调。**三件事不存字段**：「句柄是否已释放」是 `RefreshCore.handles` 的名册成员资格（§3.7），「声明了哪个身份」是那个实例 `declarers` 的成员资格（§3.5 第 1 条，ADR-57），「有没有资格」由配置快照（`enabled` / `active`）与核心的全局可见性现算（ADR-61）。**`publish`（ADR-59）与 `onError`（ADR-63）都已删除**：框架不再调用任何页面交付或失败通知回调——成功与失败都写在结果表上，页面按自己的节拍读；`Handle` 的两个类型参数此后只服务于适配层的类型还原 |
-| Resource | 类：`core`（只用它三个入口）、`source`、`parameters`、`declarers` 空集合、`waiters` 空集合（`Set<Handle>`）、`settledAt=null`、`task=null` | 首次声明创建；**一个身份只保留一份参数对象**：首次声明采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`declarers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果表条目、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `eligibleEvery` / `isEligible` / `settle` / `fail` / `clearRequest` / `refill`；核心越出实例边界只碰三个字段：`task`（只经 `placeTask`，§3.5 第 4 条）、`declarers` 与 `waiters` 的增删（`coordinate` / `dropDeclaration` / `refresh`） |
+| Demand | 一组数据（**没有回调**）：`url`（取数 URL，身份的一半，适配层从定义点取）、`config=null`（配置快照，适配层写、核心只读）、`parameters=null`（已声明身份，核心独占写入） | 适配层给 `url` 与 `config`，核心独占写 `parameters`；核心不 import 定义对象，也不持有释放回调，因此不执行任何调用方代码——参数准入与准备都在适配层的提交边界完成（ADR-64）。**三件事不存字段**：「需求是否已释放」是 `RefreshCore.demands` 的名册成员资格（§3.7），「声明了哪个身份」是那个实例 `declarers` 的成员资格（§3.5 第 1 条，ADR-57），「有没有资格」由配置快照（`enabled` / `active`）与核心的全局可见性现算（ADR-61）。**`publish`（ADR-59）、`onError`（ADR-63）与 `cleanup`（ADR-64）都已删除**：框架不再调用任何页面交付、失败通知或释放回调——成功与失败都写在结果表上，页面按自己的节拍读，页面的拆卸由适配层自己做；公开 `RefreshHandle` 的两个类型参数此后只服务于适配层的类型还原 |
+| Resource | 类：`core`（只用它四个入口）、`url`、`parameters`、`declarers` 空集合、`waiters` 空集合（`Set<Demand>`）、`settledAt=null`、`task=null` | 首次声明创建；**一个身份只保留一份参数对象**：首次声明采用该需求声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`declarers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果表条目、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `eligibleEvery` / `isEligible` / `settle` / `fail` / `clearRequest` / `refill`；核心越出实例边界只碰三个字段：`task`（只经 `placeTask`，§3.5 第 4 条）、`declarers` 与 `waiters` 的增删（`coordinate` / `dropDeclaration` / `refresh`） |
 | Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；位置（在队／在跑／被弃／已结算）只由 `placeTask` 迁移；`finally` 交还真实槽位，`expire` 提前交还 |
 | 结果表（`store.ts`） | `cells`：`URL → 参数键 → ShallowRef<ResultCell \| undefined>`，`ResultCell = { entry\|null, failure\|null }`；初值 `undefined` | 模块级 `defineStore`，一个 Pinia 实例一张表；写入端只由内核用（`writeResult` 写成功、`writeFailure` 写失败、`releaseIfUnused` 删、`snapshot` 列举），读出口是 `read`；**整格换新对象**（`shallowRef`，格与 `Entry` 都当不可变用）——读取面比较引用就知道变没变，因此不引版本号（ADR-63）；失败**保留**已有的 `entry`；实例释放时只把格置 `undefined`（cell ref 不删，依赖关系才稳定），条目随之消失（A06） |
-| RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `snapshot` / `isDisposed` / `dispose`），**另加四个给实例用的入口** `enqueue` / `releaseIfUnused` / `writeResult` / `writeFailure`，以及给适配层的一个只读判定 `isReader`（都是 public 但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理 |
-| 配置快照 | `config`（`{ enabled, every, active }`，初值 `null`＝非法） | 由 `vue.ts` 里唯一的配置 watcher 写进 `Handle.config`——两个调用方的 `Ref` 与「这一页是否激活」合成一份快照（单一写入口），随句柄与组件作用域释放。核心只读这个字段，不重新调用业务 getter（ADR-57、ADR-61） |
+| RefreshCore | `buckets` / `demands` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addDemand` / `removeDemand` / `setVisible` / `reconcile` / `submit` / `refresh` / `snapshot` / `isDisposed` / `dispose`），**另加四个给实例用的入口** `enqueue` / `releaseIfUnused` / `writeResult` / `writeFailure`，以及给适配层的一个只读判定 `isReader`（都是 public 但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理。**核心不持有任何回调**（`setCleanup` 随 ADR-64 删除）：可见性监听的拆卸由适配层自己做（§6.3） |
+| 配置快照 | `config`（`{ enabled, every, active }`，初值 `null`＝非法） | 由 `vue.ts` 里唯一的配置 watcher 写进 `Demand.config`——两个调用方的 `Ref` 与「这一页是否激活」合成一份快照（单一写入口），随需求与组件作用域释放。核心只读这个字段，不重新调用业务 getter（ADR-57、ADR-61） |
 
 `snapshot()` 是给演示面板与集成测试的只读计数投影（集合是副本，元素仍是核心对象），
 不属于包契约，也不提供改状态的入口。
@@ -135,43 +136,43 @@ flowchart LR
 | `submit` 接纳 | 参数通过后整体替换身份 | 参数被拒不改动任何状态；替换时先用旧身份结算刷新要求再退订 |
 | 配置变化 | 适配层先写快照（含这一页的 `active`），核心按新资格重算 | 写结果表 / abort 可能重入；资格判断本身无副作用 |
 | 隐藏 / 失活 / 暂停 | 撤销本页未完成的刷新要求（没有回执），失去资格 | 声明不撤销：实例、结果与在途都留着；恢复时读回已有结果 |
-| `refresh` 接纳 | 把本句柄加进实例的要数集合，并在没有当前请求时登记一次任务 | 有请求就直接用它的结果；与自动刷新同一条路径；没有回执 |
+| `refresh` 接纳 | 把本需求加进实例的要数集合，并在没有当前请求时登记一次任务 | 有请求就直接用它的结果；与自动刷新同一条路径；没有回执 |
 | 后台成功 | 记结算时刻、把结果写进结果表、结算这一批要求 | 每次外部写入后复核任务归属；**先落结果再结算要求**（结算可能释放实例并删掉刚写的条目）；页面在结果表上按身份自己读 |
 | 后台失败 | 记结算时刻、把失败写进结果表同一格（已有的 `entry` 保留）、结算全部未完成要求 | 不推送：页面的 `display.failure` 由读取面按自己的节拍取走；下个周期继续 |
 | 上限到期 | 先撤销在册身份再 abort 与结算 | 迟到的结束因身份已失效被完全忽略 |
 | 最后一个声明者离开 | 删除注册、结果表条目、排队项并 abort 在途 | 真实结束的任务在自己的 `finally` 里释放槽位 |
-| `dispose` | 先置 `disposed`，再释放句柄、实例、队列、Timer 与监听 | 幂等；迟到执行只能清自己的槽位 |
+| `dispose` | 先置 `disposed`，再释放需求、实例、队列与 Timer | 幂等；迟到执行只能清自己的槽位；可见性监听由适配层自己摘（核心不持有回调） |
 
 ### 3.5 必须成立的不变量
 
 每条都注明**由谁保证**：读代码时按这里的符号名定位，不必先自己反推。
 
-1. 需求关系只有一处事实：句柄在某实例的 `declarers` 里 ⟺ 它声明了该身份。登记只 `add`、撤销只 `delete`，没有第二份需要保持同步的副本；**资格不另存集合**，由 `config.enabled && config.active && RefreshCore.visible` 现算。（`coordinate` 登记、`dropDeclaration` 撤销；ADR-57、ADR-61）
+1. 需求关系只有一处事实：需求在某实例的 `declarers` 里 ⟺ 它声明了该身份。登记只 `add`、撤销只 `delete`，没有第二份需要保持同步的副本；**资格不另存集合**，由 `config.enabled && config.active && RefreshCore.visible` 现算。（`coordinate` 登记、`dropDeclaration` 撤销；ADR-57、ADR-61）
 2. 注册表只指向当前生存期的实例；实例被删除后不再被 `flush` 遍历到，也不接受新的订阅。（`resourceFor` 建立、`releaseIfUnused` 删桶）
 3. 每次调度都在**有资格的声明者**里现算 `every` 的最小值：没有有资格的声明者就不取数、不安排唤醒。不缓存间隔，也不缓存「下次到期」以外的派生值。（`Resource.dueAt` / `Resource.eligibleEvery`）
 4. 一个实例至多一个当前任务；任务的位置（在队／在跑／被弃／已结算）与它是不是「当前执行」只由 `placeTask` 一处改写，`enqueue`、`startQueued` 起跑、`runTask` 的 `finally`、`expire`、`releaseIfUnused` 都经它；abort 不释放槽位，`expire` 除外。**唯一的例外是 `dispose` 整表清空 `queue`**（`placeTask` 是队列的唯一写入者，所以队列里的任务恒为它实例的当前执行，`startQueued` 不再需要归属复核——ADR-56、ADR-62）
 5. 结果只来自该实例的当前任务的成功；删除后旧请求不得重建该实例。（`runTask` 在 `await` 之后与复制结果之后各复核一次，`Resource.settle` 只被它调用）
 6. 结果只由共享路径写入结果表（成功 `Resource.settle` → `RefreshCore.writeResult`，失败 `Resource.fail` → `RefreshCore.writeFailure`），写的是**同一个对象**，读的人拿到它也是同一个对象——要改自己复制；`display.args` 仍然每次读取复制一份。（ADR-59）
 7. 当前任务的正常成功/失败在写结果表之前更新 `settledAt`；取消与旧任务不更新。（`Resource.settle` 与 `Resource.fail` 的第一行）
-8. 订阅成立后 `handle.parameters === resource.parameters`：一个身份只保留一份参数对象，后加入者采用实例已持有的那一份。（`coordinate` 接入时改写句柄字段）
-9. `dispose` 后句柄、注册表、队列、结果表条目、Timer 与监听已清；未结束的执行到真实结束才移除。（`dispose` → 逐个 `removeHandle` → `buckets.clear`）
+8. 订阅成立后 `demand.parameters === resource.parameters`：一个身份只保留一份参数对象，后加入者采用实例已持有的那一份。（`coordinate` 接入时改写需求字段）
+9. `dispose` 后需求、注册表、队列、结果表条目与 Timer 已清（核心不持有监听或任何回调）；未结束的执行到真实结束才移除。（`dispose` → 逐个 `removeDemand` → `buckets.clear`）
 10. 框架上限由「开始执行时登记的一次性计时」表达；到期先撤销在册身份，之后任何迟到的结束都不再写事实。（`runTask` 的 `setTimeout` 与 `expire`）
 11. 注销只发生在声明与要求都空时，且空实例再也拿不到新的边：新声明只能落在 `resourceFor` 当前返回的实例上，新要求也一样。（`releaseIfUnused` 是唯一注销点；`coordinate` 与 `refresh` 都经 `resourceFor`）
-12. 有资格 ⟹ 配置快照有效：`enabled` 为真、`active` 为真、`every` 是正安全整数，且浏览器可见；因此最小间隔可以直接现算，不必在句柄或实例上另存一份。（`Resource.isEligible`）
+12. 有资格 ⟹ 配置快照有效：`enabled` 为真、`active` 为真、`every` 是正安全整数，且浏览器可见；因此最小间隔可以直接现算，不必在需求或实例上另存一份。（`Resource.isEligible`）
 13. 画面只在采样点上变：`display` 的每次发布都由「身份落定／重新成为读者／显式刷新／脉搏一拍」之一触发，一拍最多发布一次，发布的永远是当时结果表里的**整格**；两拍之间的新版本不改变画面，也不需要版本号——比较整格引用即可。（`vue.ts` 的 `display` 副作用、`pulse`、`immediate`；ADR-63）
 
 ### 3.6 刷新要求的唯一更新表
 
-`Resource.waiters` 是 `Set<Handle>`：**一个句柄此刻想要一次取数**。它是一个标志而不是队列——同一个句柄重复
+`Resource.waiters` 是 `Set<Demand>`：**一个需求此刻想要一次取数**。它是一个标志而不是队列——同一个需求重复
 刷新只留一份，而且**没有回执**（成功与失败都只经结果表，ADR-46、ADR-63）。
 
 | 事件 / 当前值 | 刷新要求更新 | 结果规则 |
 |---|---|---|
-| `refresh`（无论实例有没有当前请求） | 把本句柄加进集合 | 有请求就直接用它的结果（排队或已在执行都一样）；没有请求就当场登记一次。不 abort、不追发第二次 |
-| 同一实例多个句柄都要取数 | 各自保留 | 同一结果把它们一起满足 |
+| `refresh`（无论实例有没有当前请求） | 把本需求加进集合 | 有请求就直接用它的结果（排队或已在执行都一样）；没有请求就当场登记一次。不 abort、不追发第二次 |
+| 同一实例多个需求都要取数 | 各自保留 | 同一结果把它们一起满足 |
 | 任务成功 | 这一批要求全部移除 | 先把结果写进结果表，再移除这批要求 |
 | 任务失败或上限到期 | 该实例**全部**要求移除，并把失败写进这一格 | 旧结果保留，订阅与开启意愿保留，下个周期继续；页面按自己的节拍读到失败 |
-| 失去存在 / 卸载 / 销毁 | 撤销该句柄的要求，不通知 | `enabled` 边沿不撤销 |
+| 失去存在 / 卸载 / 销毁 | 撤销该需求的要求，不通知 | `enabled` 边沿不撤销 |
 | 实例再无订阅与要求 | 随最后一个要求移除而销毁实例 | 结果表条目同时删掉：不引入 TTL 或历史缓存 |
 
 一次失败的含义是「这次刷新没拿到新结果」：它撤销该实例**全部**未完成的要求并把失败写进这一格（不推送、不改开关），因此不会变成自动重试，
@@ -187,10 +188,10 @@ flowchart LR
 - 下次到期时刻由 `settledAt ＋ 当前最短 every` 现算，因此改频率立刻生效；`settledAt` 本身是事实（最近一次正常结束）。
 - 有效最短间隔由各订阅的 `every` 现算，不缓存。
 - 资格由「声明还在」「配置开启且有周期」「这一页激活」「浏览器可见」四组事实现算，不镜像 `enabled`，也不存第二份集合（`Resource.isEligible`）。
-- 句柄是否已释放由 `RefreshCore.handles` 的名册成员资格决定，不存字段：`removeHandle` 先出名册再产生外部效果，因此「名册里没有它」就等于「已释放」（ADR-54）。
-- 声明到哪个实例由该实例 `declarers` 的成员资格决定，句柄上不存反向字段；`resourceOf` 用句柄声明的身份现查注册表（ADR-57）。
-- 不交付「正在刷新」这类实时状态：读出口只给结果与它的产生时间。
-- 「我该看到哪一条」不另存：它由句柄当前声明的身份（`source.name` ＋ `parameters.key`）现查结果表得到（ADR-59）。
+- 需求是否已释放由 `RefreshCore.demands` 的名册成员资格决定，不存字段：`removeDemand` 先出名册再产生外部效果，因此「名册里没有它」就等于「已释放」（ADR-54）。
+- 声明到哪个实例由该实例 `declarers` 的成员资格决定，需求上不存反向字段；`resourceOf` 用需求声明的身份现查注册表（ADR-57）。
+- 不提供「正在刷新」这类实时状态：读出口只给结果与它的产生时间。
+- 「我该看到哪一条」不另存：它由需求当前声明的身份（`Demand.url` ＋ `parameters.key`）现查结果表得到（ADR-59）。
 - 「本页还跟不跟随结果表」不另存：由 `RefreshCore.isReader` 现判——订阅着该身份，或它上面有未撤销的刷新要求（ADR-60）。
 
 ### 3.8 状态取值与存放
@@ -202,10 +203,10 @@ flowchart LR
 |---|---|---|
 | 结果产生时间 | 墙钟 epoch 毫秒（不保证单调） | `Entry.updatedAt` → 读出口把它带进 `RefreshDisplay.updatedAt`；与调度的单调时间 `settledAt` 是两个域 |
 | 当前结果 | 每个身份一条 `Entry` / 没有 | **结果表**：`useRefreshStore().results[URL][参数键]`；写由 `Resource.settle`，删由 `releaseIfUnused`，读由页面按身份现查 |
-| 刷新要求 | 无 / 待满足（`Set<Handle>`） | `Resource.waiters` |
-| 当前声明 | 声明着 / 未声明 | **推导**：句柄是否在该实例的 `declarers` 里；`resourceOf` 按声明身份查注册表（ADR-57） |
-| 配置快照 | 有效 / 非法（`null`） | `Handle.config` 字段：适配层写入，核心只读 |
-| 组件激活、句柄已释放、浏览器可见、协调者已销毁 | true / false | `Handle.config.active`（并进配置快照，ADR-61）/ **推导**：`RefreshCore.handles` 的名册成员资格 / `RefreshCore.visible` / `RefreshCore.disposed` |
+| 刷新要求 | 无 / 待满足（`Set<Demand>`） | `Resource.waiters` |
+| 当前声明 | 声明着 / 未声明 | **推导**：需求是否在该实例的 `declarers` 里；`resourceOf` 按声明身份查注册表（ADR-57） |
+| 配置快照 | 有效 / 非法（`null`） | `Demand.config` 字段：适配层写入，核心只读 |
+| 组件激活、需求已释放、浏览器可见、协调者已销毁 | true / false | `Demand.config.active`（并进配置快照，ADR-61）/ **推导**：`RefreshCore.demands` 的名册成员资格 / `RefreshCore.visible` / `RefreshCore.disposed` |
 | 待唤醒调度 | 取消句柄 / `null`；已排 flush true / false | `RefreshCore.wakeup` / `flushing` |
 | 资源已结算 | 时刻 / `null`（从未结算） | `Resource.settledAt` |
 | 当前后台任务 | Task / `null` | `Resource.task` |
@@ -229,7 +230,7 @@ flowchart LR
 - 页面在结果表上读，所以 `settle` 返回时本页 `display` 已经能读到这次的结果。
 
 **二、最后退出与迟到的结束（`releaseIfUnused` 凭什么只判「都空」）**
-需求变空只有两个入口：`unsubscribe`（退订）与 `Resource.clearRequest`（要求被撤销或满足），`submit` / 隐藏 / 卸载
+需求关系变空只有两个入口：`dropDeclaration`（撤销声明）与 `Resource.clearRequest`（要求被撤销或满足），`submit` / 隐藏 / 卸载
 都经由它们。两者都调 `releaseIfUnused`，它只判 `declarers` / `waiters` 是否真的都空，然后注销这个键——
 **暂停、失活、隐藏都不撤销声明**，所以它们不会走到这一步（这正是「失活恢复直接读回」的原因，ADR-61）。
 不再另判「实例是否仍在册」：「都空」已经蕴含「在册」，因为注销是唯一的删除路径，而空实例再也拿不到新的边
@@ -237,11 +238,11 @@ flowchart LR
 **删结果表条目**、撤销当前执行、`abort` 在途；在跑的那次标为**被弃**——它仍占着并发槽位，直到迟到的结束自己交还，
 而当场交还就会让在途的请求与后来者并发；还在排队的任务同时从 `queue` 移除（`placeTask`，ADR-56）。
 `abort` 不承诺底层立刻结束，所以迟到的响应由 `runTask` 的身份复核（`resource.task !== task`）判为无效：
-不写结果、不发通知；它的 `finally` 只清自己的计时与槽位。
+不写结果、不动结果表；它的 `finally` 只清自己的计时与槽位。
 
 **三、上限到期（为什么先撤销身份再 abort）**
 `runTask` 从真正开始执行时登记一次性计时；到期走 `expire`，顺序是**先** `placeTask(task, 'settled')`
-（撤销当前执行并交还槽位），**再** `abort`、`Resource.fail`、`Resource.refill`。这个顺序就是全部要点：`abort` 与失败通知都会同步重入页面代码，
+（撤销当前执行并交还槽位），**再** `abort`、`Resource.fail`、`Resource.refill`。这个顺序就是全部要点：`abort` 与写失败那一格都会同步触发调用方代码（宿主在 `abort()` 时同步调用 `AbortSignal` 监听器；页面里同步的 watcher 读 `display` 又去 `refresh()`），
 而此刻这次执行的在册身份已被撤销，因此它在 `await` 之后的任何返回都被身份复核判为无效；槽位当场交还，
 不等底层结束——所以 `maxConcurrent` 约束的是**在册任务数**，不是底层连接数。
 
@@ -266,7 +267,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 
 ### 4.2 观测面
 
-`snapshot()` 是给演示面板、基准脚本与集成测试看的**只读计数投影**（不属于包契约）：句柄名册、实例数组、
+`snapshot()` 是给演示面板、基准脚本与集成测试看的**只读计数投影**（不属于包契约）：需求名册、实例数组、
 **结果表的一份扁平副本**（`results`：`url` / `key` / `cell` 三列，`cell = { entry\|null, failure\|null }`）、排队与在途任务、唯一唤醒 Timer 与「已排 flush」的布尔值。
 集合是副本、元素仍是核心对象（比较身份是这些断言的要点），因此它是观察面而不是安全边界。
 
@@ -308,7 +309,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 
 ```text
 flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消旧 Timer（clearWakeup）
-→ coordinateAll：协调当前全部句柄
+→ coordinateAll：协调当前全部需求
 → enqueueDue：一趟遍历，到期实例入队，同时收齐其余实例的最早到期时刻
 → startQueued：按 FIFO 和可用槽位启动（队列里的任务必是它实例的当前执行，不再复核）
 → scheduleWakeup：队列已空且仍有到期项时安排唯一唤醒 Timer
@@ -325,7 +326,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 - **框架上限**从任务真正开始执行起算（排队不计入），数值 `10000` 毫秒由确认人给出（ADR-20）。
   到期按共享请求失败结算并立即出册，因此挂死的传输、忘了拒绝的适配器、把长连接当一次取数的封装
   都不能让槽位永久被占。abort 会取消该计时。
-- 出册后这次执行迟到的结束在任务身份复核处被判无效：不写结果、不发通知。
+- 出册后这次执行迟到的结束在任务身份复核处被判无效：不写结果、不动结果表。
 - 因此 `maxConcurrent` 约束的是**在册任务数**：被上限结算的任务不再计入，其底层请求可能仍未结束。
   上限不代替适配器自己的业务超时——那是调用方的事实，框架不猜。abort 不承诺服务端立即停止。
 
@@ -361,7 +362,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 - 重新显示时：实例仍在则按已声明的身份从结果表读回已有结果并按间隔调度；已销毁则重建并首查。
 - 自定义页签由调用方提供响应式可见条件；初始隐藏时不请求。
 - **读取面有自己的脉搏**（ADR-63）：`setInterval` 周期＝本页 `every`，只在「愿意开且激活」时装上，
-  失活/暂停/卸载/销毁时停掉（`handle.cleanup` 与 `onScopeDispose` 都会停）；`every` 改值即重装脉搏。
+  失活/暂停/卸载/销毁时停掉（配置 watcher 里的 `restartPulse` 与 `onScopeDispose` 都会停）；`every` 改值即重装脉搏。
   脉搏只把 `pulse` 计数 +1，副作用据此重新读一次结果表——一拍最多发布一次。
 - **三个不等拍的边沿**：身份落定（`submit` 被接纳）、重新成为读者（配置/生命周期 watcher）、显式 `refresh()`。
   首查结果、失活恢复、手动刷新因此都不会被自己的采样周期拖后；其余版本按拍抄。
@@ -372,13 +373,16 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 - 每个协调者只注册一个 `visibilitychange` 监听。
 - 当前协调者放在模块级变量里：安装时若现有实例还活着就拒绝，已销毁则直接替换（HMR、会话切换），
   组件适配不经过 `provide` / `inject`。
-- `dispose` 先失效再清理自身监听与资源；卸载钩子调用 `dispose`。
+- `dispose` 先失效再清理自己的队列／Timer／名册；卸载钩子调用 `dispose`。**核心不持有任何回调，适配层的拆卸由适配层自己做**：`install` 在 `app.onUnmount` 里摘掉可见性监听、返回的 `dispose()` 也摘（ADR-64）。
 
-### 6.4 回调隔离
+### 6.4 零回调
 
-- 框架**调用**的页面代码只剩两处：`validate`（参数准入，在 `submit` 的同步边界里，抛错按 `rejected` 返回）
-  与 `cleanup`（释放回调）。它们抛错或返回拒绝的 Promise 都只被吞掉，不改变已定结果、订阅与调度；
-  框架自身不写诊断日志。（交付回调随结果表删除，ADR-59；失败通知回调随失败进结果表删除，ADR-63）
+- **核心不调用任何页面代码**：`core.ts` 拨出去的外部调用只剩两个注入端口——传输 `http.post(...)`
+  与结果表 `sink.write / fail / remove / list`；它们都是适配层传进来的端口，不是页面回调（ADR-64）。
+- 框架里唯一会运行调用方代码的地方是**适配层的提交边界**：参数准备（复制／值域／编码）与 `validate`。
+  它的抛错在那里就地变成同步 `rejected`（`vue.ts` 的 `submit` 包一层 `try`），既不进入核心，也不改变
+  已定身份、声明与调度；框架自身不写诊断日志。交付回调随结果表删除（ADR-59），失败通知回调随失败进
+  结果表删除（ADR-63），`cleanup` 这类释放回调也随 ADR-64 删除——页面的拆卸由适配层自己做。
 - 因此失败**没有**需要隔离的通知面：写结果表是框架自己的动作，读者的反应发生在各自的副作用里。
 - 唯一 catch 不到的一类：传输拿到的 `AbortSignal` 上的监听器由宿主在 `abort()` 时同步调用，
   它们的抛错由宿主上报，因此不在承诺内。
@@ -387,7 +391,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 ## 7. 顺序约束
 
 1. **先建立新身份，再作废旧关系。** 新任务与新声明必须先就位，再 abort 旧执行。
-2. **先让内部关系完整失效，再产生外部效果。** 退订先清句柄字段与集合成员，再删结果，最后 abort。
+2. **先让内部关系完整失效，再产生外部效果。** 退订先清需求字段与集合成员，再删结果，最后 abort。
 3. **外部效果之后复核身份。** `await`、复制结果、写进结果表之前都要重新判断归属。
 4. **旧清理只清自己。** 旧执行的 `finally` 只移除自己的槽位成员。
 5. **资格判断无副作用。** `coordinate`、`Resource.dueAt` 与 `Resource.isEligible` 只读事实。
@@ -404,7 +408,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 ## 9. 读这个库的顺序
 
 本节是读代码的入口，替代「先通读注释」：**代码里的注释只写「做什么」，理由在本文与 [ADR.md](./ADR.md) 里。**
-先按 §9.1 选一个进入点，记住 §9.2 的四个词，用 §9.3 查符号，遇到 `if` 用 §9.4 对照。
+先按 §9.1 选一个进入点，记住 §9.2 的七个词，用 §9.3 查符号，遇到 `if` 用 §9.4 对照。
 
 ### 9.1 三条进入路线
 
@@ -412,17 +416,17 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 |---|---|---|
 | 一次取数怎么走完 | `src/index.ts`（三个导出）→ `vue.ts` 的 `useRefresh` | §2.1 的链路，再看 `RefreshCore.submit` → `reconcile` → `flush` → `runTask` → `Resource.settle`（写结果表） |
 | 一个页面的需求怎么变成共享实例 | `RefreshCore.submit` → `RefreshCore.resourceFor` → `RefreshCore.coordinate` | §3.1 对象关系、§3.3 所有权表、§3.5 第 8／11 条 |
-| 隐藏、卸载、销毁之后还剩什么 | `RefreshCore.setVisible` / `RefreshCore.removeHandle` / `RefreshCore.dispose` | §3.6 更新表、§3.9 第一／二条、§3.5 第 9 条 |
+| 隐藏、卸载、销毁之后还剩什么 | `RefreshCore.setVisible` / `RefreshCore.removeDemand` / `RefreshCore.dispose` | §3.6 更新表、§3.9 第一／二条、§3.5 第 9 条 |
 
 ### 9.2 读代码前先记住的七个词
 
 | 词 | 一句话含义 | 谁保证它 |
 |---|---|---|
-| 在册 | 这个句柄还在名册里；**不在册就等于已释放** | `addHandle` / `removeHandle`（§3.7） |
-| 声明 | 这个句柄声明了对某身份的需求；挂载期间一直算，暂停/失活/隐藏都不撤销 | `coordinate` 登记、`dropDeclaration` 撤销（§3.5 第 1 条） |
+| 在册 | 这个需求还在名册里；**不在册就等于已释放** | `addDemand` / `removeDemand`（§3.7） |
+| 声明 | 这个需求声明了某个身份；挂载期间一直算，暂停/失活/隐藏都不撤销 | `coordinate` 登记、`dropDeclaration` 撤销（§3.5 第 1 条） |
 | 取数资格 | 声明还在 ＋ 这一页激活 ＋ 浏览器可见 ＋ 配置开启且有周期，四组缺一不可；**只决定要不要取数** | `Resource.isEligible`（§3.5 第 12 条） |
 | 当前任务 | 一个实例至多一个任务，它至多在队列或在执行之一 | `placeTask`（`enqueue` / `flush` 起跑 / `runTask` 的 `finally` / `expire` / `releaseIfUnused` 都经它） |
-| 刷新要求 | 这个句柄此刻想要一次取数；是**标志不是队列**，没有回执 | `Resource.waiters`；`refresh` 登记、`Resource.clearRequest` 撤销 |
+| 刷新要求 | 这个需求此刻想要一次取数；是**标志不是队列**，没有回执 | `Resource.waiters`；`refresh` 登记、`Resource.clearRequest` 撤销 |
 | 结果表 | 结果的唯一真值：`URL → 参数键 → Entry`；页面按**已声明身份**读它，读到的就是那一份对象 | `useRefreshStore`（`store.ts`）：`Resource.settle` 写、`releaseIfUnused` 删、`display` 读 |
 | 读者 | 本页此刻**有资格**（声明着它、开启、激活、浏览器可见），或它上面有未撤销的刷新要求；不是读者就冻结画面 | `RefreshCore.isReader`（`display` 的更新闸门） |
 
@@ -431,27 +435,25 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 | 符号 | 做什么 |
 |---|---|
 | `defineRefresh` | 声明一种固定业务资源：URL（身份的一半，必须非空）＋ 可选参数准入规则；建议放应用级常量 |
-| `useRefresh` | 组件侧入口：登记本页需求句柄，跟踪配置与生命周期，返回指向结果表的只读显示面与两个动作 |
+| `useRefresh` | 组件侧入口：登记本页需求（`Demand`），跟踪配置与生命周期，返回公开的 `RefreshHandle`（指向结果表的只读显示面与两个动作）；**参数准备与 `validate` 在这里完成**，抛错就地变 `rejected`（ADR-64） |
 | `createRefreshManager` | 创建应用级协调者：接结果表（`pinia`）、取数实例（`axios`）与并发上限；`install` 再接可见性监听与卸载释放 |
 | `RefreshCore.isDisposed` | 协调者是否已销毁；存活状态的唯一公开出口 |
-| `RefreshCore.setVisible` | 浏览器可见性变化：隐藏时当场退订并立即结算 |
-| `RefreshCore.setCleanup` | 登记框架自身的释放回调（应用卸载时移除可见性监听），至多一个 |
-| `RefreshCore.addHandle` / `RefreshCore.removeHandle` | 登记一个句柄并协调它／释放一个句柄（结算要求、退订、停止接纳） |
-| `RefreshCore.isReader` | 这个句柄此刻算不算该身份的读者（有资格的声明，或有未撤销的要求）；视图据此跟随或冻结 |
+| `RefreshCore.setVisible` | 浏览器可见性变化：隐藏时当场撤销未完成的刷新要求并立即结算 |
+| `RefreshCore.addDemand` / `RefreshCore.removeDemand` | 登记一个需求并协调它／释放一个需求（结算要求、撤销声明、停止接纳） |
+| `RefreshCore.isReader` | 这个需求此刻算不算该身份的读者（有资格的声明，或有未撤销的要求）；视图据此跟随或冻结 |
 | `RefreshCore.reconcile` | 配置或生命周期变化后的唯一入口：先协调关系，再安排一次合并调度 |
-| `RefreshCore.submit` | 声明或更新身份；相同参数值幂等，参数准备在身份被接纳之后才执行 |
+| `RefreshCore.submit` | 声明或更新身份；相同参数值幂等；参数已由适配层在提交边界准备好再交进来（ADR-64） |
 | `RefreshCore.refresh` | 登记一次要数；有当前请求就直接用它的结果，不回执 |
 | `RefreshCore.snapshot` | 只读计数投影，给演示面板、基准脚本与测试看；不属于包契约 |
 | `RefreshCore.dispose` | 销毁：幂等、不可复用 |
-| `RefreshCore.enqueue` / `releaseIfUnused` / `writeResult` | 给实例用的三个跨实例入口（排队／回收／把结果写进结果表）；public 但不在包契约内 |
+| `RefreshCore.enqueue` / `releaseIfUnused` / `writeResult` / `writeFailure` | 给实例用的四个跨实例入口（排队／回收／把结果写进结果表／把失败写进同一格）；public 但不在包契约内 |
 | `RefreshCore.placeTask`（私有） | 任务位置的唯一迁移点：在队／在跑／被弃／已结算，`Resource.task` 与 `queue`／`running` 一起改 |
-| `RefreshCore.flush`（私有） | 一次合并调度＝四步：`coordinateAll`（协调全部句柄）→ `enqueueDue`（到期入队并收齐最早到期时刻）→ `startQueued`（按 FIFO 占槽启动）→ `scheduleWakeup`（安排唯一唤醒 Timer） |
+| `RefreshCore.flush`（私有） | 一次合并调度＝四步：`coordinateAll`（协调全部需求）→ `enqueueDue`（到期入队并收齐最早到期时刻）→ `startQueued`（按 FIFO 占槽启动）→ `scheduleWakeup`（安排唯一唤醒 Timer） |
 | `Resource.dueAt` / `eligibleEvery` / `isEligible` | 下次到期时刻／有资格声明者里的最小间隔／单个声明者有没有资格；都现算，不缓存 |
-| `Resource.settle` / `fail` | 一次请求的两种结局：成功（写结果表 ＋ 结算要求），或失败结算（只通知，不写表） |
-| `RefreshCore.isReader` | 本页此刻算不算该身份的读者（订阅 ∪ 未撤销要求）；视图据此决定跟随还是冻结 |
+| `Resource.settle` / `fail` | 一次请求的两种结局：成功（先把结果写进结果表 ＋ 结算这一批要求），或失败（把失败写进同一格、保留 `entry` ＋ 结算全部未完成要求） |
 | `Resource.clearRequest` / `refill` | 撤销一条要数／任务结束后补一次后继请求 |
 | `prepareParameters` | 提交边界只执行一次：复制 → 值域检查 → 编码身份键 → 可选业务校验 |
-| `useRefreshStore` | 结果表本身：`write` / `remove` / `list`（内核写入端）与 `read`（页面读出口）；模块级定义，一个 Pinia 一张表 |
+| `useRefreshStore` | 结果表本身：`write` / `fail` / `remove` / `list`（内核写入端）与 `read`（页面读出口）；模块级定义，一个 Pinia 一张表 |
 
 ### 9.4 遇到 `if` 时按什么读
 
@@ -459,12 +461,13 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 | 防什么 | 长相 | 作用 |
 |---|---|---|
-| 已销毁或不在册 | 入口第一行的 `this.disposed` 检查，以及 `!this.handles.has(handle)` | 不在册的句柄按已释放处理，后续写入一概不发生 |
-| 任务已被替换 | `resource.task !== task`（也有 `=== task` 的反面） | 每个 `await` 与每次外部效果之后：丢弃迟到结束，不写结果、不发通知；`placeTask` 撤销当前执行时同样认人（`expire` 交还槽位后可能已经登记了后继任务） |
-| 回调里同步重入 | `!this.core.isReader(handle)` | 每个**通知点**之前（`fail` 的通知循环）：前一个页面的 `onError` 可能已经改身份、换身份或卸载，因此每次通知前重新判一次读者身份 |
+| 已销毁或不在册 | 入口第一行的 `this.disposed` 检查，以及 `!this.demands.has(demand)` | 不在册的需求按已释放处理，后续写入一概不发生 |
+| 任务已被替换 | `resource.task !== task`（也有 `=== task` 的反面） | 每个 `await` 与每次外部效果之后：丢弃迟到结束，不写结果、不动结果表；`placeTask` 撤销当前执行时同样认人（`expire` 交还槽位后可能已经登记了后继任务） |
+| 同步重入 | `coordinate` 里的 `!this.demands.has(demand)`（`submit` 内的第二道查询） | 第一次查询之后、`reconcile → coordinate` 之前，`clearRefreshes` / `dropDeclaration` 会链路到 `abort`：宿主在 `abort()` 时同步调用的 `AbortSignal` 监听器可能重入、把这个需求卸载掉；第二道查询因此还要再判一次名册 |
 
-**这三组守卫是承重的，不是冗余。** 以 `RefreshCore.submit` 为例：入口先查一次在册，然后调 `prepare()`——
-那是页面代码（`prepareParameters` 会调 `validate`），可能同步重入、把这个句柄卸载掉；它随后走的
-`reconcile` → `coordinate` 里还有第二道同样的查询，防的正是这次重入。两处看起来一样，各自防的东西不同
+**这三组守卫是承重的，不是冗余。** 以 `RefreshCore.submit` 为例：入口先查一次名册，随后
+`clearRefreshes` / `dropDeclaration` 会链路到 `releaseIfUnused`——其中的 `abort()` 由宿主同步调用
+`AbortSignal` 监听器，调用方代码可能借此重入、把这个需求卸载掉；它随后走的 `reconcile` → `coordinate`
+里还有第二道同样的查询，防的正是这次重入。两处看起来一样，各自防的东西不同
 （这次复核记在 ADR-55、ADR-61）。
 把这三组收成具名判定（让每个 `if` 读起来是一句话）是**尚未裁决**的下一步。
