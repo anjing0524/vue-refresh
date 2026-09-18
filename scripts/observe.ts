@@ -1,4 +1,5 @@
-import type { RefreshCore, Resource, ResultCell } from '../src/core.ts'
+import type { RefreshCore, ResultCell } from '../src/core.ts'
+import type { Resource } from '../src/resource.ts'
 
 /**
  * 观测面投影：核心私有账本的一份只读计数副本。

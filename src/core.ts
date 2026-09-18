@@ -1,15 +1,9 @@
 import type { SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
+import { Resource, type Config } from './resource.ts'
 
-/** 共享取数与调度核心：只管一个身份自己的账（谁声明着它、还要不要再取、什么时候到期、哪次执行还算数），
- * 加上三件跨实例的事：身份注册表、FIFO 队列与并发槽、唯一唤醒 Timer。它不持有页面。 */
-
-/** 一页报给核心的配置快照，同时就是这一页在核心里的登记。`every === null` ＝ 这一拍配置非法。 */
-export interface Config {
-  enabled: boolean
-  every: number | null
-  active: boolean
-}
+/** 共享取数与调度核心：三件跨实例的事——身份注册表、FIFO 队列与并发槽、唯一唤醒 Timer
+ * （一个身份自己的账在 `resource.ts`）。它不持有页面。 */
 
 /** 结果表的一格：最后一次成功 ＋ 最近一次失败，四个字段全平。
  * `updatedAt === null` ⟺ 从未成功过；`failedAt === null` ⟺ 自最后一次成功以来没失败过。
@@ -30,77 +24,6 @@ export interface ResultSink {
   remove(url: string, key: string): void
   /** 读这一格；读取面（适配层）用它。 */
   read(url: string, key: string): ResultCell | undefined
-}
-
-/** 一个「URL ＋ 参数值」的共享实例：这个身份的全部状态与判定。它不持有核心、也不持有页面。 */
-export class Resource {
-  /** 取数 URL：身份的一半，也是结果表分区的第一级。 */
-  readonly url: string
-  readonly parameters: Parameters
-  /** 声明了本身份的配置（页面挂载期间一直算，暂停、失活、隐藏都不撤销）。 */
-  readonly declarers = new Set<Config>()
-  /** 这一轮的结果已经产出了没有（写表之前置起、一轮结束时清掉）。 */
-  produced = false
-  /** 产出之后又有人点过刷新：本轮结束后再排一次。 */
-  needsNext = false
-  /** 最近一次正常结束的时刻；`null` 表示从未结算过，因此立即到期。 */
-  settledAt: number | null = null
-  /** 这次执行的身份与取消把手；`null` ＝ 本实例此刻没有执行。 */
-  controller: AbortController | null = null
-
-  constructor(url: string, parameters: Parameters) {
-    this.url = url
-    this.parameters = parameters
-  }
-
-  /** 环境允许：这一页激活、配置有效、浏览器可见（与「开启意愿」是两件事）。 */
-  private isPresent(config: Config, visible: boolean): boolean {
-    return visible && config.every !== null && config.active
-  }
-
-  /** 这个身份此刻有没有执行（在队或在跑）。 */
-  hasExecution(): boolean {
-    return this.controller !== null
-  }
-
-  /** 这次执行还是不是当前执行。 */
-  isCurrent(controller: AbortController): boolean {
-    return this.controller === controller
-  }
-
-  /** 还有人要它吗：还有声明者。 */
-  isWanted(): boolean {
-    return this.declarers.size > 0
-  }
-
-  /** 一个声明者此刻是否有资格取数：环境允许 ＋ 开启意愿为真。 */
-  isEligible(config: Config, visible: boolean): boolean {
-    return this.isPresent(config, visible) && config.enabled
-  }
-
-  /** 有效间隔现算：有资格的声明者里最小的 `every`；没有就是 `Infinity`。 */
-  private eligibleEvery(visible: boolean): number {
-    let every = Infinity
-    for (const config of this.declarers) {
-      if (!this.isEligible(config, visible)) continue
-      const value = config.every
-      if (value !== null) every = Math.min(every, value)
-    }
-    return every
-  }
-
-  /** 下次到期时刻：`settledAt ＋ 当前最小间隔`；从未结算过的立即到期；没有有资格的人返回 `Infinity`。 */
-  dueAt(now: number, visible: boolean): number {
-    const every = this.eligibleEvery(visible)
-    if (every === Infinity) return Infinity
-    return this.settledAt === null ? now : this.settledAt + every
-  }
-
-  /** 结算一次执行：记下结算时刻并标上「这一轮的结果已经产出」（成功与失败都走它）。 */
-  settle(at: number): void {
-    this.settledAt = at
-    this.produced = true
-  }
 }
 
 /** `setTimeout` 的平台上限（约 24.8 天）；更远的到期分段等待。 */
