@@ -21,8 +21,8 @@ export interface HarnessSnapshot {
   calls: Array<{ id: number; aborted: boolean; finished: boolean }>
   events: string[]
   /**
-   * 每页 `display.value` 的投影：**没有画面**（还没声明身份／已释放）时是 `null`；
-   * 画面存在但从未成功过时是 `data: null, updatedAt: null, failedAt: null`——两者不再混为一谈。
+   * 每页数据的投影：**没有画面**（还没声明身份／已释放）时是 `null`；
+   * 画面存在但从未成功过时是 `data: null, updatedAt: null`。失败不在这份投影里，它来自 `task.failure`（ADR-77）。
    */
   pages: Record<string, {
     readonly args: QuoteParams
@@ -124,9 +124,9 @@ function mountHarness(): void {
       const enabled = ref(true)
       const draftSymbol = ref('DEMO')
       const task = useRefresh<QuoteParams, Quote>(source, { enabled, every })
-      // 失败不再经回调推送：交付面出现新的失败对象时记一条事件（默认 pre flush，首次不触发）。
-      watch(() => task.display.value?.failedAt, failedAt => {
-        if (failedAt !== null) events.push('后台请求失败，等待下一周期')
+      // 失败不再经回调推送：失败出口出现新的失败对象时记一条事件（默认 pre flush，首次不触发）。
+      watch(() => task.failure.value, failure => {
+        if (failure !== null) events.push('后台请求失败，等待下一周期')
       })
       components.set(props.label, { task, enabled })
       const args: QuoteParams = props.label === '甲'
@@ -171,8 +171,8 @@ function mountHarness(): void {
     setup() {
       const enabled = ref(true)
       const task = useRefresh<QuoteParams, Quote>(source, { enabled, every })
-      watch(() => task.display.value?.failedAt, failedAt => {
-        if (failedAt !== null) events.push('嵌套页后台请求失败，等待下一周期')
+      watch(() => task.failure.value, failure => {
+        if (failure !== null) events.push('嵌套页后台请求失败，等待下一周期')
       })
       components.set('嵌套', { task, enabled })
       onMounted(() => task.submit({ account: 'demo', symbol: 'NESTED' }))
@@ -221,8 +221,9 @@ function mountHarness(): void {
             // `data` 可以为 null（首查就失败）；`updatedAt` 与它同生共死。
             data: display.data === null ? null : structuredClone(display.data),
             updatedAt: display.updatedAt,
-            error: display.error,
-            failedAt: display.failedAt,
+            // 失败与数据是两个出口：这里合成一份投影，只为测试读起来方便。
+            error: c.task.failure.value?.error,
+            failedAt: c.task.failure.value?.failedAt ?? null,
             manual: display.updatedAt !== null && display.updatedAt >= (manualAt[name] ?? Infinity),
           }]
         })),

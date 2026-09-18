@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import { useRefresh } from '../src/index.ts'
+import type { RefreshFailure } from '../src/index.ts'
 interface Params { account: string; symbol: string; filter?: { page: number } }
 interface Quote { price: number }
 // URL 与参数值决定身份；`Quote` 是**声明**的原始返回结构（框架不做响应转换，所以没有取数函数可绑定）。
@@ -36,13 +37,19 @@ function contract() {
   void maybeQuote
   const maybeTime: number | null = task.display.value!.updatedAt
   void maybeTime
-  // 失败是结果表那一格上的事实，读取面按自己的节拍取；成功后清空。
-  const failedAt: number | null = task.display.value!.failedAt
-  const cause: unknown = task.display.value!.error
-  void failedAt
+  // @ts-expect-error 失败不在数据出口上：它有自己的出口（ADR-77）
+  task.display.value!.failedAt
+  // @ts-expect-error 失败不在数据出口上：它有自己的出口（ADR-77）
+  task.display.value!.error
+  // 失败出口（ADR-77）：`null` ＝ 自最后一次成功以来没失败过（含从未失败过）。
+  const failure: RefreshFailure | null = task.failure.value
+  const cause: unknown = task.failure.value!.error
+  const failedAt: number = task.failure.value!.failedAt
+  void failure
   void cause
+  void failedAt
   // @ts-expect-error 失败是框架写的事实，页面不能改写它
-  task.display.value!.failedAt = null
+  task.failure.value = null
   // @ts-expect-error 失败不再由框架推送：`onError` 这一项已删除（ADR-63）
   useRefresh<Params, Quote>(source, { enabled: ref(true), every: ref(1000), onError: () => {} })
   // 擦除视图：类型参数写在调用上（`object` 是值域的最宽形态），异构注册表不必在接收点留类型断言；

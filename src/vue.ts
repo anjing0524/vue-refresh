@@ -9,7 +9,7 @@ import { prepareParameters } from './source.ts'
 import type { JsonParameters, Parameters } from './source.ts'
 import { useRefreshStore } from './store.ts'
 import type {
-  ReadonlySnapshot, RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions,
+  ReadonlySnapshot, RefreshDisplay, RefreshFailure, RefreshHandle, RefreshManager, RefreshOptions,
 } from './public-types.ts'
 
 /**
@@ -98,7 +98,7 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   let released = false
 
   /**
-   * 本页看到的画面：**由写入事件驱动、按本页 `every` 节流抄来的一份副本**。
+   * 本页看到的数据：**由写入事件驱动、按本页 `every` 节流抄来的一份副本**。
    *
    * - **读者才跟随**：这一页有资格（`core.isEligible`），或它**还没有读取时间**（`lastReadAt === null`）
    *   且此刻浏览器可见时抄；失活、隐藏、卸载中都不是读者，画面**冻结在最后一帧**。暂停页自己 `refresh()`
@@ -118,10 +118,18 @@ export function useRefresh<P extends JsonParameters<P>, T>(
    * 依赖粒度：`store.read(url, key)` 现在返回的是那一个 cell ref 的 `.value`，副作用收在那一个 ref 上；
    * 写别的格不会唤醒这个副作用。**唤醒它的只有两件事：这一格被写入、这一页换了身份**（`identity`）——
    * 配置变化不改画面，只改「下一次写入时怎么判定」（`lastReadAt` 由下面那个 watcher 负责，ADR-73）。
+   *
+   * 这一格被写入时发布**两件事**：数据（按窗口）与失败（不等窗口），见下面两个发布函数。
    */
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
   /**
-   * **上次读取时间**：上一次抄进画面的那一版数据的时间（`ResultCell.updatedAt`）。
+   * 本页看到的**最近一次失败**：与数据同一个来源（那一格）、同一个读者闸门，但**不参与数据窗口**——
+   * 失败不是数据的旧版本，它是这一格此刻是否处于失败态。`null` ＝ 没有失败（成功会把它清回 `null`）。
+   */
+  const failure = shallowRef<RefreshFailure | null>(null)
+  /**
+   * **上次读取时间**：上一次抄进数据出口的那一版数据的时间（`ResultCell.updatedAt`）。它只管数据出口；
+   * 失败出口不需要自己的读取基准——同一个对象在不在、`failedAt` 变没变就够判。
    * `null` ＝ 还没有读取过——第一次读取、刚点过刷新、刚换身份、刚重新成为读者（ADR-72）。
    *
    * 判定只有一句话：`上次读取时间 ＋ 本页 every > 新数据的 updatedAt` 就不换画面；没有读取时间
@@ -129,22 +137,10 @@ export function useRefresh<P extends JsonParameters<P>, T>(
    */
   let lastReadAt: number | null = null
 
-  watchEffect(() => {
-    const key = identity.value
-    // 身份还没落定：没有可抄的格，也没有依赖可登记——设 `identity` 的那一处会再叫醒这个副作用。
-    if (key === null) return
-    // 第一件事就是读那一格：这一次读同时登记依赖，写这一格才唤得醒这个副作用。
-    const cell = store.read(url, key)
-    // 从来没有写过这一格：没有可抄的东西，画面停在上一帧（不发布空副本）。
-    if (cell === undefined) return
-    // 读闸门：有资格（声明着它、配置有效、开启、激活且浏览器可见），或**还没读取过**（第一次，或
-    // 刚点过刷新）且此刻浏览器可见。第二项就是「没有读取时间就直接读」——它是暂停页自己点刷新那
-    // 一次能上屏的唯一机制（A05、G6）。入口闸在点的那一刻已经判过环境，所以这里不补 `active`。
-    if (!core.isEligible(config, url, key) && !(lastReadAt === null && core.isVisible())) return
-    // 同一版不抄第二遍：格子的数据时间与失败位都跟画面里那份一样，就是「没有新东西」。它不需要另存
-    // 状态——画面本身就是已经抄到的那一版；失败那一笔`updatedAt` 不动、只有失败位变，靠这一行才看得见。
+  /** 数据出口：同一版不抄第二遍；只发布窗口已到的那一版。 */
+  const publishData = (cell: ResultCell): void => {
     const shown = display.value
-    if (shown !== null && cell.updatedAt === shown.updatedAt && cell.failedAt === shown.failedAt) return
+    if (shown !== null && cell.updatedAt === shown.updatedAt) return
     // 上次读取时间 ＋ 本页 every > 新数据的时间 ⇒ 窗口没到，不换画面（慢页面要的就是不跟快页面跳）。
     // 上一次从未成功过、或本页还没读到过：没有可比的时间，直接读。配置非法（`every === null`）不抄。
     const every = config.every
@@ -156,10 +152,31 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       args: structuredClone(declared.args) as unknown as ReadonlySnapshot<P>,
       data: cell.updatedAt === null ? null : cell.data as ReadonlySnapshot<T>,
       updatedAt: cell.updatedAt,
-      error: cell.error,
-      failedAt: cell.failedAt,
     }
     lastReadAt = cell.updatedAt
+  }
+
+  /** 失败出口：这一格换了一笔新的失败就立刻发布，成功（`failedAt === null`）就清回 `null`。 */
+  const publishFailure = (cell: ResultCell): void => {
+    const shown = failure.value
+    if (cell.failedAt === null ? shown === null : shown !== null && shown.failedAt === cell.failedAt) return
+    failure.value = cell.failedAt === null ? null : { error: cell.error, failedAt: cell.failedAt }
+  }
+
+  watchEffect(() => {
+    const key = identity.value
+    // 身份还没落定：没有可抄的格，也没有依赖可登记——设 `identity` 的那一处会再叫醒这个副作用。
+    if (key === null) return
+    // 第一件事就是读那一格：这一次读同时登记依赖，写这一格才唤得醒这个副作用。
+    const cell = store.read(url, key)
+    // 从来没有写过这一格：没有可抄的东西，画面停在上一帧（不发布空副本）。
+    if (cell === undefined) return
+    // 读闸门（两个出口共用）：有资格（声明着它、配置有效、开启、激活且浏览器可见），或**还没读取过**
+    // （第一次，或刚点过刷新）且此刻浏览器可见。第二项就是「没有读取时间就直接读」——它是暂停页自己点
+    // 刷新那一次能上屏的唯一机制（A05、G6）。入口闸在点的那一刻已经判过环境，所以这里不补 `active`。
+    if (!core.isEligible(config, url, key) && !(lastReadAt === null && core.isVisible())) return
+    publishFailure(cell)
+    publishData(cell)
   }, { flush: 'sync' })
 
   /** 这一页是否挂载/激活（KeepAlive 失活为假）。它与「浏览器可见」是两件事，后者由核心统一监听。 */
@@ -194,6 +211,7 @@ export function useRefresh<P extends JsonParameters<P>, T>(
 
   return {
     display,
+    failure,
     submit: args => {
       // 释放之后这一页不再产生任何事实（§2.4「取消只有一个来源（句柄或协调者已销毁）」）。
       if (released || core.isDisposed()) return { status: 'cancelled' }

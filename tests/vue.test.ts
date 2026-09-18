@@ -4,7 +4,7 @@ import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import type { RefreshHttp } from '../src/core.ts'
-import type { RefreshDisplay, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshFailure, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
 import type { Ref } from 'vue'
 
 /** 这几个用例验证浏览器路径：`install` 无条件注册可见性监听（本库只服务 SPA），因此先提供最小替身。 */
@@ -127,7 +127,7 @@ test('A04/A05 配置非法：不取数并停止订阅，修正后按当前资格
   await tick()
   await tick()
   // 配置非法不产生任何结果：它是本页自己的输入事实，框架只负责不订阅、不请求（ADR-51）。
-  assert.equal(api.display.value?.failedAt, null, '配置非法不写失败')
+  assert.equal(api.failure.value, null, '配置非法不写失败')
 
   every.value = 50_000
   await tick()
@@ -338,7 +338,7 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写�
   ;(enabled as Ref<unknown>).value = undefined
   await tick()
   await tick()
-  assert.equal(api.display.value?.failedAt, null, '配置非法不写失败')
+  assert.equal(api.failure.value, null, '配置非法不写失败')
   api.submit({ symbol: 'B' })
   await tick()
   assert.equal(loads, 1, '配置非法时不订阅')
@@ -434,7 +434,7 @@ test('A21 写端稀于本页 every 时写入即抄：节流不丢数据，新格
   app.unmount()
 })
 
-test('A13 失败写进结果表那一格：首查失败也读得到，成功后失败被清掉，数据保留旧址', async () => {
+test('A13 失败有独立的读出口（不参与数据窗口）：首查失败也读得到，成功后清回 null，数据保留旧址', async () => {
   let mode: 'ok' | 'fail' = 'fail'
   let loads = 0
   const manager = newManager(1, async () => {
@@ -456,22 +456,63 @@ test('A13 失败写进结果表那一格：首查失败也读得到，成功后�
   api.submit({ symbol: 'A' })
   await tick()
 
-  // 首查就失败：画面不能是 `null`，否则这个页面永远没有失败可读；`data` 为 `null` 表示从未成功过。
+  // 首查就失败：数据出口照样发布（`data: null`），失败在它自己的出口上——否则首查失败无从读取。
   assert.notEqual(api.display.value, null, '首查失败也发布画面（否则首查失败无从读取）')
   assert.equal(api.display.value?.data, null, '从未成功过：数据为 null')
   assert.equal(api.display.value?.updatedAt, null)
-  assert.match(String((api.display.value?.error as Error).message), /boom-1/, '原始异常原样带出')
+  assert.match(String((api.failure.value?.error as Error).message), /boom-1/, '原始异常原样带出')
 
   mode = 'ok'
   api.refresh()
   await until(() => api.display.value?.data === 2, '显式刷新后读到成功结果')
-  assert.equal(api.display.value?.failedAt, null, '成功清掉失败')
+  assert.ok(api.failure.value === null, '成功清掉失败')
 
+  // 暂停页自己刷新那一次（A05、U14）：失败照样读得到，且不覆盖数据出口那一版。
   mode = 'fail'
   api.refresh()
-  await until(() => api.display.value?.failedAt !== null, '失败重新可读')
+  await until(() => api.failure.value !== null, '失败重新可读')
   assert.equal(api.display.value?.data, 2, '失败不覆盖旧址（数据仍是上一次成功的）')
   assert.equal(api.display.value?.updatedAt !== null, true, '失败不动结果的产生时间')
+  app.unmount()
+})
+
+test('A13/A11 失败与数据是两个出口：周期性失败不等数据窗口就上屏，成功一到又清回 null', async () => {
+  let mode: 'ok' | 'fail' = 'ok'
+  let loads = 0
+  const manager = newManager(1, async () => {
+    loads++
+    if (mode === 'fail') throw new Error(`late-${loads}`)
+    return loads
+  })
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      // 周期取正常值就够：失败那一笔不动 `updatedAt`，所以按数据窗口它永远进不了画面。
+      api = useRefresh<{ symbol: string }, number>('/api/vue/266', { enabled: ref(true), every: ref(20) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value?.data === 1, '首查成功')
+  const never: RefreshFailure | null = api.failure.value
+  assert.equal(never, null, '还没有失败过：失败出口是 null')
+
+  // 不点刷新：让**周期取数**自己失败。旧口径（失败挤在数据窗口里）下这一条只能等到超时。
+  mode = 'fail'
+  await until(() => api.failure.value !== null, '周期性失败立刻上屏，不等数据窗口')
+  const failed: RefreshFailure | null = api.failure.value
+  assert.match(String((failed?.error as Error).message), /late-2/, '原始异常原样带出')
+  assert.equal(api.display.value?.data, 1, '失败不动数据出口那一版')
+
+  mode = 'ok'
+  await until(() => api.failure.value === null, '下个周期成功：失败清回 null')
+  const cleared: RefreshFailure | null = api.failure.value
+  assert.equal(cleared, null, '成功之后失败出口是 null')
+  assert.ok((api.display.value?.data ?? 0) > 1, '成功也从数据出口读得到（这一版已过窗口）')
   app.unmount()
 })
 

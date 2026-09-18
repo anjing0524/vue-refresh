@@ -98,7 +98,7 @@ test('查询列表：提交才发请求、分页排序复用已提交参数、�
   const afterQuery = (await state(request)).length
   expect(afterQuery).toBe(frozen + 1)
 
-  // 失败关闭：框架只通知，关闭由页面在 onError 里做；画面保留。
+  // 失败关闭：框架只把失败写进那一格，关闭由页面从失败出口读到后自己做；画面保留。
   const kept = await page.getByTestId('ql-price-600000').innerText()
   await request.post('/__fixture/fail-next', { data: { count: 1 } })
   await page.getByTestId('ql-toggle').click()
@@ -249,7 +249,7 @@ test('A05/A14 无启停按钮，前次失败后在同一个同步块里开启意
   // 无启停按钮。
   expect(await page.locator('[data-testid="b09-toggle"]').count()).toBe(0)
 
-  // 前次失败：页面在 onError 里关闭意愿，框架不代劳。
+  // 前次失败：页面从失败出口读到后自己关闭意愿，框架不代劳。
   await expect(page.getByTestId('b09-failures')).toHaveText('前次后台失败：1 次')
   await expect(page.getByTestId('b09-state')).toHaveText('开启意愿：假（页面已关闭）')
   const before = await state(request)

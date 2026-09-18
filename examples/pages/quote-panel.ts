@@ -26,10 +26,10 @@ const QuoteCard = defineComponent({
       // 频率是响应式输入：改动它就走配置变化路径，由框架替换当前任务。
       every: computed(() => props.every),
     })
-    // 失败不再由框架推送：交付面上出现**新的失败时刻**就计一次。默认 flush 是 pre 且首次不触发；
-    // 成功会把失败位清回 `null`，所以只在非空的一笔上计数即可。
-    watch(() => task.display.value?.failedAt, failedAt => {
-      if (failedAt === null) return
+    // 失败不再由框架推送：失败出口出现**新的失败**就计一次。默认 flush 是 pre 且首次不触发；
+    // 成功会把失败出口清回 `null`，所以只在非空的一笔上计数即可。
+    watch(() => task.failure.value, failure => {
+      if (failure === null) return
       failures.value += 1
       emit('failure')
     })
@@ -40,7 +40,7 @@ const QuoteCard = defineComponent({
 
     return () => {
       const display = task.display.value
-      // 首查就失败时 display 不是 null，而是 `data: null, failedAt: <时刻>`：空态按 data 判。
+      // 首查就失败时 display 不是 null，而是 `data: null`：空态只看 data，失败在 `task.failure` 上。
       const data = display?.data ?? null
       return h('section', { class: 'card', 'data-testid': 'qp-card' }, [
         h('h3', `行情 · ${props.symbol}`),

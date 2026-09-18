@@ -18,7 +18,7 @@ source.ts                  参数边界：准备（复制、值域检查、稳�
 core.ts                    跨实例的协调者（身份注册表、队列与并发、调度、可见性）＋ 一个身份自己的 Resource 类与每页一份的 Config 配置槽
 store.ts                   结果表（Pinia 模块级定义）：URL → 参数键 两级分组，整条替换，随实例释放即删
 vue.ts                     组件适配与安装：配置槽原地改写、生命周期、可见性、读闸门、结果表接线
-index.ts                   包入口（两个函数与 5 个公共类型；没有常量对象）
+index.ts                   包入口（两个函数与 6 个公共类型；没有常量对象）
 ```
 
 依赖方向单向：`public-types` ← `source` ← `core` ← `store` ← `vue` ← `index`。
@@ -37,12 +37,12 @@ index.ts                   包入口（两个函数与 5 个公共类型；没�
 
 | 文件 | 职责 |
 |---|---|
-| `public-types.ts` | 公共契约类型（判别联合，没有常量对象）：交付面、句柄、协调者、选项与提交结果 |
+| `public-types.ts` | 公共契约类型（判别联合，没有常量对象）：数据出口、失败出口、句柄、协调者、选项与提交结果 |
 | `source.ts` | 参数边界：`Parameters`、`assertJsonValue`（值域检查：对象型限普通对象或数组）、`prepareParameters`（复制 → 值域检查 → 稳定编码，消费者各拿副本；**不跑任何回调**）、`parameterKey`；`P` 的值域约束 `JsonParameters` 也在这里，由 `useRefresh` 的类型参数使用；稳定编码用 `fast-json-stable-stringify` |
 | `core.ts` | `RefreshCore`：跨实例的协调者——身份注册表、唯一 Timer 与有序队列（手动刷新插到队头）、并发槽、结果表写入端、可见性、只读计数投影；`Resource`：一个身份自己的状态与判定（声明者、这一轮是否已产出／是否还欠一轮、到期、当前执行、成功与失败结算），**不持有核心**——写表、回收、排队都是核心的动作（ADR-65）；`Config`：**一页在核心里的登记**——每页一个可变配置槽，适配层原地写、核心只读（ADR-66） |
 | `store.ts` | 结果表：模块级 `defineStore`，`URL → 参数键 → ResultCell 四字段` 两级分组，`shallowRef` 整条替换；写入端给内核（`write` / `fail` / `remove` / `list`），读出口给页面（`read`） |
 | `vue.ts` | `useRefresh`（每页一份 `Config` 配置槽、公开 `RefreshHandle`、指向结果表的 Display、**读闸门**、生命周期）、`createRefreshManager`（安装、可见性监听、结果表接线、销毁） |
-| `index.ts` | 包导出：两个函数、逐个列出的 5 个公共类型（不用 `export type *`）；工具型别名不导出 |
+| `index.ts` | 包导出：两个函数、逐个列出的 6 个公共类型（不用 `export type *`）；工具型别名不导出 |
 
 ### 2.1 调用链路
 
@@ -55,15 +55,16 @@ useRefresh（组件 setup）
   ├─ refresh  → 入口闸（已释放／销毁／配置非法／失去存在／无身份）→ 实例
   │             → 没有执行就插到队头；有执行且结果还没产出就什么都不做（这一轮够用）
   │             → 有执行且结果已经产出就记一笔，本轮结束时再排一次（enqueueAtHead / needsNext）
-  ├─ 读取面   → 写入事件唤醒（flush: 'sync' 副作用）＋ 一个数 lastReadAt（上次读取时间）：同一版不抄第二遍 / 窗口比较 / 没有读取时间就直接读 → store.read（已声明身份）→ 整格抄进 display
+  ├─ 读取面   → 写入事件唤醒（flush: 'sync' 副作用）→ store.read（已声明身份）→ 数据出口：同一版不抄第二遍 / 窗口比较 / 没有读取时间就直接读 → 整格抄进 display
+  │             同一个副作用里还有失败出口：这一格换了一笔新的失败就立刻抄进 failure（不等窗口），成功后清回 null
   └─ 生命周期 → onMounted / onActivated / onDeactivated 改写配置槽里的 `active`；onScopeDispose → released ＋ undeclare
 
 reconcile  = flushSoon（配置或生命周期换了就重算一次到期与唤醒；不需要传「是谁变了」）
 flush      → 清旧 Timer（clearWakeup）→ enqueueDue（到期入队并收齐最早到期时刻）→ startQueued（按队列次序占槽启动）→ scheduleWakeup（安排唯一唤醒 Timer）
 run        → http.post(URL, 参数副本) → 复核当前执行 → Resource.settle(at)（记结算时刻、置 produced）→ 核心写表 → finally：释放槽位 ＋ 清 produced ＋ 有 needsNext 就补一轮（refill）＋ 再调度（失败走同一条 `Resource.settle(at)`，只是核心写的是同一格的失败那一对字段）
-Resource.settle  → 只记结算时刻与「这一轮已经产出」（写表与回收都在核心）
 Resource.settle  → 成功与失败都走它：只记结算时刻与「这一轮已经产出」（失败也算结算，因此不自动重试）；写表与回收都在核心
-display（读取面）→ 写入驱动：结果表写入唤醒本页副作用 → 按 updatedAt 时间差节流（一个 every 窗口最多换一次画面）→ 整格抄进 display
+display（数据出口）→ 写入驱动：结果表写入唤醒本页副作用 → 按 updatedAt 时间差节流（一个 every 窗口最多换一次画面）→ 整格抄进 display
+failure（失败出口）→ 同一个副作用里的第二件事：这一格最近一次失败换了就立刻抄进 failure（不参与窗口），成功后清回 null
 ```
 
 实例与核心之间没有调用关系：`Resource` 只给出状态与判定，写表（核心直接调 `sink.write` / `sink.fail`）、
@@ -137,7 +138,7 @@ flowchart LR
 | 隐藏 / 失活 / 暂停 | 不再取数、这一页不再是读者（画面冻结；失活或隐藏期间连 `refresh` 的入口闸也不放行） | 声明不撤销：实例、结果与在途都留着；恢复时读回已有结果 |
 | `refresh` 接纳 | 三条分支（核心不记是谁点的）：**没有执行** → 插到队头；**有执行、结果还没产出** → 什么都不做（这一轮的结果就够，A14）；**有执行、结果已经产出** → 记一笔，本轮结束时再排一轮 | 与自动刷新同一条路径；没有回执。同一轮内点几次合并成一次（那是一个位），跨轮则每点一次补一轮 |
 | 后台成功 | `Resource.settle(at)` 先记结算时刻并把「这一轮已经产出」置起 → 核心写表 | 每次外部写入后复核当前执行归属；**先记时刻、再写表**（写表可能同步触发页面再点一次刷新，那一次落在下一轮）；页面在结果表上按身份自己读 |
-| 后台失败 | `Resource.settle(at)` 同形（失败也算结算，因此不自动重试）→ 核心把失败写进结果表同一格（已有的 `data` 与 `updatedAt` 保留） | 不推送：页面的 `display.error` / `display.failedAt` 由读取面按自己的节拍取走；下个周期继续 |
+| 后台失败 | `Resource.settle(at)` 同形（失败也算结算，因此不自动重试）→ 核心把失败写进结果表同一格（已有的 `data` 与 `updatedAt` 保留） | 不推送：页面靠自己的失败出口（`failure`）在写入时**立刻**取走这笔失败——它不参与数据窗口（ADR-77）；下个周期继续 |
 | 声明空 | 最后一个声明者离开（卸载／换身份／销毁）→ 删除注册、结果表条目、排队项并 abort 在途 | 真实结束的执行在自己的 `finally` 里释放槽位；这里没有第二个条件——刷新不记账，所以「声明空」就是「没人要了」（ADR-70） |
 | `dispose` | 先置 `disposed`，再逐个清空实例的 `declarers` 并回收，最后 `identities.clear` | 幂等；迟到执行只能清自己的槽位；可见性监听由适配层自己摘（核心不持有回调） |
 
@@ -156,8 +157,8 @@ flowchart LR
 9. `dispose` 后配置、注册表、队列、结果表条目与 Timer 已清（核心不持有监听或任何回调）；未结束的执行到真实结束才移除。（`dispose` → 逐个清空 `declarers` → `releaseIfUnused` → `identities.clear`）
 10. 注销只发生在声明空时，且空实例再也拿不到新的边：新声明只能落在 `resourceFor` 当前返回的实例上，刷新的命令也只能落在注册表里现存的实例上。（`releaseIfUnused` 是唯一注销点；`submit` 经 `resourceFor`，`refresh` 经 `find`）
 11. 有资格 ⟹ 配置槽有效：`enabled` 为真、`active` 为真、`every` 是正安全整数，且浏览器可见；因此最小间隔可以直接现算，不必在实例上另存一份。（`Resource.isEligible`）
-12. 画面只在写入与边沿上变：`display` 的每次发布都由「身份落定／重新成为读者／点过一次刷新（这三处把这一页的上次读取时间置 `null`）／一次写入且距画面里那一版满一个 `every`」之一触发，每次写入最多发布一次，发布的永远是当时结果表里的**整格**；同一版（数据时间与失败位都没变）不抄第二遍，窗口内的新版本不改变画面，也不需要版本号。（`vue.ts` 的 `display` 副作用与 `lastReadAt`；ADR-63、ADR-67、ADR-72）
-13. 「读者」只在适配层判定：核心不认识页面、也不回答谁该跟随结果表，只提供 `isEligible` 与 `isVisible` 两个只读判定；适配层自己算 `core.isEligible(config, url, key) || (lastReadAt === null && core.isVisible())`（第二项＝「这一页还没有读取时间」）。（§6.4；ADR-66、ADR-67、ADR-72）
+12. 两个出口只在写入与边沿上变，而且各有各的粒度：**数据出口**的每次发布都由「身份落定／重新成为读者／点过一次刷新（这三处把这一页的上次读取时间置 `null`）／一次写入且距画面里那一版满一个 `every`」之一触发，同一版（数据时间没变）不抄第二遍，窗口内的新版本不改变画面；**失败出口**由「这一格换了一笔新的失败（`failedAt` 变了，或从有到无）」触发，**不受窗口限制**，成功后是 `null`。两个出口发布的永远分别是那一格的成功侧与失败侧，因此都不需要版本号。（`vue.ts` 的 `publishData` / `publishFailure`；ADR-63、ADR-67、ADR-72、ADR-77）
+13. 「读者」只在适配层判定：核心不认识页面、也不回答谁该跟随结果表，只提供 `isEligible` 与 `isVisible` 两个只读判定；适配层自己算 `core.isEligible(config, url, key) || (lastReadAt === null && core.isVisible())`（第二项＝「这一页还没有读取时间」），**两个出口共用这一个闸门**。（§6.4；ADR-66、ADR-67、ADR-72、ADR-77）
 
 ### 3.6 刷新：给身份的一句命令
 
@@ -292,7 +293,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 - 原生支持的 `Date` / `Map` / 循环等可被复制，**不表示**框架验证了业务合法性；不支持的值由原生复制抛错，
   沿用共享请求失败处理；`null` 是有效结果。
 - **失败也是那一格的事实**（ADR-63）：它不动最后一次成功的数据，只把 `error` 与 `failedAt` 换上；成功一到，`failedAt` 清回 `null`。
-  页面在写入上读到它——节流窗口内「先失败、后成功」的那一段不会被看见，这是按频率读取的代价；
+  页面在写入上**立刻**读到它（ADR-77 的失败出口，不参与数据窗口），所以「成功过的身份上失败被窗口挡住」这个缺口不存在；
   框架不引失败计数（ADR-43／45／47 删过版本与代次计数）。
 - **结果的读出口与参数不同**（ADR-59）：结果只复制一次（入站 `copyResult` 建立框架私有所有权），
   之后**所有人读到的都是同一个对象**——要改自己复制，只读视图由 `ReadonlySnapshot` 在编译期约束；
@@ -370,15 +371,18 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 - 生命周期取消不报请求失败、不修改开启意愿。
 - 重新显示时：实例仍在则按已声明的身份从结果表读回已有结果并按间隔调度；已销毁则重建并首查。
 - 自定义页签由调用方提供响应式可见条件；初始隐藏时不请求。
-- **读取面由写入事件驱动、按本页 `every` 节流**（ADR-63、ADR-67、ADR-72）：没有自己的 Timer——`store.write`／`fail`
-  替换 cell 后，`flush: 'sync'` 的副作用同步醒来判定，状态只有**一个数** `lastReadAt`（上一次抄进画面的那一版
-  数据的 `updatedAt`；`null` ＝ 还没有读取过）。判定四步：
-  ① **读闸门**：有资格，或「还没有读取时间」且浏览器可见（下一小节）；
-  ② **同一版不抄第二遍**：格子的 `updatedAt` 与 `failedAt` 都跟画面里那份一样就返回——画面本身就是「已经抄到的
-  那一版」，不另存状态；失败那一笔不动 `updatedAt`、只动失败位，靠这一行才进得了画面；
-  ③ **窗口**：`lastReadAt !== null && every !== null && cell.updatedAt !== null && lastReadAt + every > cell.updatedAt`
-  ⇒ 不换画面（慢页面要的就是不跟快页面跳）；没有可比的时间（本页还没读到过、或这一格从未成功过）就直接读；
-  ④ **发布整格**，并把 `lastReadAt` 记成这一版的 `updatedAt`。
+- **读取面由写入事件驱动、分两个出口**（ADR-63、ADR-67、ADR-72、ADR-77）：没有自己的 Timer——`store.write`／`fail`
+  替换 cell 后，`flush: 'sync'` 的副作用同步醒来，先判**读闸门**（有资格，或「还没有读取时间」且浏览器可见；下一小节），
+  再发布两件事——
+  **① 数据出口（`display`，按本页 `every` 节流）**：状态只有**一个数** `lastReadAt`（上一次抄进数据出口的那一版数据的
+  `updatedAt`；`null` ＝ 还没有读取过）。(a) **同一版不抄第二遍**：格子的 `updatedAt` 跟画面里那份一样就返回——画面本身
+  就是「已经抄到的那一版」，不另存状态；(b) **窗口**：`lastReadAt !== null && every !== null && cell.updatedAt !== null &&
+  lastReadAt + every > cell.updatedAt` ⇒ 不换画面（慢页面要的就是不跟快页面跳）；没有可比的时间（本页还没读到过、
+  或这一格从未成功过）就直接读；(c) **发布整格**（`args` / `data` / `updatedAt`），并把 `lastReadAt` 记成这一版的
+  `updatedAt`。
+  **② 失败出口（`failure`，不参与窗口）**：这一格最近一次失败换了（`failedAt` 变了，或从有到无）就发布
+  `{ error, failedAt }`，成功是 `null`；失败那一笔不动 `updatedAt`，所以它按数据窗口永远进不来——这正是它要独立成
+  一个出口的原因（「有没有失败」看这个对象在不在，不看 `error` 是什么）。
   写端稀于本页 `every` 时写入即抄（比固定窗口更及时）；写端密且 `every` 非整数倍时实际更新周期被量化到写入网格
   （例：写入每 100ms、`every=150`，实际约 200ms 一版；确认人接受的代价）。窗口是结果时间戳之差，不保证与墙钟
   对齐。**本页一个 Timer 都没有。**
@@ -424,9 +428,11 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 - **读闸门在适配层**：核心不再回答「谁该跟随结果表」，只提供两个只读判定——`isEligible`（这一页有没有取数资格）
   与 `isVisible`（浏览器可见性；**这一项只有核心知道，所以有一个一比特出口**）。适配层自己算
   `core.isEligible(config, url, key) || (lastReadAt === null && core.isVisible())`，
-  据此决定 `display` 跟不跟随这一拍（ADR-66、ADR-72）。**第二项只问「还没有读取时间」**：环境（激活、配置有效、
-  可见）在 `refresh` 的入口闸那一刻已经判过，之后失活仍允许它更新那一帧（§6.2 的角落）。
-- 因此失败**没有**需要隔离的通知面：写结果表是框架自己的动作，读者的反应发生在各自的副作用里。
+  据此决定两个出口跟不跟随这一拍（ADR-66、ADR-72、ADR-77）。**第二项只问「还没有读取时间」**：环境（激活、配置有效、
+  可见）在 `refresh` 的入口闸那一刻已经判过，之后失活仍允许它更新那一帧（§6.2 的角落）。失败出口与数据出口共用这一个
+  闸门，但**没有窗口**：失败不进画面只有一个原因——这一页此刻不是读者。
+- 因此失败**没有**需要隔离的通知面，也**不是回调**（ADR-64 不变）：它和结果住同一格，只是走**另一个只读出口**
+  （`failure`，ADR-77）；读者的反应仍然发生在各自的副作用里。
 - 唯一 catch 不到的一类：传输拿到的 `AbortSignal` 上的监听器由宿主在 `abort()` 时同步调用，
   它们的抛错由宿主上报，因此不在承诺内。
 - 后台失败保留声明与开启意愿，旧结果不变，下个周期继续；框架不改写调用方的 `enabled`。
@@ -470,7 +476,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 | 取数资格 | 声明还在 ＋ 这一页激活 ＋ 浏览器可见 ＋ 配置开启且有周期，四组缺一不可；**只决定要不要取数** | `Resource.isEligible`（§3.5 第 11 条） |
 | 当前执行 | 一个实例至多一个执行，它至多在队列或在执行之一；`controller === null` 同时表示没有执行与这次不算数 | `place`（`enqueueDue` 入队 / `startQueued` 起跑 / `run` 的 `finally` / `releaseIfUnused` 都经它） |
 | 刷新命令 | 一次显式刷新＝**给身份下的一句命令**：没有执行就插到队头；有执行且结果还没产出就用这一轮；结果已经写进表就记「还欠一轮」。**核心不记是谁点的**，同一轮内点几次合并成一次，没有回执 | `RefreshCore.refresh`（三条分支）、`Resource.produced` / `needsNext`、核心私有的 `enqueueAtHead` / `refill` |
-| 结果表 | 结果的唯一真值：`URL → 参数键 → ResultCell 四字段`；页面按**已声明身份**读它，读到的就是那一份对象 | `useRefreshStore`（`store.ts`）：核心直接调 `sink.write` / `sink.fail` 写、`releaseIfUnused` 删、`display` 读 |
+| 结果表 | 结果的唯一真值：`URL → 参数键 → ResultCell 四字段`；页面按**已声明身份**读它，读到的就是那一份对象 | `useRefreshStore`（`store.ts`）：核心直接调 `sink.write` / `sink.fail` 写、`releaseIfUnused` 删、`display`／`failure` 读 |
 | 读者 | 本页此刻跟着结果表走：**有资格**，或还没有读取过且此刻浏览器可见（`lastReadAt === null && core.isVisible()`）；不是读者就冻结画面。读者画面＝**写入驱动 ＋ 一个数 `lastReadAt`**（同一版不抄第二遍；新格距画面里那一版满一个本页 `every` 才换，一个窗口最多换一次） | **适配层的读闸门**：`core.isEligible(...) || (lastReadAt === null && core.isVisible())`（§6.4；核心不认识这个判定） |
 
 ### 9.3 每个符号做什么
@@ -478,8 +484,10 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 | 符号 | 做什么 |
 |---|---|
 | `Config` | 一页在核心里的**全部内容**与登记：`{ enabled, every, active }` 一个可变对象，适配层原地写、核心只读；`every === null` ＝ 这一拍配置非法 |
-| `useRefresh` | 组件侧**唯一入口**：`(url, options)`——第一个参数是资源 URL 字符串（非空，空 URL 抛 `TypeError`），`P`／`T` 写在这一行的类型参数上；建立本页的配置槽并跟踪配置与生命周期，返回公开的 `RefreshHandle`（指向结果表的只读显示面与两个动作）；**参数准备在这里完成**（不跑任何调用方回调，ADR-74），抛错就地变 `rejected`（ADR-64）；`display` 读取面＝**写入驱动 ＋ `updatedAt` 差节流**（新格距展示中那份满一个本页 `every` 才换画面，一个 `every` 窗口最多换一次），**三处不等窗口**：身份落定、重新成为读者、显式 `refresh()`——都只把上次读取时间置 `null`（ADR-67、ADR-72） |
+| `useRefresh` | 组件侧**唯一入口**：`(url, options)`——第一个参数是资源 URL 字符串（非空，空 URL 抛 `TypeError`），`P`／`T` 写在这一行的类型参数上；建立本页的配置槽并跟踪配置与生命周期，返回公开的 `RefreshHandle`（指向结果表的只读显示面与两个动作）；**参数准备在这里完成**（不跑任何调用方回调，ADR-74），抛错就地变 `rejected`（ADR-64）；`display`（数据出口）＝**写入驱动 ＋ `updatedAt` 差节流**（新格距展示中那份满一个本页 `every` 才换画面，一个 `every` 窗口最多换一次），**三处不等窗口**：身份落定、重新成为读者、显式 `refresh()`——都只把上次读取时间置 `null`；`failure`（失败出口）＝同一格里最近一次失败，**不参与窗口**、换一笔就发布、成功后 `null`（ADR-67、ADR-72、ADR-77） |
 | `createRefreshManager` | 创建应用级协调者：接结果表（`pinia`）、取数实例（`axios`）与并发上限；`install` 再接可见性监听与卸载释放 |
+| `RefreshFailure` | 失败出口的形状：`{ error, failedAt }`；`null` ＝ 自最后一次成功以来没失败过（含从未失败过）——「有没有失败」只看它在不在（ADR-77） |
+| `handle.failure` | 本页看到的最近一次失败：与 `display` 同一个来源、同一个读闸门，但**不参与数据窗口**；写入时立刻发布，成功后清回 `null`（ADR-77） |
 | `RefreshCore.isDisposed` | 协调者是否已销毁；存活状态的唯一公开出口 |
 | `RefreshCore.isVisible` | 浏览器此刻是否可见：核心持有的**一比特事实**，读闸门在适配层（ADR-66） |
 | `RefreshCore.setVisible` | 浏览器可见性变化：隐藏让所有页面失去资格，下一轮不再取数；已发出的请求不受影响 |

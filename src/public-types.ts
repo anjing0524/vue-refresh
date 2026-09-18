@@ -23,24 +23,38 @@ export type SubmitResult =
   | { readonly status: 'cancelled' }
 
 /**
- * 交付面：参数、数据与结果产生时间同次整体发布。**两者都是本页独立副本**（ADR-52）。
+ * 数据读出口：参数、数据与产生时间**同次整体发布**，只装「最后一次成功」那一版。
+ *
+ * `args` 与 `data` 都是本页独立副本或同一份对象（ADR-52）：`data` 是结果表里**同一个对象**，
+ * 要改自己复制；`args` 每次抄写复制一份。
  *
  * 它是**某个版本**的副本，不是实时视图：适配层在每次写入时按这一页自己的 `every` 节流地抄一份
  * （新身份的第一份、显式刷新那一次、以及失活恢复后的第一份立即抄），两拍之间结果表里的
  * 新版本不改变这里（ADR-63）。因此 `data` 可以比结果表旧——这是慢页面主动要的代价。
+ *
+ * **失败不在这里**：它是同一格上的另一件事、有自己的出口（`RefreshFailure`），不参与这个窗口。
  */
 export interface RefreshDisplay<P extends object, T> {
   readonly args: ReadonlySnapshot<P>
   /** 最后一次成功的数据；**从未成功过**（首查就失败）时为 `null`。 */
   readonly data: ReadonlySnapshot<T> | null
   readonly updatedAt: number | null
+}
+
+/**
+ * 失败读出口：最近一次失败的原始异常与发生时刻；`null` ＝ 自最后一次成功以来没失败过（含从未失败过）。
+ *
+ * 「有没有失败」看这个对象**在不在**——`error` 本身可以是 `undefined`（页面 `throw undefined` 这种
+ * 病态情况也如实带出），所以它不承担存在性。**它不参与数据窗口**：这一格换了一笔新的失败就立刻发布，
+ * 成功后清回 `null`（ADR-77）。因此持续失败的接口对已有数据的页面不再静默。
+ */
+export interface RefreshFailure {
   /**
    * 最近一次失败的原始异常（传输抛出的、`AbortError`……），原样带出，判断交给读取面。
-   * 有没有失败看 `failedAt`：页面 `throw undefined` 这种病态情况下这个字段也是 `undefined`。
    */
   readonly error: unknown
-  /** 最近一次失败的时刻；之后成功过就清回 `null`（两拍之间被成功盖过的那一段看不见，见 ADR-63）。 */
-  readonly failedAt: number | null
+  /** 最近一次失败的时刻；之后成功过就清回 `null`（此时整个对象是 `null`）。 */
+  readonly failedAt: number
 }
 
 /**
@@ -60,22 +74,30 @@ export interface RefreshOptions {
   readonly every: Ref<number>
 }
 
-/** 组件句柄：声明订阅、主动刷新并读取本页快照。 */
+/** 组件句柄：声明订阅、主动刷新，并读取本页的两个出口（数据与失败）。 */
 export interface RefreshHandle<P extends object, T> {
   /**
-   * 本页看到的画面：按已声明身份从结果表读出来的一个只读视图，**按本页 `every` 节流**
+   * 本页看到的数据：按已声明身份从结果表读出来的一个只读视图，**按本页 `every` 节流**
    * （新结果的 `updatedAt` 距展示中那份满一个 `every` 才换画面，ADR-67）。
    *
    * `args` 每次抄写都复制一份（它是身份键描述的那份值）；`data` 是结果表里**同一个对象**，
    * 要改自己复制。实例被释放时读回 `null`，但画面**保留最后一帧**，不因没人订阅而变空。
    */
   readonly display: Readonly<Ref<RefreshDisplay<P, T> | null>>
+  /**
+   * 本页看到的**最近一次失败**；与 `display` 共用一个读者闸门，但**不参与数据窗口**——
+   * 这一格换了一笔新的失败就立刻发布，成功后清回 `null`（ADR-77）。
+   *
+   * 它是**状态**而不是回执：共享请求可能是别的页面发起的，所以这一页读到的是那个身份当前是否处于失败态；
+   * 「这次失败是不是我点的那一次」由页面自己按 `refresh()` 的时刻判断（与 `updatedAt` 同理）。
+   */
+  readonly failure: Readonly<Ref<RefreshFailure | null>>
   /** 声明或更新订阅身份；相同身份重复声明幂等，不隐含刷新。 */
   submit(args: P): SubmitResult
   /**
    * 显式刷新当前身份；与自动刷新共用同一条获取与交付路径。
    *
-   * 只登记一次要求，**没有回执**：成功与失败都只经 `display`（同一条通道）。
+   * 只登记一次要求，**没有回执**：成功与失败都只经 `display` / `failure`（同一条通道）。
    * 这个动作一定会被本页看见——它不等节流窗口，结果一到就抄（ADR-63）。
    */
   refresh(): void
