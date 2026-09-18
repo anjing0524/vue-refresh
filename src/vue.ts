@@ -95,9 +95,6 @@ export function useRefresh<P extends object, T>(
   /** 这一页是否已被释放（`onScopeDispose` 置位）：释放后再调 `submit`／`refresh` 一概不产生事实。 */
   let released = false
 
-  /** 资格边沿的计数器：`activate` 与配置变化之后 +1，让下面那个副作用重新判定「本页还是不是读者」。 */
-  const eligible = shallowRef(0)
-
   /**
    * 本页看到的画面：**由写入事件驱动、按本页 `every` 节流抄来的一份副本**。
    *
@@ -113,10 +110,11 @@ export function useRefresh<P extends object, T>(
    * - **没东西可抄时保留上一次画面**：条目随实例释放即删（A06 在结果表这一层不变），
    *   而页面上「刚才那份数据」不该因为没人订阅了就变空。
    * - **先无条件读结果表**（在任何 `return` 之前）：否则这个副作用记不住对结果表的依赖，
-   *   之后的写入唤不醒它（浏览器用例抓到过这个真实缺陷）。`eligible` 只负责资格边沿重新判定。
+   *   之后的写入唤不醒它（浏览器用例抓到过这个真实缺陷）。
    *
    * 依赖粒度：`store.read(url, key)` 现在返回的是那一个 cell ref 的 `.value`，副作用收在那一个 ref 上；
-   * 写别的格不会唤醒这个副作用。
+   * 写别的格不会唤醒这个副作用。**唤醒它的只有两件事：这一格被写入、这一页换了身份**（`identity`）——
+   * 配置变化不改画面，只改「下一次写入时怎么判定」（`lastReadAt` 由下面那个 watcher 负责，ADR-73）。
    */
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
   /**
@@ -131,7 +129,6 @@ export function useRefresh<P extends object, T>(
   watchEffect(() => {
     const key = identity.value
     const cell = store.read(source.name, key ?? '')
-    eligible.value
     // 从来没有写过这一格：没有可抄的东西，画面停在上一帧（不发布空副本）。
     if (key === null || cell === undefined) return
     // 读闸门：有资格（声明着它、配置有效、开启、激活且浏览器可见），或**还没读取过**（第一次，或
@@ -168,14 +165,12 @@ export function useRefresh<P extends object, T>(
   const stopWatching = watch(() => readConfig(options, active.value), read => {
     applyConfig(config, read)
     core.reconcile()
-    // 重新成为读者（激活、开起来、修好配置）：把上次读取时间置 `null`，下一份内容因此不等窗口。
+    // 重新成为读者（激活、开起来、修好配置）：把上次读取时间置 `null`，**下一份写入**因此不等窗口。
     // **失去资格那一侧（暂停、失活、隐藏）不动**——那一侧若也置 `null`，读闸门第二项就会把整个
     // 失活期都放行，画面在后台一路跟下去，「失活冻结」就没了（ADR-72）。
-    // 顺序：**先改状态、再触发**——`eligible` 是同步副作用的触发点（`flush: 'sync'`），置后一步它会
-    // 带着旧的读取时间去判定，那一拍就白跑了（ADR-72 的用例抓到过）。
+    // 这里**不需要**再叫醒副作用：它只由数据写入与换身份唤醒，配置变化只影响「下一份写入怎么判定」。
     const changed = identity.value
     if (changed !== null && core.isEligible(config, source.name, changed)) lastReadAt = null
-    eligible.value += 1
   }, { flush: 'sync', immediate: true })
 
   // 拆卸由这一层自己做：核心不再持有任何回调配额，所以释放时是这里主动停表、再把它摘出名册。

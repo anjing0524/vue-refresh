@@ -274,6 +274,54 @@ test('A04/A06 点过刷新之后失活：缓存里那一帧仍会更新；失活
   app.unmount()
 })
 
+test('A06 重新成为读者不会自己补抄：下一份写入到达时才上屏，而且不等窗口', async () => {
+  let loads = 0
+  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/911')
+  const manager = newManager(1, async () => { loads++; return loads })
+  const enabled = ref(false)
+  let reader!: RefreshHandle<{ symbol: string }, number>
+  let paused!: RefreshHandle<{ symbol: string }, number>
+
+  const Reader = defineComponent({
+    setup() {
+      reader = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const Paused = defineComponent({
+    setup() {
+      paused = useRefresh(quote, { enabled, every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const app = renderer.createApp(defineComponent({ setup() { return () => h('div', [h(Reader), h(Paused)]) } }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  reader.submit({ symbol: 'A' })
+  paused.submit({ symbol: 'A' })
+  await tick()
+  assert.equal(paused.display.value?.data, 1, '暂停页还没有读取时间：第一份直接上屏')
+
+  reader.refresh()
+  await tick()
+  assert.equal(reader.display.value?.data, 2)
+  assert.equal(paused.display.value?.data, 1, '它有上次读取时间了：窗口内不换画面')
+
+  // 恢复：这一拍**不会**自己把表里已有的那一版补抄进来（读取面只由数据写入与换身份唤醒，ADR-73）。
+  enabled.value = true
+  await tick()
+  await tick()
+  assert.equal(paused.display.value?.data, 1, '重新成为读者不补抄，等下一份写入')
+
+  // 下一份写入到达：上次读取时间已在恢复时被清掉，所以它不等窗口，直接上屏。
+  reader.refresh()
+  await tick()
+  assert.equal(paused.display.value?.data, 3, '下一份写入到达时上屏，不等窗口')
+  app.unmount()
+})
+
 test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写失败、修正后恢复', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>('/api/vue/187')
