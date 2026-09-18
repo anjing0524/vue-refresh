@@ -34,18 +34,6 @@ function readConfig(options: RefreshOptions, active: boolean): readonly [enabled
   }
 }
 
-/** 把配置写进当前协调者的槽；值非法时只把 `every` 置 `null`（＝这一拍配置非法）。 */
-function applyConfig(target: Config, values: readonly [enabled: unknown, every: unknown, active: boolean]): void {
-  const [enabled, every, active] = values
-  if (typeof enabled !== 'boolean' || typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) {
-    target.every = null
-    return
-  }
-  target.enabled = enabled
-  target.every = every
-  target.active = active
-}
-
 /** 组件侧入口：登记本页需求，跟踪配置与生命周期，返回两个读出口与两个动作。
  * 必须在组件的 `setup` 中同步调用，且此前已安装一个存活的协调者。 */
 export function useRefresh<P extends JsonParameters<P>, T>(
@@ -67,8 +55,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     const viewer = currentCore()
     slot = viewer
     if (viewer === null) return
-    applyConfig(config, readConfig(options, active.value))
-    viewer.reconcile()
+    const [nextEnabled, nextEvery, nextActive] = readConfig(options, active.value)
+    viewer.setConfig(config, nextEnabled, nextEvery, nextActive)
   }
 
   /** 本页已提交的声明（身份键 ＋ 参数副本）；`null` ＝ 还没提交过。 */

@@ -25,7 +25,7 @@ export interface Snapshot {
  */
 interface CoreLedger {
   readonly identities: Map<string, Resource>
-  readonly queue: Set<Resource>
+  readonly queue: readonly Resource[]
   readonly running: Set<Resource>
   readonly sink: { list(): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[] }
 }
@@ -36,7 +36,7 @@ const SHAPE_HINT = '（scripts/observe.ts 的形状视图要同步）'
 export function snapshot(core: RefreshCore): Snapshot {
   const { identities, queue, running, sink } = core as unknown as Partial<CoreLedger>
   if (!(identities instanceof Map)) throw new TypeError(`观测面：核心的 identities 已不是 Map${SHAPE_HINT}`)
-  if (!(queue instanceof Set)) throw new TypeError(`观测面：核心的 queue 已不是 Set${SHAPE_HINT}`)
+  if (!Array.isArray(queue)) throw new TypeError(`观测面：核心的 queue 已不是数组${SHAPE_HINT}`)
   if (!(running instanceof Set)) throw new TypeError(`观测面：核心的 running 已不是 Set${SHAPE_HINT}`)
   if (sink === undefined || typeof sink.list !== 'function') {
     throw new TypeError(`观测面：核心的 sink.list() 已不可用${SHAPE_HINT}`)

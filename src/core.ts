@@ -2,7 +2,7 @@ import type { SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
 import { Resource, type Config } from './resource.ts'
 
-/** 共享取数与调度核心：三件跨实例的事——身份注册表、FIFO 队列与并发槽、唯一唤醒 Timer
+/** 共享取数与调度核心：三件跨实例的事——身份注册表、待取队列与在途集合、唯一唤醒 Timer
  * （一个身份自己的账在 `resource.ts`）。它不持有页面。 */
 
 /** 结果表的一格：最后一次成功 ＋ 最近一次失败，四个字段全平。
@@ -51,16 +51,16 @@ export interface RefreshHttp {
   post(url: string, data: unknown, config: { readonly signal: AbortSignal }): Promise<{ readonly data: unknown }>
 }
 
-/** 跨身份的协调者：身份注册表、FIFO 队列与并发槽、唯一唤醒 Timer、可见性与销毁。 */
+/** 跨身份的协调者：身份注册表、待取队列与在途集合、唯一唤醒 Timer、可见性与销毁。 */
 export class RefreshCore {
   private readonly maxConcurrent: number
   private readonly http: RefreshHttp
   private readonly sink: ResultSink
   /** 身份键 → 实例。 */
   private readonly identities = new Map<string, Resource>()
-  /** FIFO 待执行的实例（一个实例至多一个执行）。 */
-  private readonly queue = new Set<Resource>()
-  /** 真实尚未结束的请求；并发槽的唯一事实。 */
+  /** 待取队列：**只表达顺序**（手动刷新与补的那一轮插到队头）；队里的实例都握着这次执行的把手。 */
+  private readonly queue: Resource[] = []
+  /** 在途集合：请求已经发出、还没结束的实例；并发槽的唯一事实。 */
   private readonly running = new Set<Resource>()
   /** 唯一 Timer 的取消句柄。 */
   private wakeup: (() => void) | null = null
@@ -95,8 +95,15 @@ export class RefreshCore {
     this.flushSoon()
   }
 
-  /** 配置或生命周期变化后重新算一次到期与唤醒。 */
-  reconcile(): void {
+  /** 把这一页的配置写进它自己那份槽并重排调度；三个值非法时只把 `every` 置 `null`（＝这一拍配置非法）。 */
+  setConfig(config: Config, enabled: unknown, every: unknown, active: boolean): void {
+    if (typeof enabled !== 'boolean' || typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) {
+      config.every = null
+    } else {
+      config.enabled = enabled
+      config.every = every
+      config.active = active
+    }
     this.flushSoon()
   }
 
@@ -105,12 +112,11 @@ export class RefreshCore {
     if (this.disposed) return
     this.disposed = true
     this.clearWakeup()
-    this.queue.clear()
-    for (const resource of this.all()) {
+    // 逐个实例撤销声明并回收；回收会把实例从注册表与队列里摘掉，所以两个集合循环后必然已空。
+    for (const resource of [...this.identities.values()]) {
       resource.declarers.clear()
       this.releaseIfUnused(resource)
     }
-    this.identities.clear()
   }
 
   // ══════════════════════════ 页面操作 ══════════════════════════
@@ -136,10 +142,11 @@ export class RefreshCore {
   refresh(config: Config, url: string, key: string): boolean {
     if (this.disposed) return false
     if (!config.active || config.every === null || !this.visible) return false
-    const resource = this.find(url, key)
+    const resource = this.identities.get(identityOf(url, key))
     if (resource === undefined) return false
 
-    if (!resource.hasExecution()) this.enqueueAtHead(resource)
+    if (!resource.hasExecution()) this.enqueue(resource, true)
+    // 结果已经产出了才需要「再来一轮」；还没产出的话本轮结果就够。
     else if (resource.produced) resource.needsNext = true
     this.flushSoon()
     return true
@@ -147,7 +154,7 @@ export class RefreshCore {
 
   /** 这一份配置此刻有没有取数资格。 */
   isEligible(config: Config, url: string, key: string): boolean {
-    return this.find(url, key)?.isEligible(config, this.visible) ?? false
+    return this.identities.get(identityOf(url, key))?.isEligible(config, this.visible) ?? false
   }
 
   /** 读这一格的结果；读取面（适配层）用它。 */
@@ -166,11 +173,6 @@ export class RefreshCore {
 
   // ══════════════════════════ 身份注册表 ══════════════════════════
 
-  /** 全部实例的一份快照（遍历时可能回收）。 */
-  private all(): Resource[] {
-    return [...this.identities.values()]
-  }
-
   /** 按身份键查找，没有就建立实例。 */
   private resourceFor(url: string, parameters: Parameters): Resource {
     const identity = identityOf(url, parameters.key)
@@ -182,11 +184,6 @@ export class RefreshCore {
     return resource
   }
 
-  /** 按身份键找实例；只查不建。 */
-  private find(url: string, key: string): Resource | undefined {
-    return this.identities.get(identityOf(url, key))
-  }
-
   /** 这份配置登记在哪个实例上；只查不建（扫描是不存反向字段的代价）。 */
   private resourceOf(config: Config): Resource | undefined {
     for (const resource of this.identities.values()) {
@@ -195,51 +192,37 @@ export class RefreshCore {
     return undefined
   }
 
-  /** 没有声明者了：删实例、abort 在途、删结果表条目。 */
+  /** 没有声明者了：删实例与结果表条目，并把这一份账一笔勾销（在途请求仍占着槽位，但结果不再算数）。 */
   private releaseIfUnused(resource: Resource): void {
     if (resource.isWanted()) return
     this.identities.delete(identityOf(resource.url, resource.parameters.key))
 
     this.sink.remove(resource.url, resource.parameters.key)
+    // 身份没了，欠的那一轮与这次执行的认人一起作废——否则收尾时会把已释放的实例重新排进队列。
+    resource.needsNext = false
     const controller = resource.controller
-    if (controller) {
-      // 在跑的那次不能当场交还槽位：占位的是请求，不是实例。
-      this.place(resource, this.running.has(resource) ? 'abandoned' : 'idle')
-      controller.abort()
-    }
+    this.dequeue(resource)
+    resource.controller = null
+    if (controller) controller.abort()
   }
 
   // ══════════════════════════ 后台执行 ══════════════════════════
 
-  /** 执行位置的唯一写入点：`queued`／`running`／`abandoned`（实例已回收、在跑请求仍占槽）／`idle`。 */
-  private place(resource: Resource, position: 'queued' | 'running' | 'abandoned' | 'idle'): void {
-    this.queue.delete(resource)
-    this.running.delete(resource)
-    if (position === 'queued') {
-      this.queue.add(resource)
-      resource.controller = new AbortController()
-    }
-    if (position === 'running' || position === 'abandoned') this.running.add(resource)
-    if (position !== 'queued' && position !== 'running') resource.controller = null
+  /** 排进待取队列（`first` 插到队头），并给它这次执行的把手。 */
+  private enqueue(resource: Resource, first = false): void {
+    this.dequeue(resource)
+    if (first) this.queue.unshift(resource)
+    else this.queue.push(resource)
+    resource.controller = new AbortController()
   }
 
-  /** 插到队头：手动刷新排在周期取数前面。 */
-  private enqueueAtHead(resource: Resource): void {
-    this.place(resource, 'queued')
-    const waiting = [...this.queue].filter(other => other !== resource)
-    this.queue.clear()
-    this.queue.add(resource)
-    for (const other of waiting) this.queue.add(other)
+  /** 从待取队列里摘掉；不在队里就什么也不做。 */
+  private dequeue(resource: Resource): void {
+    const index = this.queue.indexOf(resource)
+    if (index >= 0) this.queue.splice(index, 1)
   }
 
-  /** 一轮结束后：产出之后又有人点过刷新，就补一次。 */
-  private refill(resource: Resource): void {
-    if (!resource.needsNext || resource.hasExecution()) return
-    resource.needsNext = false
-    this.enqueueAtHead(resource)
-  }
-
-  /** 执行一次后台请求：结算 → 写表 → 释放槽位 → 补后继请求。框架不设自己的取数上限。 */
+  /** 执行一次后台请求：结算 → 写表 → 交还槽位 → 补后继请求。框架不设自己的取数上限。 */
   private async run(resource: Resource): Promise<void> {
     const controller = resource.controller
     if (controller === null) return
@@ -250,7 +233,7 @@ export class RefreshCore {
         structuredClone(resource.parameters.args),
         { signal: controller.signal },
       )
-      // 复制结果前后各复核一次「这次还是不是当前执行」。
+      // 复制结果前后各复核一次「这次还是不是当前执行」：复制要读属性，取值器可能同步重入。
       if (!resource.isCurrent(controller)) return
       const data = copyResult(response.data)
       if (!resource.isCurrent(controller)) return
@@ -264,56 +247,57 @@ export class RefreshCore {
       resource.settle(at)
       this.sink.fail(resource.url, resource.parameters.key, error, at)
     } finally {
-      this.place(resource, 'idle')
+      this.running.delete(resource)
+      resource.controller = null
       resource.produced = false
-      this.refill(resource)
+      // 产出之后又有人点过刷新：本轮结束再补一次，插到队头。
+      if (resource.needsNext) {
+        resource.needsNext = false
+        this.enqueue(resource, true)
+      }
       this.flushSoon()
     }
   }
 
   // ══════════════════════════ 调度 ══════════════════════════
 
-  /** 安排一次合并调度；同一轮内的多次请求合并成一个微任务。 */
+  /** 安排一次合并调度；同一轮内的多次变更合并成一个微任务。 */
   private flushSoon(): void {
     if (this.flushing || this.disposed) return
     this.flushing = true
     queueMicrotask(() => { this.flush() })
   }
 
-  /** 一次 flush：到期入队 → 按 FIFO 用可用槽位启动 → 设置唯一唤醒 Timer。 */
+  /** 一次调度：到期入队 → 用可用槽位启动 → 队列空了就安排唯一唤醒 Timer。 */
   private flush(): void {
     this.flushing = false
     if (this.disposed) return
     this.clearWakeup()
     const next = this.enqueueDue(Date.now())
     this.startQueued()
-    this.scheduleWakeup(next)
+    if (this.queue.length === 0 && next < Infinity) this.setWakeup(next)
   }
 
-  /** 第一步：把到期的实例登记进队列，返回最早的下次到期时刻（`Infinity`＝没有要等的）。 */
+  /** 第一步：把到期的实例排进队列，返回最早的下次到期时刻（`Infinity`＝没有要等的）。 */
   private enqueueDue(now: number): number {
     let next = Infinity
-    for (const resource of this.all()) {
+    for (const resource of [...this.identities.values()]) {
       if (resource.hasExecution()) continue
       const due = resource.dueAt(now, this.visible)
-      if (due <= now) this.place(resource, 'queued')
+      if (due <= now) this.enqueue(resource)
       else next = Math.min(next, due)
     }
     return next
   }
 
-  /** 第二步：按 FIFO 用当前可用槽位启动。满槽时由请求真实结束唤醒。 */
+  /** 第二步：按队列顺序用当前可用槽位启动。满槽时由请求真实结束唤醒。 */
   private startQueued(): void {
-    for (const resource of [...this.queue]) {
-      if (this.running.size >= this.maxConcurrent) break
-      this.place(resource, 'running')
+    while (this.running.size < this.maxConcurrent) {
+      const resource = this.queue.shift()
+      if (resource === undefined) break
+      this.running.add(resource)
       void this.run(resource)
     }
-  }
-
-  /** 第三步：队列已清空且还有明确的到期时刻时，安排唯一唤醒 Timer。 */
-  private scheduleWakeup(next: number): void {
-    if (this.queue.size === 0 && next < Infinity) this.setWakeup(next)
   }
 
   /** 取消唯一唤醒 Timer。 */

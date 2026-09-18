@@ -164,14 +164,8 @@ function page(
       core.refresh(config, url, declared.key)
     },
     set(next) {
-      if (next === null) {
-        config.every = null
-      } else {
-        config.enabled = next.enabled ?? config.enabled
-        config.every = next.every ?? config.every
-        config.active = next.active ?? config.active
-      }
-      core.reconcile()
+      if (next === null) core.setConfig(config, undefined, undefined, false)
+      else core.setConfig(config, next.enabled ?? config.enabled, next.every ?? config.every, next.active ?? config.active)
     },
     get last() {
       if (declared === null) return undefined
@@ -843,6 +837,34 @@ test('A09 maxConcurrent 就是真实 HTTP 并行度：在途顶满上限，一�
   assert.equal(inFlight, 0, '全部结束')
   assert.equal(peak, 4)
   for (const view of pages) assert.notEqual(view.last, undefined, '每一页都拿到了结果')
+})
+
+test('A06/A17 写表时的同步重入里刷新并卸载：释放之后不再补一轮，身份不会被复活重取', async () => {
+  let calls = 0
+  const resolvers: Array<(value: number) => void> = []
+  const source = '/api/core/692'
+  const core = newCore(1, () => {
+    calls++
+    return new Promise<number>(resolve => resolvers.push(resolve))
+  })
+  const view = page(core, source)
+  view.submit({ id: 1 })
+  await settle()
+  assert.equal(calls, 1)
+
+  // 写表会同步触发页面代码：这一瞬页面点了一次刷新，然后当场卸载。
+  tableOf(core).onWrite = () => {
+    view.refresh()
+    core.undeclare(view.config)
+  }
+  resolvers[0]?.(1)
+  await settle()
+
+  assert.equal(calls, 1, '释放之后不再补一轮：已释放的身份不该被重新取数')
+  assert.equal(snapshot(core).resources.length, 0, '实例已回收')
+  assert.equal(snapshot(core).queued.length, 0, '队列里不留下已释放的实例')
+  assert.equal(snapshot(core).running.length, 0, '在途归零')
+  assert.equal(core.readResult(source, '1'), undefined, '结果表条目也没有被写回来')
 })
 
 test('A07 有效间隔取所有订阅的最小值', async () => {
