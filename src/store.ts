@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { shallowRef } from 'vue'
 import type { ShallowRef } from 'vue'
+import { identityOf } from './core.ts'
 import type { ResultCell } from './core.ts'
 
 /**
@@ -29,11 +30,10 @@ import type { ResultCell } from './core.ts'
  */
 export const useRefreshStore = defineStore('vue-refresh', () => {
   const cells = new Map<string, ShallowRef<ResultCell | undefined>>()
-  const keyOf = (url: string, key: string): string => `${url}\0${key}`
 
   /** 取或建对应 cell ref；首次建时是 `undefined`（＝从未写过）。 */
   const refOf = (url: string, key: string): ShallowRef<ResultCell | undefined> => {
-    const k = keyOf(url, key)
+    const k = identityOf(url, key)
     let ref = cells.get(k)
     if (!ref) {
       ref = shallowRef<ResultCell | undefined>(undefined)
@@ -56,7 +56,7 @@ export const useRefreshStore = defineStore('vue-refresh', () => {
 
   /** 实例释放时把该格清掉（置 `undefined`），但 cell ref 本身保留——见上文「整 cell 不删」。 */
   const remove = (url: string, key: string): void => {
-    const ref = cells.get(keyOf(url, key))
+    const ref = cells.get(identityOf(url, key))
     if (ref) ref.value = undefined
   }
 

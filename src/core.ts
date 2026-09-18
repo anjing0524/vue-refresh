@@ -150,6 +150,15 @@ export class Resource {
 /** `setTimeout` 的平台上限（约 24.8 天）；更远的到期分段等待。 */
 const MAX_TIMER_DELAY = 2_147_483_647
 
+/**
+ * 身份键：`身份 = URL ＋ 参数值稳定键` 在运行期的字面形式（NUL 分隔，两个字符串里都不会出现）。
+ *
+ * 它是**注册表与结果表共用的那一个键**——两处各写一遍 `\0` 拼接就是一处会悄悄走样的重复。
+ */
+export function identityOf(url: string, key: string): string {
+  return `${url}\u0000${key}`
+}
+
 /** 结果边界：拒绝 `undefined`，其余原生复制；业务合法性由请求适配器负责。 */
 function copyResult(input: unknown): unknown {
   if (input === undefined) throw new TypeError('取数结果不能是 undefined')
@@ -173,8 +182,8 @@ export class RefreshCore {
   private readonly http: RefreshHttp
   /** 结果表：结果的唯一真值，适配层接在 Pinia 上（`src/store.ts`）。 */
   private readonly sink: ResultSink
-  /** URL → 参数键 → 实例。 */
-  private readonly buckets = new Map<string, Map<string, Resource>>()
+  /** 身份键 → 实例（键由 `identityOf` 构造；与结果表同一个键）。 */
+  private readonly identities = new Map<string, Resource>()
   /** FIFO 待执行的实例（一个实例至多一个执行）。 */
   private readonly queue = new Set<Resource>()
   /** 真实尚未结束的请求；并发槽的唯一事实（含实例已回收、但请求仍在途的那一次）。 */
@@ -257,7 +266,7 @@ export class RefreshCore {
   refresh(config: Config, url: string, key: string): boolean {
     if (this.disposed) return false
     if (!config.active || config.every === null || !this.visible) return false
-    const resource = this.buckets.get(url)?.get(key)
+    const resource = this.identities.get(identityOf(url, key))
     if (resource === undefined) return false
 
     // 有执行就直接用它的结果；没有就当场登记一次。同一个页面重复刷新只留一份要求（标志不是队列）。
@@ -269,7 +278,7 @@ export class RefreshCore {
 
   /** 这一份配置此刻有没有取数资格：有资格 ＝ 环境允许 ＋ 开启意愿（G3/G4 的判定）。 */
   isEligible(config: Config, url: string, key: string): boolean {
-    return this.buckets.get(url)?.get(key)?.isEligible(config, this.visible) ?? false
+    return this.identities.get(identityOf(url, key))?.isEligible(config, this.visible) ?? false
   }
 
   /** 释放一页：撤销它未完成的要求与声明（组件卸载、销毁都由它收尾）。撤销后若实例没人要了就地回收。 */
@@ -296,11 +305,9 @@ export class RefreshCore {
   } {
     const resources: Resource[] = []
     const declarers: Config[] = []
-    for (const bucket of this.buckets.values()) {
-      for (const resource of bucket.values()) {
-        resources.push(resource)
-        for (const config of resource.declarers) declarers.push(config)
-      }
+    for (const resource of this.identities.values()) {
+      resources.push(resource)
+      for (const config of resource.declarers) declarers.push(config)
     }
     return {
       declarers,
@@ -326,30 +333,24 @@ export class RefreshCore {
       resource.waiters.clear()
       this.releaseIfUnused(resource)
     }
-    this.buckets.clear()
+    this.identities.clear()
   }
 
   // ══════════════════════════ 身份注册表 ══════════════════════════
 
   /** 全部实例的一份快照（遍历时可能回收，所以先取出来）。 */
   private all(): Resource[] {
-    const resources: Resource[] = []
-    for (const bucket of this.buckets.values()) for (const resource of bucket.values()) resources.push(resource)
-    return resources
+    return [...this.identities.values()]
   }
 
-  /** 按「URL ＋ 完整参数值稳定键」查找，没有就建立实例。 */
+  /** 按身份键查找，没有就建立实例。 */
   private resourceFor(url: string, parameters: Parameters): Resource {
-    let bucket = this.buckets.get(url)
-    if (!bucket) {
-      bucket = new Map()
-      this.buckets.set(url, bucket)
-    }
-    const existing = bucket.get(parameters.key)
+    const identity = identityOf(url, parameters.key)
+    const existing = this.identities.get(identity)
     if (existing) return existing
 
     const resource = new Resource(url, parameters)
-    bucket.set(parameters.key, resource)
+    this.identities.set(identity, resource)
     return resource
   }
 
@@ -360,10 +361,8 @@ export class RefreshCore {
    * 一次换身份／一次卸载各扫一遍注册表（用户动作级，规模是几十个身份）。
    */
   private resourceOf(config: Config): Resource | undefined {
-    for (const bucket of this.buckets.values()) {
-      for (const resource of bucket.values()) {
-        if (resource.declarers.has(config)) return resource
-      }
+    for (const resource of this.identities.values()) {
+      if (resource.declarers.has(config)) return resource
     }
     return undefined
   }
@@ -373,9 +372,7 @@ export class RefreshCore {
    */
   private releaseIfUnused(resource: Resource): void {
     if (resource.declarers.size > 0 || resource.waiters.size > 0) return
-    const bucket = this.buckets.get(resource.url)
-    bucket?.delete(resource.parameters.key)
-    if (bucket?.size === 0) this.buckets.delete(resource.url)
+    this.identities.delete(identityOf(resource.url, resource.parameters.key))
 
     // 结果随实例释放即删：结果表里没有「没人要的」条目，读的人也就不会读到过期数据。
     this.sink.remove(resource.url, resource.parameters.key)
