@@ -301,12 +301,11 @@ test('A06 重新成为读者不会自己补抄：下一份写入到达时才上�
 
   reader.submit({ symbol: 'A' })
   paused.submit({ symbol: 'A' })
-  await tick()
-  assert.equal(paused.display.value?.data, 1, '暂停页还没有读取时间：第一份直接上屏')
+  // 调度与微任务是真实时序：只等到条件成立，不假设要转几圈（仓库既有约定）。
+  await until(() => paused.display.value?.data === 1, '暂停页还没有读取时间：第一份直接上屏')
 
   reader.refresh()
-  await tick()
-  assert.equal(reader.display.value?.data, 2)
+  await until(() => reader.display.value?.data === 2, '读者拿到第二版')
   assert.equal(paused.display.value?.data, 1, '它有上次读取时间了：窗口内不换画面')
 
   // 恢复：这一拍**不会**自己把表里已有的那一版补抄进来（读取面只由数据写入与换身份唤醒，ADR-73）。
@@ -317,8 +316,7 @@ test('A06 重新成为读者不会自己补抄：下一份写入到达时才上�
 
   // 下一份写入到达：上次读取时间已在恢复时被清掉，所以它不等窗口，直接上屏。
   reader.refresh()
-  await tick()
-  assert.equal(paused.display.value?.data, 3, '下一份写入到达时上屏，不等窗口')
+  await until(() => paused.display.value?.data === 3, '下一份写入到达时上屏，不等窗口')
   app.unmount()
 })
 
