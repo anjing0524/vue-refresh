@@ -8,19 +8,22 @@ import type { Parameters } from './source.ts'
  * 一次取数与交付的链路（唯一路径）见 DESIGN §2.1；「同一份关系不另立镜像」的理由见 DESIGN §3.1。
  */
 
-/** 配置快照：开启意愿与刷新间隔两项，由适配层现读；读不出时为 `null`（后果见 DESIGN §6.1）。 */
+/** 配置快照：开启意愿、刷新间隔、这一页是否激活三项，由适配层写入；读不出时为 `null`（后果见 DESIGN §6.1）。 */
 export interface Config {
   readonly enabled: boolean
   readonly every: number
+  /** 这一页是否挂载/激活（KeepAlive 失活为假）。它与「浏览器可见」是两件事，后者在核心上是全局的一项。 */
+  readonly active: boolean
 }
 
 /**
  * 组件需求句柄：三种角色挂在一个对象上，读之前先分清是哪一组——**组 A｜端口与配置**（`source` / `config` /
- * `onError`）由适配层给、核心只读、**组 B｜状态**（`parameters` / `active`）由核心独占写入、
+ * `onError`）由适配层给、核心只读、**组 B｜状态**（`parameters`）由核心独占写入、
  * **组 C｜接驳**（`cleanup`）双向。完整所有权表见 DESIGN §3.3。
  *
- * 两件事不存字段：**是否已释放**是 `RefreshCore.handles` 的名册成员资格（DESIGN §3.7），
- * **订阅到哪个实例**是那个实例 `subscribers` 的成员资格（DESIGN §3.5 第 1 条）。
+ * 三件事不存字段：**是否已释放**是 `RefreshCore.handles` 的名册成员资格（DESIGN §3.7）、
+ * **声明了哪个身份**是那个实例 `declarers` 的成员资格（DESIGN §3.5 第 1 条）、
+ * **资格**（开启意愿 ＋ 激活 ＋ 浏览器可见）由配置快照与核心的全局可见性现算，不另存。
  */
 export interface Handle<P extends object = object, T = unknown> {
   /** 擦除后的固定定义（URL ＋ 参数准入）：具体 Source 靠 `validate` 的方法双变进入这里。 */
@@ -32,8 +35,6 @@ export interface Handle<P extends object = object, T = unknown> {
   cleanup: (() => void) | null
   /** 已声明的身份；未声明时为 `null`。 */
   parameters: Parameters | null
-  /** 组件是否挂载/激活。 */
-  active: boolean
 }
 
 /** 一次后台执行；执行位置由 `queue` / `running` 的归属决定。 */
@@ -78,8 +79,13 @@ export class Resource {
   private readonly core: RefreshCore
   readonly source: RefreshSource<object, unknown>
   readonly parameters: Parameters
-  /** 按周期订阅本实例的句柄；各自的间隔从它们自己的配置快照现算。 */
-  readonly subscribers = new Set<Handle>()
+  /**
+   * 声明了本身份的句柄（页面挂载期间一直算，暂停/失活/隐藏都不撤销）。
+   *
+   * 「声明」决定实例与结果的生死，「资格」只决定要不要取数——两条正交规则。资格由
+   * `config.enabled && config.active && 核心的全局可见性` 现算，不在这里维护第二份集合。
+   */
+  readonly declarers = new Set<Handle>()
   /** 仍想要一次取数的句柄（显式刷新登记的要求）。它是**标志**而不是队列：重复刷新同一个句柄只留一份。 */
   readonly waiters = new Set<Handle>()
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
@@ -92,20 +98,40 @@ export class Resource {
     this.parameters = parameters
   }
 
-  /** 有效间隔现算：所有订阅的最小值，不缓存。 */
-  shortestEvery(): number {
+  /**
+   * 环境允许：这一页激活且浏览器可见。它与「开启意愿」是两件事——暂停只关掉意愿，
+   * 环境仍然允许，所以暂停页仍可显式刷新一次（A05）。
+   */
+  isPresent(handle: Handle, visible: boolean): boolean {
+    const config = handle.config
+    return visible && config !== null && config.active
+  }
+
+  /** 一个声明者此刻是否有资格取数：环境允许 ＋ 开启意愿为真。 */
+  isEligible(handle: Handle, visible: boolean): boolean {
+    const config = handle.config
+    return this.isPresent(handle, visible) && config !== null && config.enabled
+  }
+
+  /** 有效间隔现算：**有资格**的声明者里最小的 `every`；没有有资格的人就是 `Infinity`（不取数）。 */
+  eligibleEvery(visible: boolean): number {
     let every = Infinity
-    for (const handle of this.subscribers) {
-      // 订阅成立 ⟹ 配置快照有效（§3.5 第 12 条），因此间隔现算，不在句柄或实例上另存一份。
+    for (const handle of this.declarers) {
+      if (!this.isEligible(handle, visible)) continue
       const config = handle.config
       if (config) every = Math.min(every, config.every)
     }
     return every
   }
 
-  /** 该实例此刻的下次到期时刻：`settledAt ＋ 当前最短间隔`；从未结算过的实例立即到期。取消不计时不补跑。 */
-  dueAt(now: number): number {
-    return this.settledAt === null ? now : this.settledAt + this.shortestEvery()
+  /**
+   * 该实例此刻的下次到期时刻：`settledAt ＋ 当前最小间隔`；从未结算过的实例立即到期。取消不计时不补跑。
+   * 没有有资格的声明者时返回 `Infinity`：这一轮不取数，也不安排唤醒。
+   */
+  dueAt(now: number, visible: boolean): number {
+    const every = this.eligibleEvery(visible)
+    if (every === Infinity) return Infinity
+    return this.settledAt === null ? now : this.settledAt + every
   }
 
   /**
@@ -124,16 +150,17 @@ export class Resource {
   }
 
   /**
-   * 失败结算：通知仍有效的订阅者与本次有未完成要求的页面（后者没有回执，这是它唯一的失败通道），
-   * 然后撤销本实例全部未完成的刷新要求。
+   * 失败结算：通知本实例此刻的**读者**（有资格的声明者，或正在等这次结果的页面——后者没有回执，
+   * 这是它唯一的失败通道），然后撤销本实例全部未完成的刷新要求。暂停、失活、隐藏的页面不是读者，
+   * 不会收到它们没要求过的失败通知。
    */
   fail(error: unknown): void {
     this.settledAt = Date.now()
-    const notified = new Set<Handle>(this.subscribers)
+    const notified = new Set<Handle>(this.declarers)
     for (const handle of this.waiters) notified.add(handle)
     for (const handle of notified) {
-      // 前一个页面的 `onError` 可能已经改身份或退订，因此每个通知点重新复核归属。
-      if (!this.subscribers.has(handle) && !this.waiters.has(handle)) continue
+      // 前一个页面的 `onError` 可能已经改身份或卸载，因此每个通知点重新复核读者身份。
+      if (!this.core.isReader(handle)) continue
       report(handle, error)
     }
     for (const handle of [...this.waiters]) this.clearRequest(handle)
@@ -248,25 +275,11 @@ export class RefreshCore {
     const cleanup = handle.cleanup
     handle.cleanup = null
     if (cleanup) isolate(cleanup)
-    // 退订要按身份找实例，因此必须在清空 `parameters` 之前（它与 `clearRefreshes` 都读身份）。
+    // 撤销声明要按身份找实例，因此必须在清空 `parameters` 之前（它与 `clearRefreshes` 都读身份）。
     this.clearRefreshes(handle)
-    this.unsubscribe(handle)
+    this.dropDeclaration(handle)
     handle.parameters = null
     this.flushSoon()
-  }
-
-  /** 挂载/激活：恢复资格。与 `deactivate` 存在交叠（KeepAlive），因此两个方向都必须幂等。 */
-  activate(handle: Handle): void {
-    if (!this.handles.has(handle)) return
-    handle.active = true
-    this.reconcile(handle)
-  }
-
-  /** 失活：撤销资格，并结算本页未完成的刷新要求。 */
-  deactivate(handle: Handle): void {
-    if (!this.handles.has(handle)) return
-    handle.active = false
-    this.reconcile(handle)
   }
 
   /**
@@ -296,9 +309,9 @@ export class RefreshCore {
     const declared = handle.parameters
     if (declared && declared.key === parameters.key) return { status: 'accepted' }
 
-    // 顺序固定：先用旧身份撤销刷新要求（它可能落在旧实例上），再退订，最后换身份并重新协调。
+    // 顺序固定：先用旧身份撤销刷新要求（它可能落在旧实例上），再撤掉旧身份的声明，最后换身份并重新协调。
     this.clearRefreshes(handle)
-    this.unsubscribe(handle)
+    this.dropDeclaration(handle)
     handle.parameters = parameters
     this.reconcile(handle)
     return { status: 'accepted' }
@@ -311,8 +324,9 @@ export class RefreshCore {
    */
   refresh(handle: Handle): void {
     if (this.disposed || !this.handles.has(handle)) return
-    if (handle.config === null) return
-    if (!(handle.active && this.visible)) return
+    const config = handle.config
+    if (config === null) return
+    if (!(config.active && this.visible)) return
     const parameters = handle.parameters
     if (parameters === null) return
 
@@ -374,25 +388,26 @@ export class RefreshCore {
    */
   private coordinate(handle: Handle): void {
     if (this.disposed || !this.handles.has(handle)) return
-    const present = handle.active && this.visible
-    if (!present) this.clearRefreshes(handle)
-
-    const config = handle.config
     const parameters = handle.parameters
-    const resource = this.resourceOf(handle)
-    const subscribed = resource?.subscribers.has(handle) ?? false
-    if (!present || !config?.enabled || parameters === null) {
-      if (subscribed) this.unsubscribe(handle)
+
+    // 失去身份就等于撤销声明：实例与结果随最后一个声明者离开而回收（A06）。
+    if (parameters === null) {
+      this.dropDeclaration(handle)
       return
     }
-    // 已订阅：改频率不需要重建连接（间隔现算），在途请求也保留，下一次调度按新间隔重算到期。
-    if (subscribed) return
-    // `resourceOf` 没找到就当场建立；找到了就是它，不必再查一次桶。
+    // 声明即归属：页面挂载期间一直算（暂停、失活、隐藏都不撤销），取数才看资格。
+    const resource = this.resourceOf(handle)
     const target = resource ?? this.resourceFor(handle.source, parameters)
     // 一个身份只保留一份参数对象：后加入者采用实例已持有的那一份（同键等值）。这份是框架私有权威副本，
-    // 外发给每个消费者（`validate`／每轮请求体／每个接收者的 `display`）时各复制一份（ADR-52）。
+    // 外发给每个消费者（`validate`／每轮请求体）时各复制一份（ADR-52）。
     handle.parameters = target.parameters
-    target.subscribers.add(handle)
+    target.declarers.add(handle)
+
+    // 撤销刷新要求只看**环境**（失活、隐藏、卸载）：暂停只关掉开启意愿，环境仍允许，
+    // 因此暂停页刚登记的那次刷新不会被下一轮 flush 抹掉（A05、G6）。
+    // 资格只影响自动取数与读者身份：没有资格就不再是读者（画面冻结，ADR-60），但声明还留着，
+    // 所以在途请求不取消、结果也不删（失活/暂停恢复后直接读回）。
+    if (!target.isPresent(handle, this.visible)) this.clearRefreshes(handle)
   }
 
   /** 按「URL ＋ 完整参数值稳定键」查找，没有就建立实例。 */
@@ -416,19 +431,20 @@ export class RefreshCore {
     return parameters ? this.buckets.get(handle.source.name)?.get(parameters.key) : undefined
   }
 
-  /** 退订一个句柄；退订后若订阅与要求都空了，实例随之被回收。 */
-  private unsubscribe(handle: Handle): void {
+  /** 撤销一个句柄的声明；撤销后若声明与要求都空了，实例随之被回收。 */
+  private dropDeclaration(handle: Handle): void {
     const resource = this.resourceOf(handle)
-    if (!resource?.subscribers.delete(handle)) return
+    if (!resource?.declarers.delete(handle)) return
     this.releaseIfUnused(resource)
   }
 
   /**
-   * 没有订阅者也没有刷新要求：删实例与排队任务，abort 在途；迟到的结束在任务身份复核处失效。**实例入口**。
+   * 没有声明者也没有刷新要求：删实例与排队任务，abort 在途；迟到的结束在任务身份复核处失效。**实例入口**。
    * 只判「都空」就够：注销是唯一的删除路径，此刻这个键指向的必定是它自己（§3.5 第 11 条）。
+   * 注意「声明」与「资格」是两件事：暂停、失活、隐藏都不撤销声明，所以它们不会把实例收掉。
    */
   releaseIfUnused(resource: Resource): void {
-    if (resource.subscribers.size > 0 || resource.waiters.size > 0) return
+    if (resource.declarers.size > 0 || resource.waiters.size > 0) return
     const bucket = this.buckets.get(resource.source.name)
     bucket?.delete(resource.parameters.key)
     if (bucket?.size === 0) this.buckets.delete(resource.source.name)
@@ -444,14 +460,17 @@ export class RefreshCore {
   }
 
   /**
-   * 这个句柄此刻算不算该身份的**读者**：订阅着它，或在它上面有未撤销的刷新要求。
+   * 这个句柄此刻算不算该身份的**读者**：声明着它并且有资格（开启意愿 ＋ 激活 ＋ 浏览器可见），
+   * 或在它上面有未撤销的刷新要求。
    *
-   * 视图层据此决定「要不要跟随结果表的新值」：读者跟随，不是读者（暂停、失活、卸载中）就冻结在最后一帧，
-   * 但暂停页自己 `refresh()` 那一次仍在要求里，因此那次结果照样更新画面（A05、G6）。
+   * 视图层据此决定「要不要跟随结果表的新值」：读者跟随，不是读者（暂停、失活、隐藏、卸载中）
+   * 就冻结在最后一帧；暂停页自己 `refresh()` 那一次仍在要求里，因此那次结果照样更新画面（A05、G6）。
    */
   isReader(handle: Handle): boolean {
     const resource = this.resourceOf(handle)
-    return resource !== undefined && (resource.subscribers.has(handle) || resource.waiters.has(handle))
+    if (resource === undefined) return false
+    return resource.declarers.has(handle)
+      && (resource.isEligible(handle, this.visible) || resource.waiters.has(handle))
   }
 
   /** 把一次成功写进结果表。**实例入口**：结果住结果表，实例只在成功这一刻与它打交道。 */
@@ -557,8 +576,9 @@ export class RefreshCore {
     let next = Infinity
     for (const bucket of this.buckets.values()) {
       for (const resource of bucket.values()) {
-        if (resource.task || resource.subscribers.size === 0) continue
-        const due = resource.dueAt(now)
+        if (resource.task) continue
+        const due = resource.dueAt(now, this.visible)
+        // `Infinity` ＝ 这个身份没有有资格的声明者：不取数，也不参与唤醒时刻。
         if (due <= now) this.enqueue(resource)
         else next = Math.min(next, due)
       }

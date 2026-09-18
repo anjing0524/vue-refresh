@@ -72,6 +72,16 @@ afterEach(() => {
   mock.timers.reset()
 })
 
+/**
+ * 配置快照的两项默认值：挂载且激活、开启意愿、超长周期。
+ *
+ * ADR-61 把「这一页是否激活」并进了快照，所以旧契约里 `addHandle` 之后紧跟的那次 `activate`
+ * 现在等价于默认快照里的 `active: true`。
+ */
+const DEFAULT_CONFIG: Config = { enabled: true, every: 100_000, active: true }
+/** 只给要改的那几项；`null` 表示整份快照非法。 */
+type PartialConfig = { enabled?: boolean; every?: number; active?: boolean }
+
 /** 一页：句柄 ＋ 错误记录。与集成测试同一口径，直接驱动核心；画面按身份从结果表现读。 */
 interface Page {
   readonly handle: Handle
@@ -81,27 +91,26 @@ interface Page {
   writes(): number
   submit(args: object): SubmitResult
   refresh(): void
-  set(config: Config | null): void
+  /** 合并式写快照：只给要改的那项，其余沿用当前值（ADR-61 的单一写入口）。 */
+  set(next: PartialConfig | null): void
 }
 
 function page(
   core: RefreshCore,
   source: RefreshSource<object, unknown>,
-  config: Config | null = { enabled: true, every: 100_000 },
+  initial: PartialConfig | null = {},
   hooks: { onError?: (error: unknown) => unknown } = {},
 ): Page {
   const table = tableOf(core)
   const errors: unknown[] = []
   const handle: Handle = {
     source,
-    config,
+    config: initial === null ? null : { ...DEFAULT_CONFIG, ...initial },
     onError: error => { if (hooks.onError) return hooks.onError(error); errors.push(error) },
     cleanup: null,
     parameters: null,
-    active: false,
   }
   core.addHandle(handle)
-  core.activate(handle)
   return {
     handle,
     errors,
@@ -112,7 +121,20 @@ function page(
     },
     submit: args => core.submit(handle, (): Parameters => prepareParameters(args, source)),
     refresh: () => core.refresh(handle),
-    set(next) { handle.config = next; core.reconcile(handle) },
+    set(next) {
+      if (next === null) {
+        handle.config = null
+        core.reconcile(handle)
+        return
+      }
+      const current = handle.config ?? DEFAULT_CONFIG
+      handle.config = {
+        enabled: next.enabled ?? current.enabled,
+        every: next.every ?? current.every,
+        active: next.active ?? current.active,
+      }
+      core.reconcile(handle)
+    },
     get last() {
       const parameters = handle.parameters
       if (parameters === null) return undefined
@@ -125,13 +147,19 @@ function page(
 }
 
 /**
- * 本页当前订阅到的实例；没有订阅时为 `undefined`。
+ * 两个探针的分工（ADR-61 把「声明」与「资格」拆开之后）：
  *
- * 订阅关系只有一处事实——实例侧 `subscribers` 的成员资格——因此断言直接读它，不读句柄上的副本
- * （ADR-57 删掉了那个反向索引；这个探针同时是「退订即从集合移除」的直接证据）。
+ * - `declared`：这个句柄**声明**到了哪个实例。声明只要页面挂载着就一直算（暂停、失活、隐藏都不撤销），
+ *   它决定实例与结果的生死——只有卸载、换身份、销毁才撤销。
+ * - `reader`：这个句柄此刻算不算该身份的**读者**（有资格，或有未撤销的刷新要求）。
+ *   它只决定画面跟不跟随新结果（冻结见 ADR-60），不决定实例在不在。
  */
-function subscribed(core: RefreshCore, view: Page): Resource | undefined {
-  return core.snapshot().resources.find(resource => resource.subscribers.has(view.handle))
+function declared(core: RefreshCore, view: Page): Resource | undefined {
+  return core.snapshot().resources.find(resource => resource.declarers.has(view.handle))
+}
+
+function reader(core: RefreshCore, view: Page): boolean {
+  return core.isReader(view.handle)
 }
 
 /** 让微任务与 0ms 定时器跑完（每个 `await` 一跳）。 */
@@ -161,7 +189,7 @@ test('A01/A11 首次订阅立即取一次，结果按 args／data／时间整体
   assert.equal(typeof view.last?.updatedAt, 'number')
 })
 
-test('A11/A02 同参数的两个组件共享同一次请求，各自拿到独立副本', async () => {
+test('A11/A02 同参数的两个组件共享同一次请求与同一份结果（要改自己复制）', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, { list: number[] }>('/api/core/99')
   const quote = source
@@ -237,13 +265,13 @@ test('A03 相同参数重复声明幂等：不新增请求、不重建订阅', a
 
   view.submit({ id: 1 })
   await settle()
-  const subscription = subscribed(core, view)
+  const instance = declared(core, view)
 
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
   await settle()
 
   assert.equal(calls, 1)
-  assert.equal(subscribed(core, view), subscription)
+  assert.equal(declared(core, view), instance)
 })
 
 test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（输入问题只走同步返回值）', async () => {
@@ -253,12 +281,12 @@ test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（�
 
   view.submit({ id: 1 })
   await settle()
-  const declared = view.handle.parameters
-  const subscription = subscribed(core, view)
+  const before = view.handle.parameters
+  const instance = declared(core, view)
 
   assert.equal(view.submit({ id: -1 }).status, 'rejected')
-  assert.equal(view.handle.parameters, declared)
-  assert.equal(subscribed(core, view), subscription)
+  assert.equal(view.handle.parameters, before)
+  assert.equal(declared(core, view), instance)
   // 校验失败不改动任何状态：旧身份仍然在后台继续取数；输入问题也不经 onError（ADR-51）。
   assert.equal(view.errors.length, 0, '参数被拒只走同步返回值')
 
@@ -366,7 +394,8 @@ test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷
   await settle()
   await sleep(40)
   assert.equal(calls, 1, '暂停后不再有周期请求')
-  assert.equal(subscribed(core, view), undefined)
+  assert.equal(reader(core, view), false, '暂停即失去读者身份（画面冻结）')
+  assert.notEqual(declared(core, view), undefined, '声明还在：实例与结果都不回收')
 
   view.refresh()
   await settle()
@@ -375,9 +404,10 @@ test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷
   assert.equal(calls, 2, '刷新不会把暂停页变回订阅')
 })
 
-test('A04/A06 浏览器隐藏与组件失活都会当场撤销未完成的刷新要求', async () => {
+test('A04/A06 浏览器隐藏与组件失活只失去资格：要求被撤销、声明与在途都留着', async () => {
+  let calls = 0
   const source = defineRefresh<{ id: number }, number>('/api/core/297')
-  const core = newCore(2, () => new Promise<number>(() => {}))
+  const core = newCore(2, () => { calls++; return new Promise<number>(() => {}) })
   const view = page(core, source)
 
   view.submit({ id: 1 })
@@ -388,15 +418,17 @@ test('A04/A06 浏览器隐藏与组件失活都会当场撤销未完成的刷新
 
   core.setVisible(false)
   await settle()
-  assert.equal(subscribed(core, view), undefined, '隐藏即退订')
-  assert.equal(core.snapshot().resources.length, 0, '隐藏撤销未完成的刷新要求，实例随之释放')
+  assert.equal(reader(core, view), false, '隐藏即失去读者身份')
+  assert.notEqual(declared(core, view), undefined, '声明还在')
+  assert.equal(core.snapshot().resources.length, 1, '隐藏只失去资格：实例与在途都留着（ADR-61）')
 
   view.refresh()
   await settle()
-  assert.equal(core.snapshot().resources.length, 0, '隐藏期间刷新不产生实例，也不发请求')
+  assert.equal(core.snapshot().resources.length, 1, '隐藏期间刷新不新建实例')
+  assert.equal(calls, 1, '隐藏期间刷新不发请求（入口闸：激活且浏览器可见）')
 })
 
-test('A06 组件失活撤销本页未完成的刷新要求，但不改变被暂停页的显式刷新能力', async () => {
+test('A06 组件失活撤销本页未完成的刷新要求，声明与实例都留着', async () => {
   const source = defineRefresh<{ id: number }, number>('/api/core/318')
   const core = newCore(2, () => new Promise<number>(() => {}))
   const view = page(core, source)
@@ -406,13 +438,14 @@ test('A06 组件失活撤销本页未完成的刷新要求，但不改变被暂�
   view.refresh()
   await settle()
 
-  core.deactivate(view.handle)
+  view.set({ active: false })
   await settle()
-  assert.equal(subscribed(core, view), undefined, '失活即退订')
-  assert.equal(core.snapshot().resources.length, 0, '失活撤销未完成的刷新要求')
+  assert.equal(reader(core, view), false, '失活即失去读者身份')
+  assert.notEqual(declared(core, view), undefined, '声明还在')
+  assert.equal(core.snapshot().resources.length, 1, '失活只失去资格：要求被撤销，实例不释放')
 })
 
-test('A06 最后一个需求退出：在途请求被 abort，实例与结果一并消失', async () => {
+test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实例与结果一并消失', async () => {
   let signal: AbortSignal | undefined
   const source = defineRefresh<{ id: number }, number>('/api/core/334')
   const core = newCore(2, (_url, _body, context) => { signal = context.signal; return new Promise<number>(() => {}) })
@@ -428,7 +461,7 @@ test('A06 最后一个需求退出：在途请求被 abort，实例与结果一�
   assert.equal(core.snapshot().resources.length, 0)
 })
 
-test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数；最后一个需求退出则连实例一起销毁', async () => {
+test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数；最后一个声明者退出则连实例一起销毁', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>('/api/core/352')
   const core = newCore(2, async () => { calls++; return calls })
@@ -441,10 +474,10 @@ test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数
   await settle()
   assert.equal(calls, 1)
 
-  core.deactivate(view.handle)
+  view.set({ active: false })
   await settle()
   const written = view.writes()
-  core.activate(view.handle)
+  view.set({ active: true })
   await settle()
   assert.equal(view.writes(), written, '恢复不产生新的写入：读的是结果表里已有的那份')
   assert.equal(view.last?.data, 1)
@@ -474,7 +507,7 @@ test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', asyn
   core.setVisible(false)
 })
 
-test('A05 暂停只退订：已发起的刷新要求继续等当前请求的结果，实例不因暂停而释放', async () => {
+test('A05 暂停只失去资格：已发起的刷新要求继续等当前请求的结果，声明、实例与结果都保留', async () => {
   const resolvers: Array<(value: number) => void> = []
   const source = defineRefresh<{ id: number }, number>('/api/core/398')
   const core = newCore(2, () => new Promise<number>(resolve => resolvers.push(resolve)))
@@ -487,18 +520,22 @@ test('A05 暂停只退订：已发起的刷新要求继续等当前请求的结�
 
   view.set({ enabled: false, every: 100_000 })
   await settle()
-  assert.equal(subscribed(core, view), undefined, '暂停即退订')
+  // 暂停只失去「自动取数」的资格；这一页此刻还持有未撤销的刷新要求，所以在要求结算之前**仍是读者**
+  // （ADR-60 的读者 = 有资格的声明 ∪ 未撤销要求；要求结算之后它才冻结）。
+  assert.equal(reader(core, view), true, '暂停但仍持有未撤销的刷新要求：读者身份保留到这次结算')
+  assert.notEqual(declared(core, view), undefined, '声明还在')
   assert.equal(core.snapshot().resources.length, 1, '刷新要求还没满足，实例不释放、在途不取消')
 
   // 暂停不撤销已发起的刷新要求：它由当前这个请求的结果满足，既不另发一次也不必等下个周期。
   resolvers[0]?.(7)
   await settle()
   assert.equal(resolvers.length, 1, '暂停期间不追发请求，本次刷新用现有这一次')
-  // 要求被这一次结果满足；实例随后释放，结果表条目随之消失（A06）。「页面画面保留」是适配层的事——
-  // `display` 保留最后一次读到的画面（keep-last），由 tests/vue.test.ts 验证；核心这一层能断言的是结果表的事实。
-  assert.equal(core.snapshot().results.length, 0, '释放共享实例即清掉结果表条目（A06）')
-  assert.equal(view.last, undefined, '核心这一层：条目没了，按身份读回空')
-  assert.equal(core.snapshot().resources.length, 0, '要求结算后没有需求，才释放实例')
+  // 要求被这一次结果满足；但**声明还在**，所以实例与结果都不回收（ADR-61）：暂停/失活不再删结果。
+  // 「画面冻结」与「恢复后读回」是适配层的事，由 tests/vue.test.ts 验证；核心这一层断言的是声明与结果表的事实。
+  assert.equal(core.snapshot().results.length, 1, '声明还在：结果表条目保留（ADR-61）')
+  assert.equal(view.last?.data, 7, '核心这一层：按身份仍能读到那一份结果')
+  assert.equal(core.snapshot().resources.length, 1, '暂停不释放实例：声明还在')
+  assert.equal(reader(core, view), false, '要求已结算：暂停页不再是读者，画面冻结在最后一帧')
 })
 
 test('A13 共享请求失败：保留旧画面、通知页面、下个周期继续', async () => {
@@ -516,7 +553,7 @@ test('A13 共享请求失败：保留旧画面、通知页面、下个周期继�
   assert.ok(calls >= 2)
   assert.equal(view.last?.data, 5, '失败保留旧画面')
   assert.ok(view.errors.length >= 1, '失败经 onError 通知')
-  assert.equal(subscribed(core, view)?.subscribers.size, 1, '需求与开启意愿都保留')
+  assert.equal(declared(core, view)?.declarers.size, 1, '资格与开启意愿都保留')
 })
 
 test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重试', async () => {
@@ -534,7 +571,7 @@ test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重
   rejecters[0]?.(new Error('down'))
   await settle()
   assert.equal(view.errors.length, 1, '失败经 onError 通知：刷新没有回执')
-  assert.notEqual(subscribed(core, view), undefined, '订阅与开启意愿都保留')
+  assert.ok(reader(core, view), '资格与开启意愿都保留')
   assert.equal(resolvers.length, 1, '失败不自动重试')
 })
 
@@ -549,7 +586,7 @@ test('A13/A14 暂停页显式刷新失败：没有回执，失败仍经 onError 
 
   assert.equal(paused.errors.length, 1, '未订阅页面只有 onError 这条失败通道')
   assert.equal(paused.writes(), 0, '失败不写结果')
-  assert.equal(core.snapshot().resources.length, 0, '失败撤销要求，实例随即释放')
+  assert.equal(core.snapshot().resources.length, 1, '失败撤销要求；声明还在，实例不释放')
 })
 
 test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结果', async () => {
@@ -720,7 +757,7 @@ test('A16 页面回调抛错或返回拒绝的 Promise 都不影响框架状态�
   await settle()
   assert.equal(notified, 1)
   assert.equal(witness.errors.length, 1, '抛错的读者不影响另一个读者收到失败通知')
-  assert.equal(subscribed(core, victim)?.subscribers.size, 2)
+  assert.equal(declared(core, victim)?.declarers.size, 2)
 })
 
 test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的执行不再写事实', async () => {
@@ -752,14 +789,15 @@ test('A17 销毁：幂等，之后所有入口都不产生事实，未结束的�
   core.dispose()
 })
 
-test('A04/A05 配置非法时不订阅、不刷新、不通知，修正后恢复', async () => {
+test('A04/A05 配置非法时不取数、不刷新、不通知；声明仍在，修正后按到期恢复', async () => {
   const source = defineRefresh<{ id: number }, number>('/api/core/684')
   const core = newCore(2, async () => 1)
   const view = page(core, source, null)
 
   assert.equal(view.submit({ id: 1 }).status, 'accepted')
   await settle()
-  assert.equal(subscribed(core, view), undefined)
+  assert.equal(reader(core, view), false, '配置非法：没有资格，不算读者')
+  assert.equal(core.snapshot().resources.length, 1, '身份已声明（实例在册），但不取数')
   assert.equal(view.writes(), 0)
 
   view.refresh()

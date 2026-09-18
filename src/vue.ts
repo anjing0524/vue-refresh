@@ -29,14 +29,19 @@ export function currentCore(): RefreshCore | null {
   return current
 }
 
-/** 读配置快照；任一项读不出或值非法都返回 `null`（为什么不猜成关闭见 DESIGN §6.1）。 */
-function readConfig(options: RefreshOptions): Config | null {
+/**
+ * 读配置快照；任一项读不出或值非法都返回 `null`（为什么不猜成关闭见 DESIGN §6.1）。
+ *
+ * `active` 是这一页自己的生命周期状态（适配层持有），三项一起构成资格的唯一来源：
+ * `config.enabled && config.active && 核心的全局可见性`。
+ */
+function readConfig(options: RefreshOptions, active: boolean): Config | null {
   try {
     const enabled: unknown = options.enabled.value
     const every: unknown = options.every.value
     if (typeof enabled !== 'boolean') return null
     if (typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) return null
-    return { enabled, every }
+    return { enabled, every, active }
   } catch {
     return null
   }
@@ -65,7 +70,6 @@ export function useRefresh<P extends object, T>(
     onError: error => options.onError?.(error),
     cleanup: null,
     parameters: null,
-    active: false,
   }
   core.addHandle(handle)
 
@@ -92,6 +96,9 @@ export function useRefresh<P extends object, T>(
    *   而页面上「刚才那份数据」不该因为没人订阅了就变空。
    * - **先无条件读结果表**（在任何 `return` 之前）：否则这个副作用记不住对结果表的依赖，
    *   之后的写入唤不醒它（浏览器用例抓到过这个真实缺陷）。`eligible` 只负责资格边沿重新判定。
+   *
+   * 依赖粒度：`store.read(url, key)` 现在返回的是那一个 cell ref 的 `.value`，watcher 的依赖
+   * 收在那一个 ref 上；写别的格不会唤醒这个 watcher。
    */
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
   watchEffect(() => {
@@ -108,9 +115,13 @@ export function useRefresh<P extends object, T>(
     }
   }, { flush: 'sync' })
 
-  // 唯一的配置 watcher：先写快照，再按当前资格协调。非法配置不通知——它是本页自己的输入事实，
-  // 页面读自己的 refs 就知道；框架只负责不订阅、不请求，修正后自动恢复（ADR-51）。
-  const stopWatching = watch(() => readConfig(options), config => {
+  /** 这一页是否挂载/激活（KeepAlive 失活为假）。它与「浏览器可见」是两件事，后者由核心统一监听。 */
+  const active = shallowRef(false)
+
+  // 唯一的配置写入口：两个 `Ref` ＋ 这一页的激活状态合成一份快照，再按当前资格协调。
+  // 非法配置不通知——它是本页自己的输入事实，页面读自己的 refs 就知道；框架只负责不订阅、
+  // 不请求，修正后自动恢复（ADR-51）。`active` 也在依赖里，所以挂载/激活/失活只需改它。
+  const stopWatching = watch(() => readConfig(options, active.value), config => {
     handle.config = config
     core.reconcile(handle)
     eligible.value += 1
@@ -120,13 +131,10 @@ export function useRefresh<P extends object, T>(
   else handle.cleanup = stopWatching
 
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。
-  const activate = (): void => {
-    core.activate(handle)
-    eligible.value += 1
-  }
-  onMounted(activate)
-  onActivated(activate)
-  onDeactivated(() => core.deactivate(handle))
+  // 只改 `active`：快照与协调由上面那个 `flush: 'sync'` 的 watcher 完成（单一写入口）。
+  onMounted(() => { active.value = true })
+  onActivated(() => { active.value = true })
+  onDeactivated(() => { active.value = false })
   onScopeDispose(() => {
     core.removeHandle(handle)
     identity.value = null

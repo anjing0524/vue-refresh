@@ -124,8 +124,9 @@ test('A04/A05 配置非法：不通知并停止订阅，修正后按当前资格
 
   every.value = 50_000
   await tick()
-  assert.equal(loads, 2, '修正后按当前资格恢复')
-  assert.equal(api.display.value?.data, 1)
+  // 修正后按**到期**恢复：声明与结果都还在（ADR-61），已有结果未到期，所以不重查。
+  assert.equal(loads, 1, '修正后按到期恢复：已有结果未到期，不重查')
+  assert.equal(api.display.value?.data, 1, '修正后画面读到那一份结果')
   app.unmount()
 })
 
@@ -152,13 +153,14 @@ test('A05/A06 改 enabled.value 立即生效：暂停只退订、恢复重新接
 
   enabled.value = false
   await tick()
-  // 【同 A05：最后一个需求退出即删结果 ⇒ 画面读回 null；keep-last 之前这条会红】
+  // 暂停只失去资格：声明、实例与结果都留着（ADR-61），画面冻结在最后一帧。
   assert.equal(api.display.value?.data, 7, '暂停保留画面')
-  assert.equal(currentCore()?.snapshot().resources.length, 0, '失去最后一个需求即清实例')
+  assert.equal(currentCore()?.snapshot().resources.length, 1, '暂停不释放实例：声明还在')
 
   enabled.value = true
   await tick()
-  assert.equal(loads, 2, '重新开启恢复订阅并首查')
+  assert.equal(loads, 1, '重新开启直接读回已有结果，不重查（ADR-61）')
+  assert.equal(api.display.value?.data, 7, '恢复后画面读到那一份结果')
   app.unmount()
 })
 
@@ -196,7 +198,9 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
 
   shown.value = true
   await tick()
-  assert.equal(loads, 2, '激活后首查')
+  // 失活不撤销声明：实例与结果都留着，激活后直接读回，不重查（ADR-61）。
+  assert.equal(loads, 1, '激活后读回已有结果，不重查')
+  assert.equal(api.display.value?.data, 1, '激活后画面仍然有结果')
   app.unmount()
 })
 

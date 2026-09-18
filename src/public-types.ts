@@ -46,7 +46,8 @@ export interface RefreshDisplay<P extends object, T> {
 /**
  * 组件刷新需求配置。**两项都是 `Ref`，且都必需**：格式固定，框架只读 `.value`，不猜、不转换。
  * 改 `enabled.value` 或 `every.value` 都会按新配置重新协调（暂停页仍可刷新一次；改频率立刻生效）。
- * 浏览器可见性由框架自己监听，调用方不需要也不应该再声明一层。
+ * 页面是否挂载/激活（KeepAlive 失活）与浏览器可见性都由框架自己跟踪，调用方不声明这两层；
+ * 它们只影响「要不要取数」，不撤销这一页对这个身份的声明（ADR-61）。
  */
 export interface RefreshOptions {
   /** 唯一开启意愿。框架只读取它，**从不写入**。 */

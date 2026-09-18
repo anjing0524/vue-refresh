@@ -31,7 +31,8 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await d.open('/?test')
     await until(async () => (await d.requests()).length === 1, 'initial shared request')
     await d.enable('甲', false); await d.enable('乙', false)
-    // 两页都暂停后实例已清理；甲刷新一次：临时要求建立实例并产生一次共享请求。
+    // 暂停只失去资格（ADR-61）：声明、实例与结果都不回收，只是不再自动取数。
+    // 甲换身份刷新一次：新身份建立自己的实例并产生一次共享请求。
     await d.refresh('甲', 'OTHER')
     await until(async () => (await d.requests()).length === 2, 'refresh request')
     await d.release((await d.requests())[1]!.id)
@@ -39,7 +40,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     const state = await d.snapshot()
     check(state.pages['甲']!.args.symbol === 'OTHER' && state.pages['甲']!.manual, 'display contains refreshed parameters and the page knows it was its own refresh')
     check(state.pages['乙'] === null, 'paused page without a refresh requirement receives nothing')
-    check(Object.keys(state.entries).length === 0 && state.resources === 0, 'temporary requirement is cleaned up once it settles')
+    check(Object.keys(state.entries).length === 1 && state.resources === 2, '两个身份各一个实例：甲换身份后的结果留在结果表里')
     await sleep(200)
     check((await d.requests()).length === 2, 'refresh must not start polling')
   } },
@@ -59,7 +60,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check((await d.snapshot()).pages['甲']!.manual, 'page knows the result came after its own refresh')
   } },
 
-  { name: 'A02/A06 真实HTTP：共享、暂停冻结画面、最后取消、恢复', async run(d) {
+  { name: 'A02/A06 真实HTTP：共享、暂停冻结画面、在途不取消、恢复', async run(d) {
     await d.open('/?test')
     await until(async () => (await d.requests()).length === 1, 'one shared request')
     check((await d.snapshot()).calls.length === 1, 'two subscribers must share the first load')
@@ -77,15 +78,21 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(await d.price('甲') === String(100 + first.id), 'paused page must stay frozen')
     await until(async () => (await d.requests()).length === 3, 'third request in flight')
     await d.enable('乙', false)
-    await until(async () => (await d.requests())[2]!.status === 'aborted', 'real HTTP disconnect')
-    await until(async () => (await d.snapshot()).running === 0 && !(await d.snapshot()).timer, 'actual completion releases slot and timer')
+    // 两页都暂停：只失去资格（ADR-61）——已经发出的请求不取消，声明、实例与结果表条目都留着。
+    await sleep(100)
     const stopped = await d.snapshot()
-    check(stopped.calls[2]!.aborted && stopped.calls[2]!.finished, 'abort and execution completion both observed')
-    check(stopped.resources === 0 && Object.keys(stopped.entries).length === 0, 'last exit removes resource and Store entry')
+    check((await d.requests())[2]!.status === 'pending' && !stopped.calls[2]!.aborted, '暂停不取消已经发出的请求')
+    check(stopped.running === 1, '在途请求仍占着物理槽位')
+    check(stopped.resources === 1 && Object.keys(stopped.entries).length === 1, '声明还在：实例与结果表条目都留着')
     await sleep(300)
     check((await d.requests()).length === 3, 'no refresh while all paused')
+    // 重新激活甲：这一次仍在途，因此不并发第二次（A08）；让它真实结束，再按到期继续。
     await d.enable('甲', true)
-    await until(async () => (await d.requests()).length === 4, 'restoration starts new request')
+    check((await d.requests()).length === 3, '在途未结束时不再发起第二次')
+    const third = (await d.requests())[2]!
+    await d.release(third.id)
+    await until(async () => await d.price('甲') === String(100 + third.id), 'restored page reads the in-flight result')
+    await until(async () => (await d.requests()).length === 4, 'next periodic request after the slot frees')
     const fourth = (await d.requests())[3]!
     await d.release(fourth.id)
     await until(async () => await d.price('甲') === String(100 + fourth.id), 'restored page updates')
@@ -104,43 +111,51 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await sleep(1_000)
     check((await d.requests()).length === 1, 'next attempt waits for the interval, not a busy retry')
   } },
-  { name: 'A10/A11 旧响应晚到：新资源不被覆盖或删除，结果对所有读者共享', async run(d) {
+  { name: 'A10/A11 换身份建立新实例：旧身份的结果写回自己那一份，两个身份互不覆盖', async run(d) {
     await d.open('/?mode=controlled')
     await until(async () => (await d.snapshot()).calls.length === 1, 'initial controlled load')
     await d.enable('甲', false); await d.enable('乙', false)
     const old = (await d.snapshot()).calls[0]!
-    check(old.aborted && !old.finished, 'logical cancellation is not physical completion')
-    await d.enable('甲', true)
-    await until(async () => (await d.snapshot()).calls.length === 2, 'new resource request')
+    // 暂停只失去资格（ADR-61）：已经发出的请求仍然在跑，不会被取消，也不会因为暂停而丢掉实例。
+    check(!old.aborted && !old.finished, 'pausing does not cancel the controlled load')
+    // 甲换身份：新身份建立自己的实例与请求；旧身份那一次仍在途（乙还声明着它）。
+    await d.refresh('甲', 'OTHER')
+    await until(async () => (await d.snapshot()).calls.length === 2, 'new identity request')
     await d.resolve(2, 222)
-    await until(async () => await d.price('甲') === '222', 'new result wins')
+    await until(async () => await d.price('甲') === '222', 'new identity result wins')
     const id = Object.keys((await d.snapshot()).entries)[0]!
     await d.resolve(1, 111)
-    await until(async () => (await d.snapshot()).running === 0, 'old finally completed')
+    await until(async () => (await d.snapshot()).running === 0, 'old request really finished')
     const now = await d.snapshot()
-    check(now.pages['甲']!.data.quote.price === 222 && now.entries[id]!.data.quote.price === 222 && now.resources === 1, 'old completion must not write or delete new resource')
-    check(!now.events.some(e => e.includes('失败')), 'old cancellation must not notify failure')
+    check(now.pages['甲']!.data.quote.price === 222 && now.entries[id]!.data.quote.price === 222, '旧身份的结果不会覆盖新身份那一份')
+    check(now.resources === 2, '两个身份各一个实例（旧身份由仍暂停的乙声明着）')
+    check(!now.events.some(e => e.includes('失败')), '两个身份都不产生失败通知')
+    // 乙仍在暂停：不是读者，画面冻结；重新激活后直接读回自己身份当前那一份（不重复取数）。
+    check(now.pages['乙'] === null, 'paused page stays frozen')
     await d.enable('乙', true)
-    await until(async () => await d.price('乙') === '222', 'existing snapshot delivered to returning subscriber')
-    check((await d.snapshot()).calls.length === 2, 'ordinary restore with fresh history must not force another load')
+    await until(async () => await d.price('乙') === '111', 'restored page reads the current value of its own identity')
+    check((await d.snapshot()).calls.length === 2, 'restoring reads the existing entry without a new request')
     await d.mutatePage('甲', 999)
     const isolated = await d.snapshot()
-    // 结果是共享对象（ADR-59）：篡改一个页面读到的 data，就是改结果表里那一份，另一个页面与结果表一起变。
-    check(isolated.pages['乙']!.data.quote.price === 999 && isolated.entries[id]!.data.quote.price === 999, 'nested page mutation is visible to every reader of that identity')
+    // 结果是共享对象（ADR-59）：甲改的就是结果表里那一份（页面与结果表一起变）；乙读的是另一个身份，不受影响。
+    check(isolated.pages['甲']!.data.quote.price === 999 && isolated.entries[id]!.data.quote.price === 999, 'mutation of the shared entry is visible through the reader and the Store')
+    check(isolated.pages['乙']!.data.quote.price === 111, 'another identity is unaffected')
   } },
   { name: 'A09 真实结束才放槽：等待期间不启动、不忙循环', async run(d) {
     await d.open('/?mode=controlled&slots=1')
     await until(async () => (await d.snapshot()).calls.length === 1, 'initial load fills slot')
-    await d.enable('甲', false); await d.enable('乙', false); await d.enable('甲', true)
+    // 乙换身份：第二个身份要取数，但槽位被占满 → 排队；不取消在途、也不自旋
+    // （ADR-61 下不再用「暂停」制造取消，槽位只按真实结束交还）。
+    await d.refresh('乙', 'OTHER')
     await until(async () => (await d.snapshot()).queued === 1, 'new task queues')
     await sleep(200)
     const blocked = await d.snapshot()
-    check(blocked.running === 1 && blocked.calls.length === 1 && !blocked.pending && !blocked.timer, 'abort must not release slot or spin scheduler')
+    check(blocked.running === 1 && blocked.calls.length === 1 && !blocked.pending && !blocked.timer, 'a full slot must queue without spinning')
     await d.resolve(1, 111)
     await until(async () => (await d.snapshot()).calls.length === 2, 'real empty slot advances queue')
-    check((await d.snapshot()).pages['甲'] === null, 'cancelled result must not publish')
+    check((await d.snapshot()).pages['甲']!.data.quote.price === 111, 'the first request delivers to its own identity')
     await d.resolve(2, 222)
-    await until(async () => await d.price('甲') === '222', 'queued request actually delivers')
+    await until(async () => await d.price('乙') === '222', 'queued request actually delivers')
   } },
   { name: 'A06 卸载清理：晚到执行不复活资源', async run(d) {
     await d.open('/?mode=controlled')
@@ -170,32 +185,36 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     await until(async () => (await nestedDisplay())?.data.quote.price === 100 + first, '嵌套页拿到首查结果')
     check((await d.snapshot()).resources === 2, '两个身份各自一个实例')
 
-    // L07.02 祖先失活：外层 KeepAlive 切走 → 嵌套页 deactivated → 退订、画面保留、不请求。
+    // 祖先失活：外层 KeepAlive 切走 → 嵌套页 deactivated → 只失去资格（ADR-61）：
+    // 声明、实例与结果都留着，也不再取数；没有「重建」这一步。
     const before = (await calls()).length
     await d.nestedOuter(false)
-    await until(async () => (await d.snapshot()).resources === 1, '祖先失活后嵌套页退订且实例清理')
     await sleep(200)
+    check((await d.snapshot()).resources === 2, '祖先失活只失去资格：两个实例都留着')
     check((await calls()).length === before, '祖先失活不得产生请求')
     check((await nestedDisplay())?.data.quote.price === 100 + first, '失活时画面保留')
 
-    // 切回：按订阅规则恢复（实例已删 → 首查），不重复订阅。
+    // 切回：仍是同一个实例与同一份结果（未到期），所以不重取，画面保持不变。
     await d.nestedOuter(true)
-    await until(async () => (await calls()).length === 3, '恢复后按订阅规则取数')
-    const resumed = (await calls())[2]!.id
-    check((await d.snapshot()).resources === 2, '恢复只建立一个订阅')
-    await d.resolve(resumed, 100 + resumed)
-    await until(async () => (await nestedDisplay())?.data.quote.price === 100 + resumed, '恢复后画面更新')
-
-    // 受控 visibilitychange：走 app.ts 注册的那条真实监听，而不是直接调用核心。
-    await d.visibility(true)
-    await until(async () => (await d.snapshot()).resources === 0, '隐藏时全部退订')
-    const hidden = (await calls()).length
     await sleep(200)
-    check((await calls()).length === hidden, '隐藏期间不产生请求')
+    check((await calls()).length === before, '激活直接读回：未到期不重复取数')
+    check((await d.snapshot()).resources === 2, '激活不重建实例')
+    check((await nestedDisplay())?.data.quote.price === 100 + first, '激活后画面仍是同一份结果')
+
+    // 受控 visibilitychange：走 app.ts 注册的那条真实监听，而不是直接调用核心（隐藏 ＝ 环境不允许）。
+    await d.visibility(true)
+    await sleep(200)
+    check((await d.snapshot()).resources === 2, '隐藏只失去资格：声明与实例都留着')
+    check((await calls()).length === before, '隐藏期间不产生请求')
     await d.visibility(false)
-    await until(async () => (await d.snapshot()).resources === 2, '显示后按订阅规则重建')
-    await until(async () => (await calls()).length === hidden + 2, '两个身份各取一次')
-    for (const call of await calls()) if (!call.finished) await d.resolve(call.id, 0)
+    await sleep(200)
+    check((await calls()).length === before, '显示后未到期，不重复取数')
+    // 显示后资格恢复：一次显式刷新真的能取到数（证明这一页又「活着」，且请求走的是同一条共享路径）。
+    await d.refresh('甲', 'DEMO')
+    await until(async () => (await calls()).length === before + 1, '显示后显式刷新取一次')
+    const resumed = (await calls())[before]!.id
+    await d.resolve(resumed, 0)
+    await until(async () => (await d.snapshot()).running === 0, '显示后的刷新真实结束')
 
     // 卸载后：监听不再产生任何可观察效果（「监听已摘除」本身需要 CDP 才能取证，见 README）。
     await d.unmount()
