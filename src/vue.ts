@@ -95,23 +95,16 @@ export function useRefresh<P extends object, T>(
   /** 这一页是否已被释放（`onScopeDispose` 置位）：释放后再调 `submit`／`refresh` 一概不产生事实。 */
   let released = false
 
-  /**
-   * 读闸门里属于这一页的那一半：**点过一次刷新、还没看到那一拍**。
-   *
-   * 核心不再回答「谁该跟随结果表」（ADR-66），所以这一半由这一层自己判定：
-   * `core.isEligible(...)`（有资格）或 `pending && core.isVisible()`（点过刷新且这一页可见）。
-   */
-  let pending = false
-
   /** 资格边沿的计数器：`activate` 与配置变化之后 +1，让下面那个副作用重新判定「本页还是不是读者」。 */
   const eligible = shallowRef(0)
 
   /**
    * 本页看到的画面：**由写入事件驱动、按本页 `every` 节流抄来的一份副本**。
    *
-   * - **读者才跟随**：这一页有资格（`core.isEligible`），或它刚点过刷新且此刻可见（`pending && core.isVisible()`）
-   *   时才抄；暂停、失活、隐藏、卸载中都不是读者，画面**冻结在最后一帧**。暂停页自己 `refresh()` 那一次
-   *   由 `pending` 放行，而且那一次不等节流（`immediate`），所以照样更新画面（A05、G6）。
+   * - **读者才跟随**：这一页有资格（`core.isEligible`），或它**点过一次刷新、还没看到那一拍**（`pending`）
+   *   且此刻浏览器可见时抄；失活、隐藏、卸载中都不是读者，画面**冻结在最后一帧**。暂停页自己 `refresh()`
+   *   那一次由 `pending` 放行，而且那一次不等节流，所以照样更新画面（A05、G6）；**没点过刷新的暂停页
+   *   什么都不抄**——包括它从未上过屏时到达的第一份结果（真 Chrome 的 A11 用例钉住了）。
    * - **按 `updatedAt` 时间差节流**：新格的 `updatedAt` 距展示中那份满一个本页 `every` 才换画面——
    *   慢页面主动要的就是「不跟着快页面跳」。写端稀于本页 `every` 时写入即抄（比固定拍更及时）；
    *   写端密且 `every` 非整数倍时实际更新周期被量化到写入网格（ADR-67 接受的代价）。
@@ -127,7 +120,15 @@ export function useRefresh<P extends object, T>(
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
   /** 上一份抄来的格；引用比较就是版本比较，因此不引版本号（ADR-43／45／47）。`undefined`＝还没抄到过。 */
   let sampled: ResultCell | undefined
-  /** 欠一份：下一份内容立即抄，不等节流（身份落定、重新成为读者、显式刷新都置它）。 */
+  /**
+   * 欠一份：下一份内容立即抄，不等节流（身份落定、重新成为读者、显式刷新都置它）。
+   *
+   * 它与 `sampled` 不是一回事：`sampled` 是**已经抄到的那一版**（引用比较＋节流基线），
+   * 而它记的是**这一页还欠着一次抄写**。两者不能合并成「把基线置空」——一次不产出的副作用运行
+   * （例如失活那一拍 `eligible` 变化）就会把置空的基线用掉，那一帧反而抄不进来（ADR-70 记了实测）。
+   */
+  let pending = false
+  /** 边沿欠一份：下一份内容立即抄，不等节流。 */
   let immediate = true
 
   watchEffect(() => {
@@ -136,6 +137,11 @@ export function useRefresh<P extends object, T>(
     eligible.value
     // 从来没有写过这一格：没有可抄的东西，画面停在上一帧（不发布空副本）。
     if (key === null || cell === undefined) return
+    // 读闸门里属于这一页的那一半：**点过一次刷新、还没看到那一拍**（`pending`）。
+    // 不能用 `immediate` 替代（配置与生命周期边沿也会置它）：那样「从未上过屏的暂停页」会在下一份
+    // 结果到达时当场显示，冻结语义就没了（真 Chrome 的 A11 用例把这条钉住了）。也不补 `active` 这类
+    // 条件——入口闸在**点的那一刻**已经判过环境，之后这一页失活（KeepAlive 缓存）仍允许它更新那一帧
+    // （确认人 2026-09-17 的裁决「允许它更新一帧呗」，见 ADR-67 的一处角落）。
     if (!core.isEligible(config, source.name, key) && !(pending && core.isVisible())) return
     if (cell === sampled) return
     // 本页那份与新格都成功过、又不欠份：新格距展示中那份不足一个本页 `every` 就不换画面
@@ -216,8 +222,8 @@ export function useRefresh<P extends object, T>(
       if (released || core.isDisposed()) return
       const key = identity.value
       if (key === null) return
-      // 用户点名要的那一次不等节流：结果一到就抄（这是「显式刷新一定会被看见」的全部机制）。
-      // 核心收下了这句命令，这一页才取得「跟这一份」的资格——它没有回执，所以只能这样问一声。
+      // 用户点名要的那一次不等节流、也不问资格：结果一到就抄（这是「显式刷新一定会被看见」的
+      // 全部机制）。核心没有回执，所以只能这样问一声：记下「欠一份、且读闸门对它放行一次」。
       if (core.refresh(config, source.name, key)) {
         immediate = true
         pending = true

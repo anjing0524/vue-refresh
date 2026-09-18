@@ -15,24 +15,10 @@ function newTable() {
   const writes = []
   const cells = new Map()
   const id = (url, key) => `${url}\u0000${key}`
-  return {
+  const table = {
     writes,
-    sink: {
-      write: (url, key, data) => {
-        cells.set(id(url, key), { data, failed: false })
-        writes.push(`write ${url} ${key} ${JSON.stringify(data)}`)
-      },
-      fail: (url, key) => {
-        const previous = cells.get(id(url, key))
-        cells.set(id(url, key), { data: previous?.data, failed: true })
-        writes.push(`fail ${url} ${key}`)
-      },
-      remove: (url, key) => {
-        cells.delete(id(url, key))
-        writes.push(`remove ${url} ${key}`)
-      },
-      list: () => [...cells].map(([k, cell]) => ({ url: k.split('\u0000')[0], key: k.split('\u0000')[1], cell })),
-    },
+    /** 写表的那一刻同步重入（模拟 `flush: 'sync'` 的 watcher）：S10 用它驱动「产出之后点的刷新」。 */
+    onWrite: null,
     /** 一格的结构视图：有没有数据、是不是失败态、失败过没有——都没有时间戳。 */
     cell: (url, key) => {
       const cell = cells.get(id(url, key))
@@ -40,6 +26,25 @@ function newTable() {
       return `data=${cell.data === undefined ? 'none' : JSON.stringify(cell.data)} failed=${cell.failed}`
     },
   }
+  table.sink = {
+    write: (url, key, data) => {
+      cells.set(id(url, key), { data, failed: false })
+      writes.push(`write ${url} ${key} ${JSON.stringify(data)}`)
+      table.onWrite?.()
+    },
+    fail: (url, key) => {
+      const previous = cells.get(id(url, key))
+      cells.set(id(url, key), { data: previous?.data, failed: true })
+      writes.push(`fail ${url} ${key}`)
+      table.onWrite?.()
+    },
+    remove: (url, key) => {
+      cells.delete(id(url, key))
+      writes.push(`remove ${url} ${key}`)
+    },
+    list: () => [...cells].map(([k, cell]) => ({ url: k.split('\u0000')[0], key: k.split('\u0000')[1], cell })),
+  }
+  return table
 }
 
 /** 每个场景一个核心：传输由用例显式放行，顺序完全确定。 */
@@ -68,7 +73,8 @@ function step(trace, label, core) {
   const cells = view.results
     .map(row => `${row.key}:${row.cell.data === undefined ? 'nodata' : 'data'}${row.cell.failed ? '+failed' : ''}`)
     .sort()
-  trace.push(`${label} | resources=${view.resources.length} declarers=${view.declarers.length} queued=${queued} running=${running} timer=${view.scheduled} cells=[${cells.join(',')}]`)
+  const order = view.queued.map(resource => resource.parameters.key).join(',')
+  trace.push(`${label} | resources=${view.resources.length} declarers=${view.declarers.length} queued=${queued}[${order}] running=${running} timer=${view.scheduled} cells=[${cells.join(',')}]`)
 }
 
 const trace = []
@@ -205,6 +211,59 @@ const settle = () => new Promise(resolve => { setTimeout(resolve, 0) })
   await settle()
   step(trace, `S8 销毁后调用 submit=${submitted.status} refresh=${refreshed}`, core)
   trace.push(`S8 结果表写入次数=${table.writes.length}`)
+}
+
+// S9 手动刷新插到队头：在等的周期取数排在它后面（旧口径里刷新只登记要求，没有优先级）
+{
+  const { core, pending, table } = newCore(1)
+  const a = config(true)
+  const b = config(true)
+  const c = config(true)
+  // c 先取到结果（周期没到、空闲）；随后 a 占槽、b 在队。
+  core.submit(c, '/api/trace', params({ id: 3 }))
+  await settle()
+  pending[0].resolve(3)
+  await settle()
+  core.submit(a, '/api/trace', params({ id: 1 }))
+  core.submit(b, '/api/trace', params({ id: 2 }))
+  await settle()
+  step(trace, 'S9 a 占槽、b 在队', core)
+  step(trace, `S9 refresh c 收下=${core.refresh(c, '/api/trace', params({ id: 3 }).key)}`, core)
+  pending[1].resolve(1) // a 结束：下一个起跑的应该是队头的 c，而不是先排队的 b
+  await settle()
+  step(trace, 'S9 a 结束：起跑的是刷新的 c（队头）', core)
+  pending[2].resolve(30)
+  await settle()
+  pending[3].resolve(2)
+  await settle()
+  step(trace, 'S9 都结束', core)
+  trace.push(`S9 c=${table.cell('/api/trace', params({ id: 3 }).key)} b=${table.cell('/api/trace', params({ id: 2 }).key)}`)
+  core.dispose()
+}
+
+// S10 产出之后点的刷新补一轮：写表期间同步重入，同一轮内点两次只补一次
+{
+  const { core, pending, table } = newCore(2)
+  const a = config(true)
+  const b = config(false)
+  let asked = false
+  table.onWrite = () => {
+    if (asked) return
+    asked = true
+    // 这一轮的结果已经产出，所以这两句要的是**下一轮**；同一轮内点两次只补一次（needsNext 是一个位）。
+    core.refresh(b, '/api/trace', params({ id: 1 }).key)
+    core.refresh(b, '/api/trace', params({ id: 1 }).key)
+  }
+  core.submit(a, '/api/trace', params({ id: 1 }))
+  core.submit(b, '/api/trace', params({ id: 1 }))
+  await settle()
+  pending[0].resolve(1)
+  await settle()
+  step(trace, 'S10 第一轮写完后，补的一轮已经在跑', core)
+  pending[1].resolve(2)
+  await settle()
+  step(trace, 'S10 补的这一轮结束', core)
+  core.dispose()
 }
 
 console.log(trace.join('\n'))

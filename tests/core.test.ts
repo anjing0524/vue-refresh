@@ -190,7 +190,7 @@ function page(
  *
  * - `declared`：这个句柄**声明**到了哪个实例。声明只要页面挂载着就一直算（暂停、失活、隐藏都不撤销），
  *   它决定实例与结果的生死——只有卸载、换身份、销毁才撤销。
- * - `reader`：这个句柄此刻算不算该身份的**读者**（有资格，或有未撤销的刷新要求）。
+ * - `reader`：这个句柄此刻算不算该身份的**读者**（有资格，或刚点过刷新还没读到）。
  *   它只决定画面跟不跟随新结果（冻结见 ADR-60），不决定实例在不在。
  */
 function declared(core: RefreshCore, view: Page): Resource | undefined {
@@ -201,7 +201,7 @@ function declared(core: RefreshCore, view: Page): Resource | undefined {
  * 这一页此刻有没有取数资格（环境 ＋ 开启意愿）。
  *
  * 注意这里**只问资格**：ADR-66 把「谁该跟随结果表」的读闸门搬到了适配层
- * （`pending && isVisible`），核心不再回答那个问题——读闸门的效果由 tests/vue.test.ts 的 A05 用例证明。
+ * （`immediate && isVisible`），核心不再回答那个问题——读闸门的效果由 tests/vue.test.ts 的 A05 用例证明。
  */
 function eligible(core: RefreshCore, view: Page): boolean {
   const key = view.key()
@@ -433,13 +433,13 @@ test('A14 排队未启动的任务同样直接满足本次刷新', async () => {
   assert.equal(view.last?.data, 2)
 })
 
-test('A12 结果写入期间被撤销的刷新要求不再由这一次结果满足：写入点与订阅者同口径复核', async () => {
+test('A12 结果写入期间换了身份的页面不再由这一次结果满足：写入点与订阅者同口径复核', async () => {
   let calls = 0
   const source = defineRefresh<{ id: number }, number>('/api/core/233')
   const core = newCore(2, async (_url, body) => { calls++; return (body as { id: number }).id })
   const paused = page(core, source, { enabled: false, every: 100_000 })
   const watcher = page(core, source)
-  // 结果写入的那一刻页面代码同步重入：把暂停页换成另一个身份，这会当场结算掉它的刷新要求。
+  // 结果写入的那一刻页面代码同步重入：把暂停页换成另一个身份，这一页当场与新身份绑定。
   tableOf(core).onWrite = () => { paused.submit({ id: 2 }) }
 
   watcher.submit({ id: 1 })
@@ -447,27 +447,49 @@ test('A12 结果写入期间被撤销的刷新要求不再由这一次结果满�
   paused.refresh()
   await settle()
 
-  assert.equal(calls, 1, '暂停页的刷新要求由这一个在途请求满足，不追发第二次')
+  assert.equal(calls, 1, '暂停页点过的那次刷新由这一个在途请求满足，不追发第二次')
   assert.equal(watcher.writes(), 1)
   assert.equal(paused.writes(), 0, '要求已在结果写入期间被撤销，这一次结果不再轮到它')
 })
 
-test('A12/A14 结果写入期间新登记的刷新要求由后继请求满足（refill）', async () => {
+test('A12/A14 结果写入期间点的刷新由后继请求满足，同一轮内合并成一次', async () => {
   let calls = 0
+  let asked = false
   const source = defineRefresh<{ id: number }, number>('/api/core/254')
   const core = newCore(2, async () => { calls++; return calls })
   const paused = page(core, source, { enabled: false, every: 100_000 })
   const watcher = page(core, source)
-  // 结果写入的那一刻登记一次刷新：它不在这一批里，只能由后继请求满足。
-  tableOf(core).onWrite = () => { paused.refresh() }
+  // 结果写入的那一刻点刷新（点两次）：这一轮已经产出，所以要的是下一轮——同一轮里点几次只补一次。
+  tableOf(core).onWrite = () => { if (asked) return; asked = true; paused.refresh(); paused.refresh() }
 
   watcher.submit({ id: 1 })
   paused.submit({ id: 1 })
   await settle()
 
-  assert.equal(calls, 2, '结果写入期间登记的要求由后继请求满足')
+  assert.equal(calls, 2, '产出之后点的刷新由后继请求满足，同一轮内合并成一次')
   assert.equal(paused.last?.data, 2, '暂停页拿到的是后继请求的结果')
   assert.equal(watcher.writes(), 2, '订阅页两次写入都读到')
+})
+
+test('A12 产出之后的刷新是下一轮的命令：页面每收一次结果就点一次，框架就一直取下去', async () => {
+  let calls = 0
+  let asks = 0
+  const source = defineRefresh<{ id: number }, number>('/api/core/903')
+  const core = newCore(2, async () => { calls++; return calls })
+  const paused = page(core, source, { enabled: false, every: 100_000 })
+  const watcher = page(core, source)
+  // 页面在每次结果到达时都点刷新（一个自触发的循环）：前三次各补一轮，第四次停手。
+  // 旧口径按页记欠条、重复点击被吃掉；新口径刷新是**给身份的命令**，核心不记是谁点的（ADR-70）。
+  tableOf(core).onWrite = () => { if (asks >= 3) return; asks++; paused.refresh() }
+
+  watcher.submit({ id: 1 })
+  paused.submit({ id: 1 })
+  await settle()
+  assert.equal(calls, 4, '产出之后的每一次刷新都补一轮')
+
+  await sleep(30)
+  assert.equal(calls, 4, '页面停手就不再取：补的是命令，不是重试')
+  assert.equal(paused.last?.data, 4)
 })
 
 test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷新一次', async () => {
@@ -504,7 +526,7 @@ test('A04/A06 浏览器隐藏与组件失活只失去资格：要求被撤销、
   await settle()
   view.refresh()
   await settle()
-  assert.equal(core.snapshot().resources.length, 1, '刷新要求让实例留在册')
+  assert.equal(core.snapshot().resources.length, 1, '声明让实例留在册')
 
   core.setVisible(false)
   await settle()
@@ -518,7 +540,7 @@ test('A04/A06 浏览器隐藏与组件失活只失去资格：要求被撤销、
   assert.equal(calls, 1, '隐藏期间刷新不发请求（入口闸：激活且浏览器可见）')
 })
 
-test('A06 组件失活撤销本页未完成的刷新要求，声明与实例都留着', async () => {
+test('A06 组件失活只失去资格：点过的那次刷新继续等当前请求，声明与实例都留着', async () => {
   const source = defineRefresh<{ id: number }, number>('/api/core/318')
   const core = newCore(2, () => new Promise<number>(() => {}))
   const view = page(core, source)
@@ -532,7 +554,7 @@ test('A06 组件失活撤销本页未完成的刷新要求，声明与实例都�
   await settle()
   assert.equal(eligible(core, view), false, '失活即失去读者身份')
   assert.notEqual(declared(core, view), undefined, '声明还在')
-  assert.equal(core.snapshot().resources.length, 1, '失活只失去资格：要求被撤销，实例不释放')
+  assert.equal(core.snapshot().resources.length, 1, '失活只失去资格：当前请求仍在跑，实例不释放')
 })
 
 test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实例与结果一并消失', async () => {
@@ -562,7 +584,7 @@ test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实�
   assert.equal(core.snapshot().running.length, 0, '真实结束后交还槽位')
 })
 
-test('A06 卸载撤销这一页未完成的要求：要求还在就回收不了，所以先撤要求再摘声明', async () => {
+test('A06 刷新不留账：刷新之后立刻卸载，实例当场回收，不等这一轮的结果', async () => {
   const resolvers: Array<(value: number) => void> = []
   const source = defineRefresh<{ id: number }, number>('/api/core/901')
   const core = newCore(1, () => new Promise<number>(resolve => resolvers.push(resolve)))
@@ -570,16 +592,19 @@ test('A06 卸载撤销这一页未完成的要求：要求还在就回收不了�
 
   view.submit({ id: 1 })
   await settle()
-  view.refresh() // 先登记一次要求：它会让实例活到结算为止
+  resolvers[0]?.(1) // 第一轮结束，实例空闲
   await settle()
-  assert.equal(core.snapshot().resources[0]?.waiters.size, 1, '要求已登记')
+  view.refresh() // 刷新发起第二轮：旧口径里它是一张欠条，会让实例活到结算为止
+  await settle()
+  assert.equal(core.snapshot().running.length, 1, '刷新已经发起第二轮取数')
 
   core.undeclare(view.config)
-  assert.equal(core.snapshot().resources.length, 0, '卸载撤销要求与声明：实例当场回收')
+  assert.equal(core.snapshot().resources.length, 0, '刷新不留账：卸载当场回收实例')
   assert.equal(core.snapshot().running.length, 1, '在途请求仍占着槽位，直到真实结束')
-  resolvers[0]?.(1)
+  resolvers[1]?.(2)
   await settle()
   assert.equal(core.snapshot().running.length, 0, '真实结束后交还槽位')
+  assert.equal(core.snapshot().results.length, 0, '实例已经回收：迟到的结果写不进表')
 })
 
 test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数；最后一个声明者退出则连实例一起销毁', async () => {
@@ -628,7 +653,7 @@ test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', asyn
   core.setVisible(false)
 })
 
-test('A05 暂停只失去资格：已发起的刷新要求继续等当前请求的结果，声明、实例与结果都保留', async () => {
+test('A05 暂停只失去资格：已点过的那次刷新继续等当前请求的结果，声明、实例与结果都保留', async () => {
   const resolvers: Array<(value: number) => void> = []
   const source = defineRefresh<{ id: number }, number>('/api/core/398')
   const core = newCore(2, () => new Promise<number>(resolve => resolvers.push(resolve)))
@@ -647,7 +672,7 @@ test('A05 暂停只失去资格：已发起的刷新要求继续等当前请求�
   assert.notEqual(declared(core, view), undefined, '声明还在')
   assert.equal(core.snapshot().resources.length, 1, '实例不释放、在途不取消')
 
-  // 暂停不撤销已发起的刷新要求：它由当前这个请求的结果满足，既不另发一次也不必等下个周期。
+  // 暂停不撤销已点过的那次刷新：它由当前这个请求的结果满足，既不另发一次也不必等下个周期。
   resolvers[0]?.(7)
   await settle()
   assert.equal(resolvers.length, 1, '暂停期间不追发请求，本次刷新用现有这一次')
@@ -676,7 +701,7 @@ test('A13 共享请求失败：保留旧址、把失败写进该身份那一格�
   assert.equal(declared(core, view)?.declarers.size, 1, '资格与开启意愿都保留')
 })
 
-test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重试', async () => {
+test('A13/A14 在途时点的刷新由这一轮的结果回答：失败不自动重试，也不补第二次', async () => {
   const resolvers: Array<(value: number) => void> = []
   const rejecters: Array<(reason: unknown) => void> = []
   const source = defineRefresh<{ id: number }, number>('/api/core/445')
@@ -706,7 +731,7 @@ test('A13/A14 暂停页显式刷新失败：没有回执，失败写进该身份
 
   assert.ok(paused.failedAt(), '未订阅页面按身份从结果表读到失败')
   assert.equal(paused.writes(), 0, '失败不写结果')
-  assert.equal(core.snapshot().resources.length, 1, '失败撤销要求；声明还在，实例不释放')
+  assert.equal(core.snapshot().resources.length, 1, '失败不留账：声明还在，实例不释放')
 })
 
 test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结果', async () => {

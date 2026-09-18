@@ -29,7 +29,7 @@ export interface RefreshSource<P extends object, T> {
 /**
  * `submit` 的同步结果。`accepted` 只表示身份已被记录，不代表请求成功。
  * `cancelled` 不带原因：取消只有一个来源（句柄或协调者已销毁），单成员取值没有信息量（ADR-48）。
- * 声明不检查可见性与开启意愿，换身份也只是撤销本页未完成的刷新要求（那些要求没有回执，见 `refresh`）。
+ * 声明不检查可见性与开启意愿，换身份也只是把这份声明从旧身份上摘掉——刷新是给身份的命令，不留账（ADR-70）。
  */
 export type SubmitResult =
   | { readonly status: 'accepted' }

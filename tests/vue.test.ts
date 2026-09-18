@@ -214,6 +214,65 @@ test('A04/A06 KeepAlive 失活退订、激活恢复：两个方向都幂等', as
   app.unmount()
 })
 
+test('A04/A06 点过刷新之后失活：缓存里那一帧仍会更新；失活期间点刷新不产生事实', async () => {
+  let loads = 0
+  const resolvers: Array<(value: number) => void> = []
+  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/907')
+  const manager = newManager(1, () => { loads++; return new Promise<number>(resolve => { resolvers.push(resolve) }) })
+  const shown = ref(true)
+  let reader!: RefreshHandle<{ symbol: string }, number>
+  let cached!: RefreshHandle<{ symbol: string }, number>
+
+  const Reader = defineComponent({
+    setup() {
+      reader = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const Cached = defineComponent({
+    setup() {
+      cached = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      return () => h('div', [h(Reader), h(KeepAlive, null, { default: () => shown.value ? h(Cached) : h('span') })])
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  reader.submit({ symbol: 'A' })
+  cached.submit({ symbol: 'A' })
+  await tick()
+  resolvers[0]?.(1)
+  await tick()
+  assert.equal(reader.display.value?.data, 1)
+  assert.equal(cached.display.value?.data, 1)
+
+  // 在缓存页里点一次刷新、然后立刻失活：那一帧照旧更新（确认人 2026-09-17 的裁决「允许它更新一帧」）。
+  cached.refresh()
+  await tick()
+  assert.equal(loads, 2, '刷新已经发起取数')
+  shown.value = false
+  await tick()
+  resolvers[1]?.(2)
+  await tick()
+  assert.equal(cached.display.value?.data, 2, '点过刷新之后失活：缓存里的画面仍更新那一帧')
+
+  // 失活期间再点刷新：入口闸（激活且浏览器可见）不放行，什么都不产生。
+  cached.refresh()
+  await tick()
+  assert.equal(loads, 2, '失活期间点刷新不发请求、也不进入欠一份')
+  shown.value = true
+  await tick()
+  assert.equal(loads, 2, '重新激活只读回已有结果')
+  assert.equal(cached.display.value?.data, 2)
+  app.unmount()
+})
+
 test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写失败、修正后恢复', async () => {
   let loads = 0
   const quote = defineRefresh<{ symbol: string }, number>('/api/vue/187')
@@ -435,5 +494,57 @@ test('A17 未安装协调者时 useRefresh 直接抛错', () => {
     },
   }))
   app.mount({} as never)
+  app.unmount()
+})
+
+test('A05/A11 暂停页不点刷新就不上屏；自己点一次才上屏，之后重新冻结', async () => {
+  let loads = 0
+  const quote = defineRefresh<{ symbol: string }, number>('/api/vue/903')
+  const manager = newManager(1, async () => { loads++; return loads })
+  let reader!: RefreshHandle<{ symbol: string }, number>
+  let paused!: RefreshHandle<{ symbol: string }, number>
+  const Reader = defineComponent({
+    setup() {
+      reader = useRefresh(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const Paused = defineComponent({
+    setup() {
+      paused = useRefresh(quote, { enabled: ref(false), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+
+  const app = renderer.createApp(defineComponent({ setup() { return () => h('div', [h(Reader), h(Paused)]) } }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  reader.submit({ symbol: 'A' })
+  paused.submit({ symbol: 'A' })
+  await tick()
+  assert.equal(loads, 1, '共享身份只取一次')
+  assert.equal(reader.display.value?.data, 1)
+  const frozen = paused.display.value
+  assert.equal(frozen, null, '暂停页没点过刷新：结果到达也不上屏（画面冻结）')
+
+  // 同一格再来一拍：暂停页仍然什么都不抄——读闸门只认「刚点过刷新、基线已置空」。
+  reader.refresh()
+  await tick()
+  assert.equal(reader.display.value?.data, 2)
+  const stillFrozen = paused.display.value
+  assert.equal(stillFrozen, null, '暂停页不跟随新结果')
+
+  // 暂停页自己点名要的那一拍照样放行（A05）。
+  paused.refresh()
+  await tick()
+  assert.equal(paused.display.value?.data, 3, '显式刷新会把这一页带到最新一版')
+
+  // 之后再来的新结果不再进这一页：冻结回到最后一帧。
+  reader.refresh()
+  await tick()
+  assert.equal(reader.display.value?.data, 4)
+  assert.equal(paused.display.value?.data, 3, '这一次它没点刷新，画面停在自己拿到的那一版')
   app.unmount()
 })

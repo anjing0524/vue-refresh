@@ -60,8 +60,8 @@ export interface ResultSink {
 /**
  * 一个「URL ＋ 参数值」的共享实例：这个身份的**全部状态与判定**都在这个类里。
  *
- * 它不持有核心、也不持有页面：谁声明着它（`declarers` 的成员资格）、谁还没拿到结果
- * （`waiters`）、什么时候到期（`settledAt`）、哪一次执行还算数（`controller`）——
+ * 它不持有核心、也不持有页面：谁声明着它（`declarers` 的成员资格）、什么时候到期（`settledAt`）、
+ * 这一轮的结果产出了没有（`produced` / `needsNext`）、哪一次执行还算数（`controller`）——
  * 写表、回收、排队都是核心越过去做的动作，因此两方之间没有环（ADR-65、ADR-66）。
  */
 export class Resource {
@@ -76,11 +76,14 @@ export class Resource {
    */
   readonly declarers = new Set<Config>()
   /**
-   * 仍想要一次取数的配置（显式刷新登记的要求）。它是**标志而不是队列**：同一个页面重复刷新只留一份，
-   * 而且只结算一次（§0.2「刷新要求」）——「这个页面已经在等」这件事必须按页记，否则写表期间的重入
-   * 会被反复当成新要求，补发没有上界（A12/A14 的用例把这条钉住了）。
+   * 这一轮的结果**已经产出**了没有（写表之前置起、一轮结束时清掉）。
+   *
+   * 它只回答「此刻这句刷新，本轮的结果还够不够用」：产出之前够——直接等这一轮就行（A14，不追发）；
+   * 产出之后不够——这一轮已经写完了新的结果，要的必然是下一轮。
    */
-  readonly waiters = new Set<Config>()
+  produced = false
+  /** 产出之后又有人点过刷新：本轮结束后再排一次（插到队头，ADR-70）。 */
+  needsNext = false
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
   settledAt: number | null = null
   /**
@@ -118,9 +121,9 @@ export class Resource {
     return this.controller === controller
   }
 
-  /** 还有人要它吗：有声明者，或有没结算的刷新要求。没有就该回收（G4）。 */
+  /** 还有人要它吗：还有声明者。没有就该回收（G4）——刷新是给身份的命令，不留账（ADR-70）。 */
   isWanted(): boolean {
-    return this.declarers.size > 0 || this.waiters.size > 0
+    return this.declarers.size > 0
   }
 
   /** 一个声明者此刻是否有资格取数：环境允许 ＋ 开启意愿为真。 */
@@ -150,20 +153,20 @@ export class Resource {
   }
 
   /**
-   * 成功结算：记下结算时刻，并把**这一批**未完成的要求交回核心（写表与回收都由核心做，ADR-65）。
+   * 成功结算：记下结算时刻，并标上「这一轮的结果已经产出」。
    *
-   * 必须在写表**之前**调用、并且先取快照：写表会同步触发页面代码（例如 `flush: 'sync'` 的 watcher），
-   * 它可能当场 `refresh()`——那条要求不属于这一批，只能由核心补的后继请求满足（DESIGN §3.9）。
+   * 必须在写表**之前**调用：写表会同步触发页面代码（例如 `flush: 'sync'` 的 watcher），它可能当场
+   * `refresh()`——有了这个标记，核心才知道那一刻点的是**下一轮**（DESIGN §3.9 第一条）。
    */
-  settle(at: number): readonly Config[] {
+  settle(at: number): void {
     this.settledAt = at
-    return [...this.waiters]
+    this.produced = true
   }
 
   /** 失败结算：与 `settle` 同形（失败也算结算，因此不自动重试——A13）；失败记录由核心写。 */
-  fail(at: number): readonly Config[] {
+  fail(at: number): void {
     this.settledAt = at
-    return [...this.waiters]
+    this.produced = true
   }
 }
 
@@ -267,8 +270,7 @@ export class RefreshCore {
       return { status: 'accepted' }
     }
     if (current) {
-      // 顺序固定：先撤销旧身份上未完成的要求，再摘掉声明（要求还在就回收不了，§3.6）。
-      current.waiters.delete(config)
+      // 只摘声明：换身份后这一页在旧身份上没有任何残余（刷新不留账，ADR-70）。
       current.declarers.delete(config)
       this.releaseIfUnused(current)
     }
@@ -278,7 +280,10 @@ export class RefreshCore {
   }
 
   /**
-   * 显式刷新：没有执行就当场登记一次，有执行就把「还要再取一次」置起（本轮结果满足不了它）。
+   * 显式刷新：让**这个身份**再取一次。核心不记是谁点的——调用方要的是数据新鲜，不是一张欠条（ADR-70）。
+   *
+   * 三条分支：没有执行 → 插到队头；有执行、结果还没产出 → 本轮结果就够，不追发（A14）；
+   * 有执行、结果已经产出 → 这一轮满足不了它，记一笔，本轮结束再插一次队头。
    *
    * 返回值只说**这句命令收下了没有**（入口条件不成立时 `false`），不是取数回执：成功与失败都只经结果表。
    * 适配层用它决定自己那一页要不要跟着这一拍（读闸门在适配层，ADR-66）。
@@ -289,9 +294,8 @@ export class RefreshCore {
     const resource = this.find(url, key)
     if (resource === undefined) return false
 
-    // 有执行就直接用它的结果；没有就当场登记一次。同一个页面重复刷新只留一份要求（标志不是队列）。
-    resource.waiters.add(config)
-    if (!resource.hasExecution()) this.enqueue(resource)
+    if (!resource.hasExecution()) this.enqueueAtHead(resource)
+    else if (resource.produced) resource.needsNext = true
     this.flushSoon()
     return true
   }
@@ -301,11 +305,10 @@ export class RefreshCore {
     return this.find(url, key)?.isEligible(config, this.visible) ?? false
   }
 
-  /** 释放一页：撤销它未完成的要求与声明（组件卸载、销毁都由它收尾）。撤销后若实例没人要了就地回收。 */
+  /** 释放一页：撤销它的声明（组件卸载、销毁都由它收尾）。撤销后若实例没人要了就地回收。 */
   undeclare(config: Config): void {
     const resource = this.resourceOf(config)
     if (resource === undefined) return
-    resource.waiters.delete(config)
     resource.declarers.delete(config)
     this.releaseIfUnused(resource)
     this.flushSoon()
@@ -346,11 +349,10 @@ export class RefreshCore {
     this.disposed = true
     this.clearWakeup()
     this.queue.clear()
-    // 逐个实例撤销声明与未完成的要求并回收：abort 在途、删结果表条目。
-    // 只清声明不够——要求还在就回收不了，迟到的结果还会写进表（A17 把这条钉住了）。
+    // 逐个实例撤销声明并回收：abort 在途、删结果表条目。
+    // 不撤声明就回收不了，迟到的结果还会写进表（A17 把这条钉住了）。
     for (const resource of this.all()) {
       resource.declarers.clear()
-      resource.waiters.clear()
       this.releaseIfUnused(resource)
     }
     this.identities.clear()
@@ -393,7 +395,7 @@ export class RefreshCore {
   }
 
   /**
-   * 没有声明者也没有未完成的要求：删实例、abort 在途、删结果表条目。迟到的结束在身份复核处失效。**核心私有**。
+   * 没有声明者了：删实例、abort 在途、删结果表条目。迟到的结束在身份复核处失效。**核心私有**。
    */
   private releaseIfUnused(resource: Resource): void {
     if (resource.isWanted()) return
@@ -435,19 +437,28 @@ export class RefreshCore {
     this.place(resource, 'queued')
   }
 
-  /** 本轮结束后还有未满足的要求时补一次；唯一来源是写表触发的同步重入（DESIGN §3.9）。 */
-  private refill(resource: Resource): void {
-    if (resource.waiters.size === 0 || resource.hasExecution()) return
-    this.enqueue(resource)
+  /**
+   * 插到队头：手动刷新是一次「人正等着」的取数，应当排在周期取数前面。
+   *
+   * `Set` 只记得住加入顺序，所以先 `place` 再按「它最前、其余保持原序」重建一次
+   * （队列的规模是同时待取的身份数，几十个以内）。
+   */
+  private enqueueAtHead(resource: Resource): void {
+    this.place(resource, 'queued')
+    const waiting = [...this.queue].filter(other => other !== resource)
+    this.queue.clear()
+    this.queue.add(resource)
+    for (const other of waiting) this.queue.add(other)
   }
 
   /**
-   * 撤销一个配置的刷新要求；它可能是本实例最后一个要求，因此顺手判断这个实例还要不要留着。
-   * **核心私有**：实例只交出「谁在等」，回收由核心决定（ADR-65）。
+   * 一轮结束后：产出之后又有人点过刷新，就补一次（插到队头）。
+   * 唯一来源是写表触发的同步重入（DESIGN §3.9 第一条）。
    */
-  private settleRequest(resource: Resource, config: Config): void {
-    if (!resource.waiters.delete(config)) return
-    this.releaseIfUnused(resource)
+  private refill(resource: Resource): void {
+    if (!resource.needsNext || resource.hasExecution()) return
+    resource.needsNext = false
+    this.enqueueAtHead(resource)
   }
 
   /**
@@ -472,17 +483,16 @@ export class RefreshCore {
       const data = copyResult(response.data)
       if (!resource.isCurrent(controller)) return
       const at = Date.now()
-      const satisfied = resource.settle(at)
+      resource.settle(at)
       this.writeResult(resource, data, at)
-      for (const config of satisfied) this.settleRequest(resource, config)
     } catch (error) {
       if (!resource.isCurrent(controller)) return
       const at = Date.now()
-      const satisfied = resource.fail(at)
+      resource.fail(at)
       this.writeFailure(resource, error, at)
-      for (const config of satisfied) this.settleRequest(resource, config)
     } finally {
       this.place(resource, 'idle')
+      resource.produced = false
       this.refill(resource)
       this.flushSoon()
     }

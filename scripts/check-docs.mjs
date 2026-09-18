@@ -324,6 +324,7 @@ for (const form of new Set(allForms)) {
 // Field names owned by DESIGN §3.3. Add one here when that table gains a persistent field; leaving it
 // out would only weaken (c), never fail it. `active` was missing until 2026-09-17 (ADR-50).
 const INTERNAL_FIELDS = ['parameters', 'subscription', 'subscribers', 'declarers', 'waiters',
+  'produced', 'needsNext',
   'settledAt', 'entry', 'task', 'controller', 'wakeup', 'flushing', 'cleanup', 'disposed',
   'visible', 'buckets', 'handles', 'queue', 'running', 'snapshot', 'settle', 'active']
 for (const field of INTERNAL_FIELDS) {
@@ -455,7 +456,11 @@ for (const [kind, head] of [['函数', '| 函数 |'], ['状态常量对象', '| 
 //     is how an external review came to cite a notification channel that no longer exists.
 //     §5 is excluded on purpose: it keeps delivery records that legitimately quote what past ADRs
 //     removed, and ADR.md is not scanned at all for the same reason.
-const RETIRED = ['caller', 'ErrorOrigin', 'CancelReason', 'RefreshError', 'readSnapshot', 'reported', 'INVALID_CONFIG_MESSAGE']
+//     ADR-70 retired the per-page claim behind `refresh` (the name 「刷新要求」) and the private
+//     `settleRequest`; §0 now registers 「刷新命令」 instead, so both must stay out of the normative
+//     text. The adapter keeps its own `pending` flag — that one is current code, not history.
+const RETIRED = ['caller', 'ErrorOrigin', 'CancelReason', 'RefreshError', 'readSnapshot', 'reported', 'INVALID_CONFIG_MESSAGE',
+  '刷新要求', 'settleRequest']
 for (const [file, text] of [['/README.md', read('/README.md')], ['/DESIGN.md', designText],
   ['/统一刷新管理.md', design.slice(0, catalogueEnd)]]) {
   for (const term of RETIRED) {
