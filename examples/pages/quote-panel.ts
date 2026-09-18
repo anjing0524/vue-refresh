@@ -28,8 +28,8 @@ const QuoteCard = defineComponent({
     })
     // 失败不再由框架推送：交付面上出现**新的失败对象**就计一次。默认 flush 是 pre 且首次不触发；
     // 每次失败都是一个新对象（成功会把 failure 清成 null），所以按引用变化计数即可。
-    watch(() => task.display.value?.failure, failure => {
-      if (!failure) return
+    watch(() => task.display.value?.failedAt, failedAt => {
+      if (failedAt === null) return
       failures.value += 1
       emit('failure')
     })
@@ -40,7 +40,7 @@ const QuoteCard = defineComponent({
 
     return () => {
       const display = task.display.value
-      // 首查就失败时 display 不是 null，而是 `data: null, failure: {...}`：空态按 data 判。
+      // 首查就失败时 display 不是 null，而是 `data: null, failedAt: <时刻>`：空态按 data 判。
       const data = display?.data ?? null
       return h('section', { class: 'card', 'data-testid': 'qp-card' }, [
         h('h3', `行情 · ${props.symbol}`),

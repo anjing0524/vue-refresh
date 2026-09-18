@@ -37,17 +37,6 @@ export type SubmitResult =
   | { readonly status: 'cancelled' }
 
 /**
- * 最近一次失败的原始异常与它发生的时刻。失败是**那个身份的事实**，写在结果表这一格上，
- * 由读取面按自己的节拍取走——框架不再向页面推送失败（ADR-63）。
- */
-export interface RefreshFailure {
-  /** 原始异常（传输抛出的、`AbortError` 或框架上限错误），原样带出，判断交给读取面。 */
-  readonly cause: unknown
-  /** 失败发生的时刻（`Date.now()`）。 */
-  readonly at: number
-}
-
-/**
  * 交付面：参数、数据与结果产生时间同次整体发布。**两者都是本页独立副本**（ADR-52）。
  *
  * 它是**某一拍**的副本，不是实时视图：适配层按这一页自己的 `every` 从结果表抄一份
@@ -59,8 +48,13 @@ export interface RefreshDisplay<P extends object, T> {
   /** 最后一次成功的数据；**从未成功过**（首查就失败）时为 `null`。 */
   readonly data: ReadonlySnapshot<T> | null
   readonly updatedAt: number | null
-  /** 最近一次失败；之后成功过就清空为 `null`（失败发生后两拍之间又被成功盖过，则看不见，见 ADR-63）。 */
-  readonly failure: RefreshFailure | null
+  /**
+   * 最近一次失败的原始异常（传输抛出的、`AbortError`……），原样带出，判断交给读取面。
+   * 有没有失败看 `failedAt`：页面 `throw undefined` 这种病态情况下这个字段也是 `undefined`。
+   */
+  readonly error: unknown
+  /** 最近一次失败的时刻；之后成功过就清回 `null`（两拍之间被成功盖过的那一段看不见，见 ADR-63）。 */
+  readonly failedAt: number | null
 }
 
 /**

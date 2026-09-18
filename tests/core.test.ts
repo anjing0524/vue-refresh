@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { afterEach, mock, test } from 'node:test'
+import { afterEach, test } from 'node:test'
 import { RefreshCore } from '../src/core.ts'
-import type { Config, Demand, Entry, Resource, ResultCell, ResultRow, ResultSink } from '../src/core.ts'
+import type { Config, Demand, Resource, ResultCell, ResultSink } from '../src/core.ts'
 import { defineRefresh, prepareParameters } from '../src/source.ts'
 import type { Parameters } from '../src/source.ts'
-import type { RefreshDisplay, RefreshFailure, RefreshSource, SubmitResult } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshSource, SubmitResult } from '../src/public-types.ts'
 
 /** 每个用例结束时销毁核心：周期调度会留下唯一的唤醒 Timer，不销毁的话进程不会退出。 */
 const cores: RefreshCore[] = []
@@ -15,24 +15,26 @@ const cores: RefreshCore[] = []
  */
 function newTable() {
   const cells = new Map<string, ResultCell>()
-  const writes: Array<{ url: string; key: string; entry: Entry }> = []
+  const writes: Array<{ url: string; key: string; data: unknown; updatedAt: number }> = []
   const id = (url: string, key: string): string => `${url}\u0000${key}`
   const table = {
     sink: {
-      write(url: string, key: string, entry: Entry): void {
-        cells.set(id(url, key), { entry, failure: null })
-        writes.push({ url, key, entry })
+      write(url: string, key: string, data: unknown, updatedAt: number): void {
+        cells.set(id(url, key), { data, updatedAt, error: undefined, failedAt: null })
+        writes.push({ url, key, data, updatedAt })
         table.onWrite?.()
       },
-      fail(url: string, key: string, failure: RefreshFailure): void {
-        cells.set(id(url, key), { entry: cells.get(id(url, key))?.entry ?? null, failure })
+      fail(url: string, key: string, error: unknown, failedAt: number): void {
+        const previous = cells.get(id(url, key))
+        cells.set(id(url, key), {
+          data: previous?.data, updatedAt: previous?.updatedAt ?? null, error, failedAt,
+        })
         table.onWrite?.()
       },
       remove(url: string, key: string): void { cells.delete(id(url, key)) },
-      list(): readonly ResultRow[] {
-        const rows: ResultRow[] = []
+      list(): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[] {
+        const rows: { url: string; key: string; cell: ResultCell }[] = []
         for (const [raw, cell] of cells) {
-          if (cell.entry === null && cell.failure === null) continue
           const [url = '', key = ''] = raw.split('\u0000')
           rows.push({ url, key, cell })
         }
@@ -42,8 +44,10 @@ function newTable() {
     writes,
     onWrite: null as (() => void) | null,
     read(url: string, key: string): ResultCell | undefined { return cells.get(id(url, key)) },
-    /** 这一格上当前的失败；空格子或成功过之后都是 `null`。 */
-    failure(url: string, key: string): RefreshFailure | null { return cells.get(id(url, key))?.failure ?? null },
+    /** 这一格上最近一次失败的时刻；成功过、或从未写过都是 `null`。 */
+    failedAt(url: string, key: string): number | null { return cells.get(id(url, key))?.failedAt ?? null },
+    /** 这一格上最近一次失败的原始异常。 */
+    error(url: string, key: string): unknown { return cells.get(id(url, key))?.error },
   }
   return table
 }
@@ -78,7 +82,6 @@ function tableOf(core: RefreshCore): ReturnType<typeof newTable> {
 
 afterEach(() => {
   for (const core of cores.splice(0)) core.dispose()
-  mock.timers.reset()
 })
 
 /**
@@ -95,8 +98,10 @@ type PartialConfig = { enabled?: boolean; every?: number; active?: boolean }
 interface Page {
   readonly demand: Demand
   readonly last: RefreshDisplay<object, unknown> | undefined
-  /** 本页**当前身份**那一格上的失败；没有身份、或成功过之后为 `null`（ADR-63）。 */
-  failure(): RefreshFailure | null
+  /** 本页**当前身份**那一格上最近一次失败的时刻；没有身份、成功过、从未写过都是 `null`（ADR-63）。 */
+  failedAt(): number | null
+  /** 本页**当前身份**那一格上最近一次失败的原始异常。 */
+  error(): unknown
   /** 本页**当前身份**被写进结果表几次（成功；旧契约里的「交付次数」）；没有身份时为 0。 */
   writes(): number
   submit(args: object): SubmitResult
@@ -125,10 +130,15 @@ function page(
       if (parameters === null) return 0
       return table.writes.filter(write => write.url === demand.url && write.key === parameters.key).length
     },
-    failure(): RefreshFailure | null {
+    failedAt(): number | null {
       const parameters = demand.parameters
       if (parameters === null) return null
-      return table.failure(demand.url, parameters.key)
+      return table.failedAt(demand.url, parameters.key)
+    },
+    error(): unknown {
+      const parameters = demand.parameters
+      if (parameters === null) return undefined
+      return table.error(demand.url, parameters.key)
     },
     // 与适配层同形：准备失败就地变成 `rejected`，核心拿到的永远是可用身份（ADR-64）。
     submit: args => {
@@ -159,13 +169,14 @@ function page(
       const parameters = demand.parameters
       if (parameters === null) return undefined
       const cell = table.read(demand.url, parameters.key)
-      if (!cell || (cell.entry === null && cell.failure === null)) return undefined
+      if (!cell) return undefined
       // `display` 的形状：`args` 每次读取复制一份（身份键所描述的那份值），`data` 是结果表里同一个对象。
       return {
         args: structuredClone(parameters.args),
-        data: cell.entry === null ? null : cell.entry.data,
-        updatedAt: cell.entry === null ? null : cell.entry.updatedAt,
-        failure: cell.failure,
+        data: cell.updatedAt === null ? null : cell.data,
+        updatedAt: cell.updatedAt,
+        error: cell.error,
+        failedAt: cell.failedAt,
       }
     },
   }
@@ -188,15 +199,17 @@ function reader(core: RefreshCore, view: Page): boolean {
 }
 
 /**
- * 队列不变量：`queue` 里的任务必定就是它实例的当前执行。
+ * 队列不变量：在队的实例必须带着「这次执行」的 controller，而且不可能同时在跑。
  *
- * `queue` 的唯一写入者是 `placeTask`，它只在「这个任务就是当前执行」时把它放进队列，因此
- * `startQueued` 不再复核归属（ADR-62 删掉了那个已不可达的分支）。这条断言把那个前提钉住：
- * 一旦有人新增第二个入队路径，它会红。
+ * `queue` 的唯一写入者是 `place`，它进入 `queued` 时就建好 controller，因此 `startQueued`
+ * 不再复核归属（ADR-62 删掉了那个已不可达的分支）。这条断言把那个前提钉住：一旦有人新增
+ * 第二个入队路径，它会红。
  */
 function assertQueueConsistent(core: RefreshCore): void {
-  for (const task of core.snapshot().queued) {
-    assert.equal(task.resource.task, task, '队列里的任务必须是它实例的当前执行')
+  const view = core.snapshot()
+  for (const resource of view.queued) {
+    assert.notEqual(resource.controller, null, '在队的实例必须带着这次执行的 controller')
+    assert.equal(view.running.includes(resource), false, '在队的实例不可能同时在跑')
   }
 }
 
@@ -326,7 +339,7 @@ test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（�
   assert.equal(view.demand.parameters, before)
   assert.equal(declared(core, view), instance)
   // 校验失败不改动任何状态：旧身份仍然在后台继续取数；输入问题也不进结果表（ADR-51）。
-  assert.equal(view.failure(), null, '参数被拒只走同步返回值')
+  assert.equal(view.failedAt(), null, '参数被拒只走同步返回值')
 
   // 业务 validate 自己抛错时同样按 rejected 返回：异常由提交边界收住，不冒泡到调用方。
   const throwing = defineRefresh<{ id: number }, number>('/api/core/159-throwing', {
@@ -335,7 +348,7 @@ test('A03 参数被拒时返回 rejected，保留已有身份，且不通知（�
   const victim = page(core, throwing)
   assert.equal(victim.submit({ id: 1 }).status, 'rejected')
   assert.equal(victim.demand.parameters, null, '被拒的声明不改动状态')
-  assert.equal(victim.failure(), null, '被拒的声明不产生失败')
+  assert.equal(victim.failedAt(), null, '被拒的声明不产生失败')
 })
 
 test('A14 在途任务直接满足本次刷新：不追发第二次', async () => {
@@ -485,8 +498,12 @@ test('A06 组件失活撤销本页未完成的刷新要求，声明与实例都�
 
 test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实例与结果一并消失', async () => {
   let signal: AbortSignal | undefined
+  let finish: ((value: number) => void) | undefined
   const source = defineRefresh<{ id: number }, number>('/api/core/334')
-  const core = newCore(2, (_url, _body, context) => { signal = context.signal; return new Promise<number>(() => {}) })
+  const core = newCore(2, (_url, _body, context) => {
+    signal = context.signal
+    return new Promise<number>(resolve => { finish = resolve })
+  })
   const quote = source
   const view = page(core, quote)
 
@@ -497,6 +514,13 @@ test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实�
   core.removeDemand(view.demand)
   assert.equal(signal?.aborted, true)
   assert.equal(core.snapshot().resources.length, 0)
+  // 实例没了，但那次请求还在跑：它仍占着并发账本（`abandoned`），直到真实结束自己交还（ADR-65）。
+  assert.equal(core.snapshot().running.length, 1, '被弃的在途请求继续占着槽位')
+  assert.equal(core.snapshot().queued.length, 0)
+
+  finish?.(9)
+  await settle()
+  assert.equal(core.snapshot().running.length, 0, '真实结束后交还槽位')
 })
 
 test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数；最后一个声明者退出则连实例一起销毁', async () => {
@@ -590,7 +614,7 @@ test('A13 共享请求失败：保留旧址、把失败写进该身份那一格�
 
   assert.ok(calls >= 2)
   assert.equal(view.last?.data, 5, '失败保留旧画面')
-  assert.ok(view.failure(), '失败写进该身份那一格：按身份读得到（读取面这一侧由 tests/vue.test.ts 验证）')
+  assert.ok(view.failedAt(), '失败写进该身份那一格：按身份读得到（读取面这一侧由 tests/vue.test.ts 验证）')
   assert.equal(declared(core, view)?.declarers.size, 1, '资格与开启意愿都保留')
 })
 
@@ -608,7 +632,7 @@ test('A13/A14 失败结算该实例全部未完成的刷新要求，不自动重
 
   rejecters[0]?.(new Error('down'))
   await settle()
-  assert.ok(view.failure(), '失败写进该身份那一格：刷新没有回执')
+  assert.ok(view.failedAt(), '失败写进该身份那一格：刷新没有回执')
   assert.ok(reader(core, view), '资格与开启意愿都保留')
   assert.equal(resolvers.length, 1, '失败不自动重试')
 })
@@ -622,7 +646,7 @@ test('A13/A14 暂停页显式刷新失败：没有回执，失败写进该身份
   paused.refresh()
   await settle()
 
-  assert.ok(paused.failure(), '未订阅页面按身份从结果表读到失败')
+  assert.ok(paused.failedAt(), '未订阅页面按身份从结果表读到失败')
   assert.equal(paused.writes(), 0, '失败不写结果')
   assert.equal(core.snapshot().resources.length, 1, '失败撤销要求；声明还在，实例不释放')
 })
@@ -634,7 +658,7 @@ test('A11/A13 空结果（undefined）按请求失败处理，null 是有效结�
   const empty = page(core, source)
   empty.submit({ id: 1 })
   await settle()
-  assert.ok(empty.failure(), '空结果按请求失败：这一格处于失败态')
+  assert.ok(empty.failedAt(), '空结果按请求失败：这一格处于失败态')
   assert.equal(empty.last?.data, null, '空结果不写数据：这一格只有失败')
 
   mode = 'null'
@@ -702,31 +726,6 @@ test('A07 有效间隔取所有订阅的最小值', async () => {
   assert.ok(calls >= 3, `最小间隔生效：40ms 内至少 3 次，实测 ${calls}`)
 })
 
-test('A10 上限到期：挂死的 load 出册并交还槽位，迟到的结束不再写任何事实', async () => {
-  mock.timers.enable({ apis: ['setTimeout'] })
-  const resolvers: Array<(value: number) => void> = []
-  const source = defineRefresh<{ id: number }, number>('/api/core/560')
-  const core = newCore(1, () => new Promise<number>(resolve => resolvers.push(resolve)))
-  const view = page(core, source)
-
-  view.submit({ id: 1 })
-  await micro()
-  assert.equal(resolvers.length, 1)
-  assert.equal(core.snapshot().running.length, 1)
-
-  mock.timers.tick(10_000)
-  await micro()
-
-  assert.equal(core.snapshot().running.length, 0, '上限到期当场出册，槽位交还调度')
-  assert.equal(core.snapshot().resources[0]?.task, null)
-  assert.ok(view.failure(), '上限到期按请求失败写一次该格')
-
-  const delivered = view.writes()
-  resolvers[0]?.(99)
-  await micro()
-  assert.equal(view.writes(), delivered, '迟到的结束不写结果')
-})
-
 test('A11 交付面：null 之外的任何结果都整体替换，读者拿到的是结果表里同一个对象（要改自己复制）', async () => {
   const source = defineRefresh<{ id: number }, { rows: number[] }>('/api/core/587')
   const quote = source
@@ -791,9 +790,9 @@ test('A16 零回调：传输失败只写结果表，核心不认识页面也不�
   victim.submit({ id: 1 })
   witness.submit({ id: 1 })
   await settle()
-  assert.ok(victim.failure(), '失败方自己读得到')
-  assert.ok(witness.failure(), '同一个身份另一个读者读的是同一格，也读得到')
-  assert.equal(victim.failure()?.cause instanceof Error, true, '原始异常原样带出')
+  assert.ok(victim.failedAt(), '失败方自己读得到')
+  assert.ok(witness.failedAt(), '同一个身份另一个读者读的是同一格，也读得到')
+  assert.equal(victim.error() instanceof Error, true, '原始异常原样带出')
   assert.equal(declared(core, victim)?.declarers.size, 2)
 
   // 零回调（ADR-64）：`Demand` 只有数据，释放与销毁都不需要页面配合——下面这条在类型层面就钉住它。
@@ -845,7 +844,7 @@ test('A04/A05 配置非法时不取数、不刷新、不通知；声明仍在，
   assert.equal(view.writes(), 0)
 
   view.refresh()
-  assert.equal(view.failure(), null, '配置非法不取数自然也不会写失败：页面读自己的 refs 就知道')
+  assert.equal(view.failedAt(), null, '配置非法不取数自然也不会写失败：页面读自己的 refs 就知道')
 })
 
 test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => {
@@ -857,7 +856,7 @@ test('A05/A14 未声明身份时刷新不产生请求也不通知', async () => 
   view.refresh()
   await settle()
   assert.equal(calls, 0)
-  assert.equal(view.failure(), null, '页面自己知道还没有身份，不产生失败')
+  assert.equal(view.failedAt(), null, '页面自己知道还没有身份，不产生失败')
 })
 
 test('A18 参数编码与值域：键按 JSON 语义稳定排序，坏参数一律拒绝且不改动状态', async () => {
@@ -947,7 +946,7 @@ test('边界总账：运行期失败只走返回值或结果表这一格，公�
     const view = page(core, source)
     assert.doesNotThrow(() => { view.submit({ id: 1 }) })
     await settle()
-    assert.ok(view.failure(), '运行期失败写进该格，入口不抛错')
+    assert.ok(view.failedAt(), '运行期失败写进该格，入口不抛错')
     assert.equal(core.snapshot().running.length, 0)
   }
 
@@ -970,7 +969,7 @@ test('边界总账：运行期失败只走返回值或结果表这一格，公�
   ]) {
     assert.equal(page(newCore(1, async () => 1), defineRefresh<object, number>('/api/core/813', { validate })).submit({}).status, 'rejected')
   }
-  assert.equal(view.failure(), null, '输入非法一律不进结果表')
+  assert.equal(view.failedAt(), null, '输入非法一律不进结果表')
   assert.equal(core.snapshot().resources.length, 0)
 
   // 刷新侧：入口状态不成立（这里是没有身份）时直接返回，不抛错、不需要 try/catch。

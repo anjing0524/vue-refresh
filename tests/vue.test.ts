@@ -130,7 +130,7 @@ test('A04/A05 配置非法：不取数并停止订阅，修正后按当前资格
   await tick()
   await tick()
   // 配置非法不产生任何结果：它是本页自己的输入事实，框架只负责不订阅、不请求（ADR-51）。
-  assert.equal(api.display.value?.failure, null, '配置非法不写失败')
+  assert.equal(api.display.value?.failedAt, null, '配置非法不写失败')
 
   every.value = 50_000
   await tick()
@@ -238,7 +238,7 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写�
   ;(enabled as Ref<unknown>).value = undefined
   await tick()
   await tick()
-  assert.equal(api.display.value?.failure, null, '配置非法不写失败')
+  assert.equal(api.display.value?.failedAt, null, '配置非法不写失败')
   api.submit({ symbol: 'B' })
   await tick()
   assert.equal(loads, 1, '配置非法时不订阅')
@@ -279,7 +279,10 @@ test('A21 采样：慢页面不跟着快页面跳，只在自己的拍上抄；�
   quick.submit({ symbol: 'A' })
   await tick()
 
-  const latest = (): unknown => currentCore()?.snapshot().results[0]?.cell.entry?.data
+  const latest = (): unknown => {
+    const cell = currentCore()?.snapshot().results[0]?.cell
+    return cell === undefined || cell.updatedAt === null ? null : cell.data
+  }
   // 新身份的第一份内容不等拍：两个页面都立即拿到首查结果。
   assert.equal(slow.display.value?.data, 1, '慢页面的第一份内容立即上屏')
   assert.equal(quick.display.value?.data, 1, '快页面的第一份内容立即上屏')
@@ -323,16 +326,16 @@ test('A13 失败写进结果表那一格：首查失败也读得到，成功后�
   assert.notEqual(api.display.value, null, '首查失败也发布画面（否则首查失败无从读取）')
   assert.equal(api.display.value?.data, null, '从未成功过：数据为 null')
   assert.equal(api.display.value?.updatedAt, null)
-  assert.match(String((api.display.value?.failure?.cause as Error).message), /boom-1/, '原始异常原样带出')
+  assert.match(String((api.display.value?.error as Error).message), /boom-1/, '原始异常原样带出')
 
   mode = 'ok'
   api.refresh()
   await until(() => api.display.value?.data === 2, '显式刷新后读到成功结果')
-  assert.equal(api.display.value?.failure, null, '成功清掉失败')
+  assert.equal(api.display.value?.failedAt, null, '成功清掉失败')
 
   mode = 'fail'
   api.refresh()
-  await until(() => api.display.value?.failure !== null, '失败重新可读')
+  await until(() => api.display.value?.failedAt !== null, '失败重新可读')
   assert.equal(api.display.value?.data, 2, '失败不覆盖旧址（数据仍是上一次成功的）')
   assert.equal(api.display.value?.updatedAt !== null, true, '失败不动结果的产生时间')
   app.unmount()

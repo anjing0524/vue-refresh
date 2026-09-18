@@ -112,13 +112,13 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check((await d.requests())[0]!.status === 'aborted', 'transport saw the disconnect')
     // 失败是那一格的事实（ADR-63）：首查就失败时画面**不是** null，而是「有失败、没有数据」。
     const timedOut = state.pages['甲']
-    check(shown(timedOut) === null && (timedOut?.failure ?? null) !== null,
+    check(shown(timedOut) === null && (timedOut?.failedAt ?? null) !== null,
       'timed-out request delivers a failure and no data')
     check(state.running === 0 && state.queued === 0, 'deadline releases the physical slot')
     await sleep(1_000)
     check((await d.requests()).length === 1, 'next attempt waits for the interval, not a busy retry')
   } },
-  { name: 'A10/A11 换身份建立新实例：旧身份的结果写回自己那一份，两个身份互不覆盖', async run(d) {
+  { name: 'A11 换身份建立新实例：旧身份的结果写回自己那一份，两个身份互不覆盖', async run(d) {
     await d.open('/?mode=controlled')
     await until(async () => (await d.snapshot()).calls.length === 1, 'initial controlled load')
     await d.enable('甲', false); await d.enable('乙', false)

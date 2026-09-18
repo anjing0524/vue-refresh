@@ -86,8 +86,8 @@ async function measure() {
       // 与 tests/vue.test.ts 的做法一致（自定义渲染器不冒充浏览器可见性测试）。
       core.setVisible(true)
       const task = useRefresh(source, { enabled: ref(true), every: ref(every) })
-      // 失败不再回调推送：交付面出现新的失败对象时计一次（这是原输出字段 `failures` 的来源）。
-      watch(() => task.display.value?.failure, failure => { if (failure) failures += 1 })
+      // 失败不再回调推送：交付面出现新的失败时刻时计一次（这是原输出字段 `failures` 的来源）。
+      watch(() => task.display.value?.failedAt, failedAt => { if (failedAt !== null) failures += 1 })
       onMounted(() => task.submit({ symbol: `S${props.identity}` }))
       return () => h('span', String(task.display.value?.data?.price ?? ''))
     },

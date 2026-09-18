@@ -15,7 +15,7 @@ src/source.ts         固定资源定义（URL ＋ 参数准入）、参数准�
 src/core.ts           跨实例的协调者（注册表、需求名册、队列与并发、调度）＋ 一个身份的 Resource 类；不调用任何页面代码
 src/store.ts          结果表（Pinia）：每个 (URL, 参数键) 一份独立 ShallowRef，写一格只唤醒订阅这一格的 watcher；随实例释放把该格置 `undefined`
 src/vue.ts            组件适配与安装：配置快照、需求、参数准备与校验、生命周期、可见性、结果表接线、按 every 采样
-src/index.ts          包入口（三个函数与 7 个公共类型；没有常量对象）
+src/index.ts          包入口（三个函数与 6 个公共类型；没有常量对象）
 ```
 
 - 依赖方向单向：`public-types` ← `source` ← `core` ← `store` ← `vue` ← `index`。
@@ -77,18 +77,20 @@ if (import.meta.hot) import.meta.hot.dispose(() => refresh.dispose())
 
 `submit` 同步声明身份（同参重复声明幂等，参数被拒时不改动任何状态）；`refresh` 只登记一次要数、**没有回执**。
 关闭 `enabled` 只退订、**不撤销**已发起的刷新要求，因此暂停页仍能刷新一次。
-显式刷新与自动刷新共用同一队列与并发槽，满槽时排队；后台只在真实取数结束后释放并发槽，
-另有一层框架上限（10 秒，从开始执行起算）到期即按共享请求失败结算并立即出册，因此挂死的请求不会让应用停摆。
+显式刷新与自动刷新共用同一队列与并发槽，满槽时排队；槽位只在请求**真实结束**时释放，一个实例同时只有一个执行。
+**框架不设自己的取数上限**：请求必然终止由注入的传输负责（axios 的 `timeout`、反向代理或宿主自己的截止），
+一个永不结束的请求会占着它的并发槽直到传输自己结束（ADR-65）。
 
-刷新失败也是**那个身份的事实**：框架把失败写进结果表同一格（`failure = { cause, at }`，原始异常原样带出，**只报共享请求失败**），
+刷新失败也是**那个身份的事实**：框架把失败写进结果表同一格（`error` ＋ `failedAt`，原始异常原样带出，**只报共享请求失败**），
 **不动**最后一次成功的数据，然后照常按周期继续；成功一到，失败就被清掉。
-框架没有推送失败的通道、也不改写调用方的开关：是否停止自动刷新由页面读 `display.failure` 自己决定；
+框架没有推送失败的通道、也不改写调用方的开关：是否停止自动刷新由页面读 `display.failedAt` 自己决定；
 只要 `enabled` 仍为真，下个周期继续，暂停页也仍可主动刷新。
 失败被**采样**：本页两次采样之间「先失败、后成功」的那一段不会被看见——这是按频率读取的代价（ADR-63）。
 
 框架只有一条取数通道：显式刷新与自动刷新都由框架按 URL 取数，成功后把结果写进结果表（每个身份一条）。
-`display` 是唯一读出口：它按**已声明身份**读 `args` / `data` / `updatedAt` / `failure`，不提供「正在刷新」这类实时状态。
-`data` 为 `null` 表示**从未成功过**（首查就失败），此时 `failure` 有值——首查失败的页面照样能读到失败。
+`display` 是唯一读出口：它按**已声明身份**读 `args` / `data` / `updatedAt` / `error` / `failedAt`，不提供「正在刷新」这类实时状态。
+`data` 为 `null` 表示**从未成功过**（首查就失败），此时 `failedAt` 有值——首查失败的页面照样能读到失败。
+结果表那一格是四个平字段（`data` / `updatedAt` / `error` / `failedAt`），没有中间层对象（ADR-65）。
 **读到的 `data` 就是结果表里那同一个对象**：同一身份的页面共享它，要改自己复制（编译期只读视图不算运行期隔离）；`args` 每次采样复制一份。
 **只有读者才跟随，而且按本页自己的 `every` 采样**：本页还是该身份的读者（**有资格**——声明着它且开启且激活且浏览器可见——或它上面有未撤销的刷新要求）时，
 脉搏每 `every` 毫秒抄一次结果表，**一拍最多抄一次**；两个采样点之间的新版本不改变画面。新身份的第一份内容、本页显式 `refresh()` 那一次、
@@ -115,7 +117,7 @@ pnpm dev
 ```
 
 `build` 生成 `dist/index.js` 与类型声明，Vue 是外部 peer dependency；包仅导出 `defineRefresh`、
-`createRefreshManager`、`useRefresh`，以及 7 个公共类型（清单见统一文档 §2；工具型别名不导出，按推断使用）。这里没有常量对象：取值域直接写在判别联合里（ADR-51）。`build:demo` 生成演示页面，HTTP fixture 只由开发服务提供。
+`createRefreshManager`、`useRefresh`，以及 6 个公共类型（清单见统一文档 §2；工具型别名不导出，按推断使用）。这里没有常量对象：取值域直接写在判别联合里（ADR-51）。`build:demo` 生成演示页面，HTTP fixture 只由开发服务提供。
 
 默认示例在 http://127.0.0.1:4173/，验证页为 `/tests/browser.html`；端口被占用时用 `pnpm dev --port 4177`。
 `pnpm test:browser` 在独立 4174 端口用 Playwright 执行与验证页相同的场景；默认使用系统 Chrome
@@ -131,19 +133,19 @@ pnpm dev
 | 实际检查 | 结果/范围 |
 |---|---|
 | pnpm typecheck | 通过，0 错误。`tests/types.ts` 的 `@ts-expect-error` 反例（缺字段/字段类型/旧元组调用/Source 不变性/DTO/readonly/refresh 不接受参数且结算不含 DTO/参数值域拒绝 `Date` 与 `Map`/已删除的 `onError`/失败不可改写）一并被校验 |
-| pnpm test | 通过：43 个用例全绿（`tests/core.test.ts` 34、`tests/vue.test.ts` 9），覆盖 A01–A20。核心用例直接驱动 `RefreshCore` 并提供配置快照（含一条「运行期失败只走返回值或结果表这一格」的边界总账）；Vue 用例用无 DOM 的自定义渲染器 ＋ 真实 KeepAlive，安装路径用最小 `document` 替身，不冒充真实可见性测试，并用真实 Timer 验证按 `every` 采样 |
-| pnpm build | 通过。生成 `dist/index.js`（12.70 kB，12702 字节）与 6 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态；`vue` 与 `pinia` 都是外部依赖） |
+| pnpm test | 通过：42 个用例全绿（`tests/core.test.ts` 33、`tests/vue.test.ts` 9），覆盖 A01–A21（A10「框架上限到期」与 A15 已随能力/入口移除）。核心用例直接驱动 `RefreshCore` 并提供配置快照（含一条「运行期失败只走返回值或结果表这一格」的边界总账）；Vue 用例用无 DOM 的自定义渲染器 ＋ 真实 KeepAlive，安装路径用最小 `document` 替身，不冒充真实可见性测试，并用真实 Timer 验证按 `every` 采样 |
+| pnpm build | 通过。生成 `dist/index.js`（12.29 kB，12291 字节）与 6 个声明文件（构建后处理改写说明符为 `.js` 并断言产物形态；`vue` 与 `pinia` 都是外部依赖） |
 | pnpm build:demo | 通过。生成 `dist-demo/` 演示页面（四个视图：查询列表、行情面板、双组件共享、B09 组合） |
 | pnpm test:browser | 通过：真实 Chrome 12 条场景全绿——四条代表页面交互（`tests/pages.spec.ts`）＋ 八条受控场景（`tests/refresh.spec.ts`：暂停后显式刷新、满槽排队、真实 HTTP 共享与恢复、真实传输超时、旧响应晚到、真实结束放槽、卸载清理、祖先 KeepAlive 失活与受控 `visibilitychange`）。按 ADR-63 改了三处：① A13 超时场景的断言从「超时不交付」改成「交付失败且 `data` 为 `null`」（失败现在是那一格的事实）；② 双组件共享场景在「重新进入」之前先用乙页的显式刷新拿一份**新鲜**结果——否则甲重新挂载时那份已经到期，到期的那次周期取数会把「重新挂载不强制新请求」测糊（采样让这一步的时序长了一个周期），而随后「共享对象」那条断言也需要两页抄到同一条结果；③ 两处 5 秒页的结果断言显式给 15 秒预算（画面按本页 `every` 采样，最多等一个周期） |
-| pnpm complexity | 6 个源文件、1179 行、94 个结构分支、最大函数圈复杂度 8 |
-| node scripts/benchmark.mjs | 24 订阅 / 8 身份 / every=25ms / maxConcurrent=4，3 次 × 2s：取数中位 632 次（收敛比 0.99；按订阅计的反事实 1920 次）、在途峰值 4（框架 `running` 投影峰值同为 4，未超上限）、结束瞬间 8 个共享实例 / 24 个需求、**释放后残留全 0**；事件循环延迟 mean 1.10ms / p99 1.78ms / max 7.15ms。规模可用 `--subscriptions/--identities/--duration/--every/--runs` 改；**不设性能阈值**，只在真实在途超过 `maxConcurrent` 或释放后有残留时以非零码退出 |
-| 阶段 15 交付产物 | `pnpm build` ＋ `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：10 个条目 = `dist/` 8 个（`index.js` 12.70 kB，12702 字节、sourcemap、6 个 `.d.ts`）＋ `package.json` ＋ README。最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行，不写在这里——README 由 npm 强制打进包内，把包自身哈希写进包内文件没有解 |
+| pnpm complexity | 6 个源文件、1147 行、91 个结构分支、最大函数圈复杂度 8 |
+| node scripts/benchmark.mjs | 24 订阅 / 8 身份 / every=25ms / maxConcurrent=4，3 次 × 2s：取数中位 633 次（收敛比 0.99；按订阅计的反事实 1920 次）、在途峰值 4（框架 `running` 投影峰值同为 4，未超上限）、结束瞬间 8 个共享实例 / 24 个需求、**释放后残留全 0**；事件循环延迟 mean 1.09ms / p99 1.66ms / max 7.56ms。规模可用 `--subscriptions/--identities/--duration/--every/--runs` 改；**不设性能阈值**，只在真实在途超过 `maxConcurrent` 或释放后有残留时以非零码退出 |
+| 阶段 15 交付产物 | `pnpm build` ＋ `pnpm pack` 生成 `vue-refresh-0.0.0.tgz`：10 个条目 = `dist/` 8 个（`index.js` 12.29 kB，12291 字节、sourcemap、6 个 `.d.ts`）＋ `package.json` ＋ README。最终包 SHA-256 记在[统一文档](./统一刷新管理.md) §5 的 G04 行，不写在这里——README 由 npm 强制打进包内，把包自身哈希写进包内文件没有解 |
 | 包级导入（干净消费方） | 仓库外消费工程安装 tarball ＋ `vue@3.5.42` ＋ `pinia` ＋ `axios`：对**真实 HTTP 服务**跑通 `submit` → 结果表 → 页面读到 `price=3`；运行期再断言导出面恰好是三个函数，且值域（ADR-52）兜底拒绝 `Map` 这类内容对编码不可见的容器参数（只经 `rejected`）。共 **7 条**运行期场景，其中两条是本轮新增的：**慢页面不跟快页面跳（按本页 `every` 采样）、显式刷新不等拍**，以及**失败写进那一格**（旧址保留、原始异常从 `display.failure.cause` 可读、成功后清掉）。**换包必删消费方的 `package-lock.json`**：`file:` 依赖的完整性写在锁文件里，不删会复用上一版解包内容而给出假通过 |
 | TS 4.9 类型消费（G03 阻断节点） | 实测：`typescript@4.9.5` ＋ `module/moduleResolution: Node16` ＋ `strict` ＋ `skipLibCheck` 下 `tsc --noEmit` **本包 6 个声明文件零错误**（含 `@ts-expect-error` 反例：缺字段、Source 不变性、`refresh` 不接受参数、取消分支不带 `reason`、参数值域的 `Date`／`Map`、已删掉的 `onError`、失败不可改写）；`pinia` 与 `axios` 的 `.d.ts` 由 `skipLibCheck` 跳过校验（它们各自的 TS 下限不由本包承诺）——注意 `pinia@4` 自己声明了可选 peer `typescript >= 5.6`，所以在 TS 4.9 工程里安装要用 `--legacy-peer-deps`（或 `overrides`），本包自身的 6 个声明文件仍按 TS 4.9 逐条校验。Vue 3.5.42 自身的 `.d.ts` 要求 TS ≥5.4，故 `skipLibCheck: true` 是前置条件。确认人 2026-09-16 裁决：声明只限定到本包自身的类型（自 TS 4.9 起可用，已实测） |
 | pnpm check:docs | 通过。一致性门禁清单与各项动机以 `scripts/check-docs.mjs` 的自述注释为准；还会打印叶子→测试标题的追溯报告 |
 
 测试名称以验收叶子编号开头（`A01`–`A20`），只证明具体断言覆盖的分支，不把同一叶子的全部变体自动标通过。
-核心测试覆盖声明幂等与校验失败不改状态、共享身份、恢复与不补跑、并发上限与 FIFO、框架上限出册与迟到结束无效、
+核心测试覆盖声明幂等与校验失败不改状态、共享身份、恢复与不补跑、并发上限与 FIFO、迟到结束无效、
 失败结算与下个周期继续、交付副本独立、参数值域与参数副本隔离、零回调（核心不认识页面）、销毁、可见性切换的退订与恢复、
 运行期失败只走返回值或结果表这一格；
 Vue 测试覆盖声明即取数、配置非法只写不取数并在修正后恢复、改 `enabled.value` 立即生效（暂停与恢复）、

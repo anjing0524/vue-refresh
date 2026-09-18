@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 import { defineRefresh, useRefresh } from '../src/index.ts'
-import type { RefreshFailure, RefreshSource } from '../src/index.ts'
+import type { RefreshSource } from '../src/index.ts'
 interface Params { account: string; symbol: string; filter?: { page: number } }
 interface Quote { price: number }
 // URL 与参数值决定身份；`Quote` 是**声明**的原始返回结构（框架不做响应转换，所以没有取数函数可绑定）。
@@ -39,10 +39,12 @@ function contract() {
   const maybeTime: number | null = task.display.value!.updatedAt
   void maybeTime
   // 失败是结果表那一格上的事实，读取面按自己的节拍取；成功后清空。
-  const failure: RefreshFailure | null = task.display.value!.failure
-  void failure
+  const failedAt: number | null = task.display.value!.failedAt
+  const cause: unknown = task.display.value!.error
+  void failedAt
+  void cause
   // @ts-expect-error 失败是框架写的事实，页面不能改写它
-  task.display.value!.failure = null
+  task.display.value!.failedAt = null
   // @ts-expect-error 失败不再由框架推送：`onError` 这一项已删除（ADR-63）
   useRefresh(source, { enabled: ref(true), every: ref(1000), onError: () => {} })
   // Source 的成员是方法，按双变比较：具体 Source 可以直接进入框架的擦除视图

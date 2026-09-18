@@ -1,4 +1,4 @@
-import type { RefreshFailure, SubmitResult } from './public-types.ts'
+import type { SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
 
 /**
@@ -34,36 +34,18 @@ export interface Demand {
   parameters: Parameters | null
 }
 
-/** 一次后台执行；执行位置由 `queue` / `running` 的归属决定。 */
-export interface Task {
-  readonly resource: Resource
-  readonly controller: AbortController
-}
-
-/** 一次有效取数的结果；写进结果表后就当**不可变**用（整条替换，不就地改）。 */
-export interface Entry {
-  readonly data: unknown
-  readonly updatedAt: number
-}
-
 /**
- * 结果表的一格：**最后一次成功的结果 ＋ 最近一次失败**，一次取数的成败都只落在这里。
+ * 结果表的一格：**最后一次成功 ＋ 最近一次失败**，成败都只落在这里，四个字段全平。
  *
- * 失败不覆盖数据（旧址照旧）也不清空它；成功后失败被清掉（`failure` 回到 `null`）。
- * 只有整格是新对象这一件事代表「变过」——读取面据此比较引用就知道要不要抄（ADR-63）。
+ * `updatedAt === null` ⟺ 从未成功过（`data` 此时无意义）；`failedAt === null` ⟺ 自最后一次成功以来没失败过。
+ * `error` 是原始异常原样带出（页面 `throw undefined` 这种病态情况也如实带出，所以「有没有失败」看 `failedAt`）。
+ * **只有整格是新对象这一件事代表「变过」**——读取面比较引用就知道要不要抄（ADR-63、ADR-65）。
  */
 export interface ResultCell {
-  /** 最后一次成功；**从未成功过**（首查就失败）时为 `null`。 */
-  readonly entry: Entry | null
-  /** 最近一次失败；之后成功过就清空。 */
-  readonly failure: RefreshFailure | null
-}
-
-/** 结果表的一行。 */
-export interface ResultRow {
-  readonly url: string
-  readonly key: string
-  readonly cell: ResultCell
+  readonly data: unknown
+  readonly updatedAt: number | null
+  readonly error: unknown
+  readonly failedAt: number | null
 }
 
 /**
@@ -73,22 +55,22 @@ export interface ResultRow {
  * 适配层把它接到 Pinia（`src/store.ts`），因此 `core.ts` 仍然零运行时依赖。
  */
 export interface ResultSink {
-  write(url: string, key: string, entry: Entry): void
-  /** 写失败：**保留这一格已有的数据**，只换掉失败那一项。 */
-  fail(url: string, key: string, failure: RefreshFailure): void
+  /** 写成功：整格替换（失败随之清空）。 */
+  write(url: string, key: string, data: unknown, updatedAt: number): void
+  /** 写失败：**保留这一格已有的数据**，只换掉失败那一对字段。 */
+  fail(url: string, key: string, error: unknown, failedAt: number): void
   remove(url: string, key: string): void
-  list(): readonly ResultRow[]
+  /** 只读列举：给 `snapshot()` 这个观测面用，不是包契约。 */
+  list(): readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[]
 }
 
 /**
- * 一个「URL ＋ 参数值」的共享实例：同一个身份的**全部状态与全部操作都在这个类里**。
+ * 一个「URL ＋ 参数值」的共享实例：同一个身份的**账本与算法**——谁声明着它、谁在等、什么时候到期、
+ * 这次执行还会不会算数。**它不持有核心**：写表、回收、排队都是核心的动作（ADR-65）。
  *
- * 越过实例边界的事（FIFO 队列、并发槽、注册表注销）只调核心的两个入口（`enqueue` / `releaseIfUnused`），
- * 所以「一个身份的一生」可以只读这一个类：接入 → 到期 → 执行 → 交付或失败 → 结算要求 → 回收。
+ * 因此「一个身份的一生」要读两处：这个类给出状态与判定，核心给出动作与顺序。
  */
 export class Resource {
-  /** 实例只经核心的两个入口请求跨实例动作（ADR-42、ADR-44）。 */
-  private readonly core: RefreshCore
   /** 取数 URL：身份的一半，也是结果表分区的第一级。 */
   readonly url: string
   readonly parameters: Parameters
@@ -103,10 +85,16 @@ export class Resource {
   readonly waiters = new Set<Demand>()
   /** 最近一次正常结束（成功或失败）的时刻；`null` 表示从未结算过，因此立即到期。 */
   settledAt: number | null = null
-  task: Task | null = null
+  /**
+   * 这次执行的身份与取消把手；`null` ＝ 本实例此刻没有执行。
+   *
+   * 一个字段回答两件事：**取消**（释放实例时 abort）与**认人**（迟到的结束不再是当前执行就丢弃）。
+   * 后者过去由一个独立的 `Task` 对象承担；删掉框架自带的取数上限之后，一个实例同时只会有一个执行，
+   * 于是「一次执行」不再需要一个对象，`null` 就是唯一的事实（ADR-65）。
+   */
+  controller: AbortController | null = null
 
-  constructor(core: RefreshCore, url: string, parameters: Parameters) {
-    this.core = core
+  constructor(url: string, parameters: Parameters) {
     this.url = url
     this.parameters = parameters
   }
@@ -148,51 +136,23 @@ export class Resource {
   }
 
   /**
-   * 成功结算：记结算时刻、把结果写进结果表（唯一真值），再满足这一批刷新要求。
+   * 成功结算：记下结算时刻，把**这一批要求**交回核心（写表与回收都由核心做）。
    *
-   * 这里**没有交付循环**：谁在读、读几次、读到的是哪一版，都由读的人在结果表上自己取（ADR-59、ADR-63）。
-   * 顺序固定：先落定结果，再结算要求——要求结算可能让实例当场释放，而释放会把结果删掉（A06）。
-   * 两份「先定下这一批要求、再写结果表」的理由是同一个：写结果表会同步触发页面代码。
+   * 为什么先交出这一批、再由核心写表：写表会同步触发页面代码（例如 `flush: 'sync'` 的 watcher），
+   * 它可能当场 `refresh()`——那条新要求不属于这一批，只能由核心补的后继请求满足（DESIGN §3.9 第一条）。
    */
-  settle(entry: Entry): void {
-    this.settledAt = Date.now()
-    // 这一批要满足的要求**先定下来再写结果**：写结果表会同步触发页面代码（例如 `flush: 'sync'` 的 watcher），
-    // 它可能当场 `refresh()`；那条新要求不在这一批里，只能由 `refill` 的后继请求满足（§3.9 第一条）。
-    const satisfied = [...this.waiters]
-    this.core.writeResult(this, entry)
-    for (const demand of satisfied) this.clearRequest(demand)
+  settle(at: number): readonly Demand[] {
+    this.settledAt = at
+    return [...this.waiters]
   }
 
-  /**
-   * 失败结算：把失败写进结果表这一格（**读取面按自己的节拍取**，框架不再推送），
-   * 然后撤销本实例全部未完成的刷新要求。
-   *
-   * 数据保持原样：失败只让「这一格当前处于失败态」，不动最后一次成功的结果。
-   * 与 `settle` 同序（先定下这批要求、再写表），理由也相同：写表会同步触发页面代码。
-   */
-  fail(error: unknown): void {
-    this.settledAt = Date.now()
-    const satisfied = [...this.waiters]
-    this.core.writeFailure(this, { cause: error, at: this.settledAt })
-    for (const demand of satisfied) this.clearRequest(demand)
-  }
-
-  /** 撤销一个需求的刷新要求；它可能是本实例的最后一个需求，因此顺手让核心判断要不要回收这个实例。 */
-  clearRequest(demand: Demand): void {
-    if (!this.waiters.delete(demand)) return
-    this.core.releaseIfUnused(this)
-  }
-
-  /** 任务结束后仍有未完成的要求时补一次请求；唯一来源是交付回调里的重入（DESIGN §3.9 第一条）。 */
-  refill(): void {
-    if (this.waiters.size === 0 || this.task !== null) return
-    this.core.enqueue(this)
+  /** 失败结算：与 `settle` 同形（记时刻、交出这一批要求）；失败记录由核心写，数据保持原样。 */
+  fail(at: number): readonly Demand[] {
+    this.settledAt = at
+    return [...this.waiters]
   }
 
 }
-
-/** 框架侧单次取数的上限（毫秒）：从真正开始执行起算，排队等待不计入（数值与依据见 ADR-20）。 */
-const LOAD_TIMEOUT_MS = 10_000
 
 /** `setTimeout` 的平台上限（约 24.8 天）；更远的到期分段等待。 */
 const MAX_TIMER_DELAY = 2_147_483_647
@@ -219,10 +179,10 @@ export class RefreshCore {
   private readonly buckets = new Map<string, Map<string, Resource>>()
   /** 全部需求；可见性变化时按它们重新协调。 */
   private readonly demands = new Set<Demand>()
-  /** FIFO 待执行任务。 */
-  private readonly queue = new Set<Task>()
-  /** 真实尚未结束的任务；并发槽的唯一事实。 */
-  private readonly running = new Set<Task>()
+  /** FIFO 待执行的实例（一个实例至多一个执行）。 */
+  private readonly queue = new Set<Resource>()
+  /** 真实尚未结束的请求；并发槽的唯一事实（含实例已回收、但请求仍在途的那一次）。 */
+  private readonly running = new Set<Resource>()
   /** 唯一 Timer 的取消句柄；调用即取消。 */
   private wakeup: (() => void) | null = null
   /** 已安排、尚未执行的一轮合并调度。 */
@@ -315,10 +275,9 @@ export class RefreshCore {
     if (parameters === null) return
 
     const resource = this.resourceFor(demand.url, parameters)
-    // 有请求就直接用：`enqueue` 的三个调用点都先确认没有当前任务，因此有 `task` 时它就是本实例唯一的请求；
-    // 没有请求时由本次登记的任务满足。同一个需求重复刷新只留一份要求。
+    // 有执行就直接用它的结果；没有就当场登记一次。同一个需求重复刷新只留一份要求。
     resource.waiters.add(demand)
-    if (!resource.task) this.enqueue(resource)
+    if (resource.controller === null) this.enqueue(resource)
     this.flushSoon()
   }
 
@@ -328,9 +287,9 @@ export class RefreshCore {
   snapshot(): {
     demands: readonly Demand[]
     resources: readonly Resource[]
-    results: readonly ResultRow[]
-    queued: readonly Task[]
-    running: readonly Task[]
+    results: readonly { readonly url: string; readonly key: string; readonly cell: ResultCell }[]
+    queued: readonly Resource[]
+    running: readonly Resource[]
     scheduled: boolean
     flushing: boolean
   } {
@@ -401,7 +360,7 @@ export class RefreshCore {
     const existing = bucket.get(parameters.key)
     if (existing) return existing
 
-    const resource = new Resource(this, url, parameters)
+    const resource = new Resource(url, parameters)
     bucket.set(parameters.key, resource)
     return resource
   }
@@ -420,23 +379,23 @@ export class RefreshCore {
   }
 
   /**
-   * 没有声明者也没有刷新要求：删实例与排队任务，abort 在途；迟到的结束在任务身份复核处失效。**实例入口**。
+   * 没有声明者也没有刷新要求：删实例与排队项，abort 在途；迟到的结束在身份复核处失效。**核心私有**。
    * 只判「都空」就够：注销是唯一的删除路径，此刻这个键指向的必定是它自己（§3.5 第 11 条）。
    * 注意「声明」与「资格」是两件事：暂停、失活、隐藏都不撤销声明，所以它们不会把实例收掉。
    */
-  releaseIfUnused(resource: Resource): void {
+  private releaseIfUnused(resource: Resource): void {
     if (resource.declarers.size > 0 || resource.waiters.size > 0) return
     const bucket = this.buckets.get(resource.url)
     bucket?.delete(resource.parameters.key)
     if (bucket?.size === 0) this.buckets.delete(resource.url)
 
-    const task = resource.task
     // 结果随实例释放即删：结果表里没有「没人要的」条目，读的人也就不会读到过期数据。
     this.sink.remove(resource.url, resource.parameters.key)
-    if (task) {
-      // 在跑的那次不能当场交还槽位：它仍占着并发账本，必须等迟到的结束自己交还（`detached`）。
-      this.placeTask(task, this.running.has(task) ? 'detached' : 'settled')
-      task.controller.abort()
+    const controller = resource.controller
+    if (controller) {
+      // 在跑的那次不能当场交还槽位：它仍占着并发账本，必须等迟到的结束自己交还（占位的是请求，不是实例）。
+      this.place(resource, this.running.has(resource) ? 'abandoned' : 'idle')
+      controller.abort()
     }
   }
 
@@ -454,80 +413,95 @@ export class RefreshCore {
       && (resource.isEligible(demand, this.visible) || resource.waiters.has(demand))
   }
 
-  /** 把一次成功写进结果表。**实例入口**：结果住结果表，实例只在成功这一刻与它打交道。 */
-  writeResult(resource: Resource, entry: Entry): void {
-    this.sink.write(resource.url, resource.parameters.key, entry)
+  /**
+   * 撤销一个需求的刷新要求；它可能是本实例的最后一个需求，因此顺手判断这个实例还要不要留着。
+   * **核心私有**：实例只交出「谁在等」，回收由核心决定（ADR-65）。
+   */
+  private settleRequest(resource: Resource, demand: Demand): void {
+    if (!resource.waiters.delete(demand)) return
+    this.releaseIfUnused(resource)
   }
 
-  /** 把一次失败写进结果表同一格（数据保留）。**实例入口**，与 `writeResult` 对称。 */
-  writeFailure(resource: Resource, failure: RefreshFailure): void {
-    this.sink.fail(resource.url, resource.parameters.key, failure)
+  /** 把一次成功写进结果表（表在 `sink` 手上，实例不碰它）。 */
+  private writeResult(resource: Resource, data: unknown, updatedAt: number): void {
+    this.sink.write(resource.url, resource.parameters.key, data, updatedAt)
+  }
+
+  /** 把一次失败写进结果表同一格（数据保留）。与 `writeResult` 对称。 */
+  private writeFailure(resource: Resource, error: unknown, failedAt: number): void {
+    this.sink.fail(resource.url, resource.parameters.key, error, failedAt)
   }
 
   // ══════════════════════════ 后台执行 ══════════════════════════
 
   /**
-   * 任务位置（`queue` / `running` / `Resource.task`）的唯一写入点。
+   * 执行位置（`queue` / `running` / `Resource.controller`）的唯一写入点：
+   * `queued`（在队）／`running`（占着并发账本的一格）／`abandoned`（实例已回收、这次执行已撤销，
+   * 但在跑的请求仍占着那一格）／`idle`（都不在）。
    *
-   * `queued`／`running` 是「占着并发账本的某一格，且是本实例的当前执行」；`detached` 是实例已被回收、
-   * 当前执行已撤销，但在跑的那次仍占着槽位，直到迟到的结束自己交还（`releaseIfUnused`——槽位若当场
-   * 交还，在途的请求就与后来者并发了）；`settled` 是三处都不在。
+   * `controller` 跟着一起迁移：进入 `queued` 时诞生，离开 `running` 或进入 `abandoned` 时清空——
+   * 所以「`controller === null`」这一个事实同时表达「没有在执行」与「这次结束不再算数」。
    */
-  private placeTask(task: Task, position: 'queued' | 'running' | 'detached' | 'settled'): void {
-    this.queue.delete(task)
-    this.running.delete(task)
-    if (position === 'queued') this.queue.add(task)
-    if (position === 'running' || position === 'detached') this.running.add(task)
-    // 撤销当前执行要认人：`expire` 交还槽位后可能已经登记了后继任务，那一刻它才是当前执行。
-    if (position === 'queued' || position === 'running') task.resource.task = task
-    else if (task.resource.task === task) task.resource.task = null
+  private place(resource: Resource, position: 'queued' | 'running' | 'abandoned' | 'idle'): void {
+    this.queue.delete(resource)
+    this.running.delete(resource)
+    if (position === 'queued') {
+      this.queue.add(resource)
+      resource.controller = new AbortController()
+    }
+    if (position === 'running' || position === 'abandoned') this.running.add(resource)
+    if (position !== 'queued' && position !== 'running') resource.controller = null
   }
 
-  /** 登记一次后台执行；全部调用点都先确认没有当前任务，因此不替换、不 abort 在途。**实例入口**。 */
-  enqueue(resource: Resource): void {
-    const task: Task = { resource, controller: new AbortController() }
-    this.placeTask(task, 'queued')
+  /** 登记一次后台执行；全部调用点都先确认没有当前执行，因此不替换、不 abort 在途。 */
+  private enqueue(resource: Resource): void {
+    this.place(resource, 'queued')
   }
 
-  /** 执行一次后台请求；成功、失败或被上限结算，都在 `finally` 释放槽位并补后继请求。 */
-  private async runTask(task: Task): Promise<void> {
-    const resource = task.resource
-    // 上限从真正开始执行起算（排队不计入）：一个永不结束的请求不能永久占住并发槽。
-    const timer = setTimeout(() => { this.expire(task) }, LOAD_TIMEOUT_MS)
+  /** 一次执行结束后仍有未完成的要求时补一次请求；唯一来源是写表触发的同步重入（DESIGN §3.9 第一条）。 */
+  private refill(resource: Resource): void {
+    if (resource.waiters.size === 0 || resource.controller !== null) return
+    this.enqueue(resource)
+  }
+
+  /**
+   * 执行一次后台请求：写表 → 结算这一批要求 → 释放槽位 → 补后继请求，
+   * 「一次取数的收尾顺序」只有这一处，读一遍就够（ADR-65）。
+   *
+   * 框架**不设自己的取数上限**：请求必然终止由注入的传输负责（axios 的 `timeout`、反向代理，
+   * 或宿主自己的截止）。因此一个实例同时只会有一个执行，一个请求也只占一个槽位。
+   */
+  private async run(resource: Resource): Promise<void> {
+    const controller = resource.controller
+    if (controller === null) return
     try {
       // 每一轮都交出一份副本：请求体改不动身份键描述的那份值（ADR-52）。URL 与参数值一起决定身份，
       // 因此「同一个 URL ＋ 同一份参数值」在这里只会有一条执行（合并发生在 `resourceFor`）。
       const response = await this.http.post(
         resource.url,
         structuredClone(resource.parameters.args),
-        { signal: task.controller.signal },
+        { signal: controller.signal },
       )
-      if (resource.task !== task) return
-      const entry: Entry = { data: copyResult(response.data), updatedAt: Date.now() }
-      if (resource.task !== task) return
-      resource.settle(entry)
+      // 复制结果前后各复核一次「这次还是不是当前执行」：释放实例、换身份、销毁都会把它置空。
+      if (resource.controller !== controller) return
+      const data = copyResult(response.data)
+      if (resource.controller !== controller) return
+      const at = Date.now()
+      const satisfied = resource.settle(at)
+      this.writeResult(resource, data, at)
+      for (const demand of satisfied) this.settleRequest(resource, demand)
     } catch (error) {
-      if (resource.task === task) resource.fail(error)
+      if (resource.controller !== controller) return
+      const at = Date.now()
+      const satisfied = resource.fail(at)
+      this.writeFailure(resource, error, at)
+      for (const demand of satisfied) this.settleRequest(resource, demand)
     } finally {
-      clearTimeout(timer)
-      this.placeTask(task, 'settled')
-      resource.refill()
+      // 释放槽位与补后继请求都要认人：写表可能已经把实例回收掉了（`place` 会把它移出账本）。
+      this.place(resource, 'idle')
+      this.refill(resource)
       this.flushSoon()
     }
-  }
-
-  /**
-   * 上限到期：先撤销在册身份再触发会同步重入的外部效果，因此这次执行迟到的结束被判为无效
-   * （不写 Store、不交付、不二次通知），而槽位当场交还调度。
-   */
-  private expire(task: Task): void {
-    const resource = task.resource
-    if (resource.task !== task) return
-    this.placeTask(task, 'settled')
-    task.controller.abort()
-    resource.fail(new Error(`取数未在框架上限 ${LOAD_TIMEOUT_MS} 毫秒内结束`))
-    resource.refill()
-    this.flushSoon()
   }
 
   // ══════════════════════════ 刷新要求 ══════════════════════════
@@ -535,7 +509,7 @@ export class RefreshCore {
   /** 撤销一个需求未完成的刷新要求（失去身份、卸载、销毁都由它收尾）。 */
   private clearRefreshes(demand: Demand): void {
     const resource = this.resourceOf(demand)
-    if (resource) resource.clearRequest(demand)
+    if (resource) this.settleRequest(resource, demand)
   }
 
   // ══════════════════════════ 调度 ══════════════════════════
@@ -569,7 +543,7 @@ export class RefreshCore {
     for (const bucket of this.buckets.values()) {
       for (const resource of bucket.values()) {
         // 有当前执行的实例不重复入队（A08）。
-        if (resource.task) continue
+        if (resource.controller !== null) continue
         const due = resource.dueAt(now, this.visible)
         // `Infinity` ＝ 这个身份没有有资格的声明者：不取数，也不参与唤醒时刻。
         if (due <= now) this.enqueue(resource)
@@ -582,15 +556,15 @@ export class RefreshCore {
   /**
    * 第三步：按 FIFO 用当前可用槽位启动。
    *
-   * 队列里的任务必定就是它实例的当前执行——`queue` 的唯一写入者是 `placeTask`，它只在
-   * 「这个任务就是当前执行」时才把它放进队列（§3.5 第 4 条）。因此这里不再需要复核归属。
-   * 满槽时由任务结束唤醒（不自旋）；本轮内新增的请求留给下一轮。
+   * 队列里只装「还没有执行、且确实在等」的实例——`queue` 的唯一写入者是 `place`，它进入 `queued`
+   * 时就建好这次执行的 `controller`（§3.5 第 4 条）。因此这里不再需要复核归属。
+   * 满槽时由请求真实结束唤醒（不自旋）；本轮内新增的请求留给下一轮。
    */
   private startQueued(): void {
-    for (const task of [...this.queue]) {
+    for (const resource of [...this.queue]) {
       if (this.running.size >= this.maxConcurrent) break
-      this.placeTask(task, 'running')
-      void this.runTask(task)
+      this.place(resource, 'running')
+      void this.run(resource)
     }
   }
 

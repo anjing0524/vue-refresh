@@ -114,9 +114,8 @@ export function useRefresh<P extends object, T>(
     const cell = store.read(source.name, key ?? '')
     pulse.value
     eligible.value
+    // 从来没有写过这一格：没有可抄的东西，画面停在上一帧（不发布空副本）。
     if (key === null || cell === undefined || !core.isReader(demand)) return
-    // 这一格既没成功过也没失败过：没有可抄的东西，画面停在上一帧（不发布空副本）。
-    if (cell.entry === null && cell.failure === null) return
     if (cell === sampled) return
     // 本拍已经抄过、又不欠拍：让画面留到下一拍再看表（这就是「按本页频率采样」）。
     if (!immediate && pulse.value === sampledPulse) return
@@ -124,9 +123,10 @@ export function useRefresh<P extends object, T>(
     if (parameters === null) return
     display.value = {
       args: structuredClone(parameters.args) as unknown as ReadonlySnapshot<P>,
-      data: cell.entry === null ? null : cell.entry.data as ReadonlySnapshot<T>,
-      updatedAt: cell.entry === null ? null : cell.entry.updatedAt,
-      failure: cell.failure,
+      data: cell.updatedAt === null ? null : cell.data as ReadonlySnapshot<T>,
+      updatedAt: cell.updatedAt,
+      error: cell.error,
+      failedAt: cell.failedAt,
     }
     sampled = cell
     sampledPulse = pulse.value
@@ -231,8 +231,8 @@ export function createRefreshManager(options: {
   const store = useRefreshStore(options.pinia)
   // 内核只经这四个动作碰结果表：成功写、失败写、释放删、观测列举。
   const core = new RefreshCore(options.maxConcurrent, options.axios, {
-    write: (url, key, entry) => { store.write(url, key, entry) },
-    fail: (url, key, failure) => { store.fail(url, key, failure) },
+    write: (url, key, data, updatedAt) => { store.write(url, key, data, updatedAt) },
+    fail: (url, key, error, failedAt) => { store.fail(url, key, error, failedAt) },
     remove: (url, key) => { store.remove(url, key) },
     list: () => store.list(),
   })

@@ -44,8 +44,8 @@ export const QueryListPage = defineComponent({
     })
     // 框架只把失败写进交付面、从不写 enabled；「失败关闭」是页面从交付面读到新失败后的自己的决定。
     // 默认 flush 是 pre 且首次不触发；成功会把 failure 清成 null，所以只认非空的新对象。
-    watch(() => task.display.value?.failure, failure => {
-      if (!failure) return
+    watch(() => task.display.value?.failedAt, failedAt => {
+      if (failedAt === null) return
       enabled.value = false
       note.value = '后台请求失败：页面关闭自动刷新（框架不改写 enabled）'
     })

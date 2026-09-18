@@ -17,25 +17,24 @@ import './style.css'
 const params = new URLSearchParams(location.search)
 
 /** 交付面里失败那一项的只读投影（`cause` 原样带出，观测面不解释它）。 */
-interface HarnessFailure { readonly cause: unknown; readonly at: number }
-
 /** 集成验证台的只读观测面；只给测试用，不是 src/package API。 */
 export interface HarnessSnapshot {
   calls: Array<{ id: number; aborted: boolean; finished: boolean }>
   events: string[]
   /**
    * 每页 `display.value` 的投影：**没有画面**（还没声明身份／已释放）时是 `null`；
-   * 画面存在但从未成功过时是 `data: null, updatedAt: null, failure: {...}`——两者不再混为一谈。
+   * 画面存在但从未成功过时是 `data: null, updatedAt: null, failedAt: null`——两者不再混为一谈。
    */
   pages: Record<string, {
     readonly args: QuoteParams
     readonly data: Quote | null
     readonly updatedAt: number | null
-    readonly failure: HarnessFailure | null
+    readonly error: unknown
+    readonly failedAt: number | null
     readonly manual: boolean
   } | null>
-  /** 结果表只读投影：`data` 为最后一次成功，`failure` 为最近一次失败（成功会把失败清空）。 */
-  entries: Record<string, { data: Quote | null; failure: HarnessFailure | null }>
+  /** 结果表只读投影：`data` 为最后一次成功（从未成功过为 null），`failedAt` 为最近一次失败的时刻。 */
+  entries: Record<string, { data: Quote | null; error: unknown; failedAt: number | null }>
   running: number
   queued: number
   resources: number
@@ -128,8 +127,8 @@ function mountHarness(): void {
       const draftSymbol = ref('DEMO')
       const task = useRefresh(source, { enabled, every })
       // 失败不再经回调推送：交付面出现新的失败对象时记一条事件（默认 pre flush，首次不触发）。
-      watch(() => task.display.value?.failure, failure => {
-        if (failure) events.push('后台请求失败，等待下一周期')
+      watch(() => task.display.value?.failedAt, failedAt => {
+        if (failedAt !== null) events.push('后台请求失败，等待下一周期')
       })
       components.set(props.label, { task, enabled })
       const args: QuoteParams = props.label === '甲'
@@ -174,8 +173,8 @@ function mountHarness(): void {
     setup() {
       const enabled = ref(true)
       const task = useRefresh(source, { enabled, every })
-      watch(() => task.display.value?.failure, failure => {
-        if (failure) events.push('嵌套页后台请求失败，等待下一周期')
+      watch(() => task.display.value?.failedAt, failedAt => {
+        if (failedAt !== null) events.push('嵌套页后台请求失败，等待下一周期')
       })
       components.set('嵌套', { task, enabled })
       onMounted(() => task.submit({ account: 'demo', symbol: 'NESTED' }))
@@ -224,14 +223,16 @@ function mountHarness(): void {
             // `data` 可以为 null（首查就失败）；`updatedAt` 与它同生共死。
             data: display.data === null ? null : structuredClone(display.data),
             updatedAt: display.updatedAt,
-            failure: display.failure,
+            error: display.error,
+            failedAt: display.failedAt,
             manual: display.updatedAt !== null && display.updatedAt >= (manualAt[name] ?? Infinity),
           }]
         })),
         entries: Object.fromEntries(view.results
           .map(row => [row.key, {
-            data: row.cell.entry === null ? null : row.cell.entry.data as Quote,
-            failure: row.cell.failure,
+            data: row.cell.updatedAt === null ? null : row.cell.data as Quote,
+            error: row.cell.error,
+            failedAt: row.cell.failedAt,
           }])),
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,
