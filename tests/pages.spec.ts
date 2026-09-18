@@ -166,7 +166,7 @@ test('行情面板：无查询按钮、一次提交、响应式频率、显示�
   expect(resumed).toBeGreaterThan(0)
 })
 
-test('双组件共享：1s/5s 同参共享、单页暂停后跟随共享结果、重新进入读回已有结果、切换品种、全部退订、结果共享', async ({ page, request }) => {
+test('双组件共享：1s/5s 同参共享、单页暂停后画面冻结、重新进入读回已有结果、切换品种、全部退订、结果共享', async ({ page, request }) => {
   await page.goto('/?page=shared-pair')
   await expect(page.getByTestId('page-shared-pair')).toBeVisible()
 
@@ -185,8 +185,8 @@ test('双组件共享：1s/5s 同参共享、单页暂停后跟随共享结果�
   expect(inFlight.status).toBe('pending')
   await release(request, second)
   await expect(page.getByTestId('sp-price-乙')).toHaveText(`${100 + second}.00`)
-  // 暂停只表示「不由这一页驱动取数」：画面按已声明身份读共享结果表，所以暂停页也读到最新值（ADR-59）。
-  await expect(page.getByTestId('sp-price-甲')).toHaveText(`${100 + second}.00`)
+  // 暂停页不是该身份的读者（既没订阅也没未撤销的要求），画面冻结在最后一帧——别人刷新的结果它不跟（ADR-60）。
+  await expect(page.getByTestId('sp-price-甲')).toHaveText(`${100 + first}.00`)
 
   // 重新进入：卸载甲后乙仍持有实例；重新挂载把已有结果直接交付给新订阅，不强制新请求。
   await page.getByTestId('sp-unmount-a').click()

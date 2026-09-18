@@ -118,7 +118,7 @@ flowchart LR
 | Resource | 类：`core`（只用它三个入口）、`source`、`parameters`、`subscribers` 空集合、`waiters` 空集合（`Set<Handle>`）、`settledAt=null`、`task=null` | 首次接入或刷新要求创建；**一个身份只保留一份参数对象**：首次接入采用该句柄声明的那份，后续同键加入者改用实例已持有的那一份（同键等值，是框架内部唯一权威副本；外发给消费者时各复制一份，ADR-52）；`subscribers` / `waiters` 都空时由 `releaseIfUnused` 删除注册、结果表条目、排队任务并 abort 在途；创建后参数不被新加入者改写。**一个身份内的转换都是它自己的方法**：`dueAt` / `shortestEvery` / `settle` / `fail` / `clearRequest` / `refill`；核心越出实例边界只碰三个字段：`task`（只经 `placeTask`，§3.5 第 4 条）、`subscribers` 与 `waiters` 的增删（`coordinate` / `unsubscribe` / `refresh`） |
 | Task | `resource`、`controller` | `enqueue` 创建（同一实例同时至多一个当前任务）；位置（在队／在跑／被弃／已结算）只由 `placeTask` 迁移；`finally` 交还真实槽位，`expire` 提前交还 |
 | 结果表（`store.ts`） | `results`：`URL → 参数键 → Entry`；初值 `{}` | 模块级 `defineStore`，一个 Pinia 实例一张表；写入端只由内核用（`writeResult` 写、`releaseIfUnused` 删、`snapshot` 列举），读出口是 `read`；**整条替换**（`shallowRef`，条目当不可变用），实例释放时条目随之消失（A06） |
-| RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `snapshot` / `isDisposed` / `dispose`），**另加三个给实例用的入口** `enqueue` / `releaseIfUnused` / `writeResult`（public，但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理 |
+| RefreshCore | `buckets` / `handles` / `queue` / `running` 空集合；`wakeup=null`；`flushing=false`；`visible=true`；`cleanup=null`；`disposed=false` | 字段全部 `private`：外部只能走命名操作（`addHandle` / `removeHandle` / `activate` / `deactivate` / `setVisible` / `setCleanup` / `reconcile` / `submit` / `refresh` / `snapshot` / `isDisposed` / `dispose`），**另加三个给实例用的入口** `enqueue` / `releaseIfUnused` / `writeResult`，以及给适配层的一个只读判定 `isReader`（都是 public 但不在包契约内，见 ADR-42、ADR-44），其余内部转换全部 `private`；`dispose` 先失效再清理 |
 | 配置快照 | `config`（初值 `null`＝非法） | 由 `vue.ts` 里唯一的配置 watcher 写进 `Handle.config`，随句柄与组件作用域释放。核心只读这个字段，不重新调用业务 getter（ADR-57） |
 
 `snapshot()` 是给演示面板与集成测试的只读计数投影（集合是副本，元素仍是核心对象），
@@ -186,6 +186,7 @@ flowchart LR
 - 订阅到哪个实例由该实例 `subscribers` 的成员资格决定，句柄上不存反向字段；`resourceOf` 用句柄声明的身份现查注册表（ADR-57）。
 - 不交付「正在刷新」这类实时状态：读出口只给结果与它的产生时间。
 - 「我该看到哪一条」不另存：它由句柄当前声明的身份（`source.name` ＋ `parameters.key`）现查结果表得到（ADR-59）。
+- 「本页还跟不跟随结果表」不另存：由 `RefreshCore.isReader` 现判——订阅着该身份，或它上面有未撤销的刷新要求（ADR-60）。
 
 ### 3.8 状态取值与存放
 
@@ -404,6 +405,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 | 当前任务 | 一个实例至多一个任务，它至多在队列或在执行之一 | `placeTask`（`enqueue` / `flush` 起跑 / `runTask` 的 `finally` / `expire` / `releaseIfUnused` 都经它） |
 | 刷新要求 | 这个句柄此刻想要一次取数；是**标志不是队列**，没有回执 | `Resource.waiters`；`refresh` 登记、`Resource.clearRequest` 撤销 |
 | 结果表 | 结果的唯一真值：`URL → 参数键 → Entry`；页面按**已声明身份**读它，读到的就是那一份对象 | `useRefreshStore`（`store.ts`）：`Resource.settle` 写、`releaseIfUnused` 删、`display` 读 |
+| 读者 | 本页此刻订阅着该身份，或它上面有未撤销的刷新要求；不是读者就冻结画面 | `RefreshCore.isReader`（`display` 的更新闸门） |
 
 ### 9.3 每个符号做什么
 
@@ -426,6 +428,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 | `RefreshCore.placeTask`（私有） | 任务位置的唯一迁移点：在队／在跑／被弃／已结算，`Resource.task` 与 `queue`／`running` 一起改 |
 | `Resource.dueAt` / `shortestEvery` | 下次到期时刻／当前有效最短间隔；都现算，不缓存 |
 | `Resource.settle` / `fail` | 一次请求的两种结局：成功（写结果表 ＋ 结算要求），或失败结算（只通知，不写表） |
+| `RefreshCore.isReader` | 本页此刻算不算该身份的读者（订阅 ∪ 未撤销要求）；视图据此决定跟随还是冻结 |
 | `Resource.clearRequest` / `refill` | 撤销一条要数／任务结束后补一次后继请求 |
 | `prepareParameters` | 提交边界只执行一次：复制 → 值域检查 → 编码身份键 → 可选业务校验 |
 | `useRefreshStore` | 结果表本身：`write` / `remove` / `list`（内核写入端）与 `read`（页面读出口）；模块级定义，一个 Pinia 一张表 |

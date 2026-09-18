@@ -77,21 +77,28 @@ export function useRefresh<P extends object, T>(
    */
   const identity = shallowRef<string | null>(null)
 
+  /** 资格边沿的计数器：`activate` 与配置变化之后 +1，让下面那个副作用重新判定「本页还是不是读者」。 */
+  const eligible = shallowRef(0)
+
   /**
    * 本页看到的画面：按已声明身份从结果表读，读到就整条替换。
    *
+   * - **读者才跟随**：`core.isReader(handle)`（订阅着该身份，或它上面有无撤销的刷新要求）为真时才更新；
+   *   暂停、失活、卸载中都不是读者，画面**冻结在最后一帧**。暂停页自己 `refresh()` 那一次仍在要求里，
+   *   所以那次结果照样更新画面（A05、G6）。
    * - 参数每次读取复制一份：它是身份键描述的那份值，被页面改掉会污染键与下一轮请求（ADR-52）。
    * - 数据就是结果表里那**同一个对象**（不再逐个接收者复制）；要改自己复制，只读视图由类型约束（ADR-59）。
    * - **没有条目时不写 `null`，保留上一次画面**：条目随实例释放即删（A06 在结果表这一层不变），
-   *   而页面上「刚才那份数据」不该因为没人订阅了就变空——这也与旧推送模型下页面自己那份副本的表现一致。
-   * - **读结果表这一步必须无条件先做**（在任何 `return` 之前）：否则这个副作用记不住对结果表的依赖，
-   *   之后的写入唤不醒它（浏览器用例抓到过这个真实缺陷）。
+   *   而页面上「刚才那份数据」不该因为没人订阅了就变空。
+   * - **先无条件读结果表**（在任何 `return` 之前）：否则这个副作用记不住对结果表的依赖，
+   *   之后的写入唤不醒它（浏览器用例抓到过这个真实缺陷）。`eligible` 只负责资格边沿重新判定。
    */
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
   watchEffect(() => {
     const key = identity.value
     const entry = store.read(source.name, key ?? '')
-    if (key === null || !entry) return
+    eligible.value
+    if (key === null || !entry || !core.isReader(handle)) return
     const parameters = handle.parameters
     if (parameters === null) return
     display.value = {
@@ -106,14 +113,19 @@ export function useRefresh<P extends object, T>(
   const stopWatching = watch(() => readConfig(options), config => {
     handle.config = config
     core.reconcile(handle)
+    eligible.value += 1
   }, { flush: 'sync', immediate: true })
 
   if (core.isDisposed()) stopWatching()
   else handle.cleanup = stopWatching
 
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。
-  onMounted(() => core.activate(handle))
-  onActivated(() => core.activate(handle))
+  const activate = (): void => {
+    core.activate(handle)
+    eligible.value += 1
+  }
+  onMounted(activate)
+  onActivated(activate)
   onDeactivated(() => core.deactivate(handle))
   onScopeDispose(() => {
     core.removeHandle(handle)

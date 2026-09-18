@@ -59,7 +59,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check((await d.snapshot()).pages['甲']!.manual, 'page knows the result came after its own refresh')
   } },
 
-  { name: 'A02/A06 真实HTTP：共享、暂停只停驱动、最后取消、恢复', async run(d) {
+  { name: 'A02/A06 真实HTTP：共享、暂停冻结画面、最后取消、恢复', async run(d) {
     await d.open('/?test')
     await until(async () => (await d.requests()).length === 1, 'one shared request')
     check((await d.snapshot()).calls.length === 1, 'two subscribers must share the first load')
@@ -73,8 +73,8 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check(!(await d.snapshot()).calls[1]!.aborted, 'shared signal must remain active')
     await d.release(second.id)
     await until(async () => await d.price('乙') === String(100 + second.id), 'remaining page updates')
-    // 暂停只停「由这一页驱动取数」：画面按身份读共享结果表，因此暂停页读到的也是最新值（ADR-59）。
-    check(await d.price('甲') === String(100 + second.id), 'paused page reads the shared result')
+    // 暂停页不是该身份的读者，画面冻结在最后一帧；别人取回的新结果它不跟随（ADR-60）。
+    check(await d.price('甲') === String(100 + first.id), 'paused page must stay frozen')
     await until(async () => (await d.requests()).length === 3, 'third request in flight')
     await d.enable('乙', false)
     await until(async () => (await d.requests())[2]!.status === 'aborted', 'real HTTP disconnect')
@@ -89,7 +89,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     const fourth = (await d.requests())[3]!
     await d.release(fourth.id)
     await until(async () => await d.price('甲') === String(100 + fourth.id), 'restored page updates')
-    check(await d.price('乙') === String(100 + fourth.id), 'other paused page reads the shared result too')
+    check(await d.price('乙') === String(100 + second.id), 'other paused page remains frozen')
     await d.enable('甲', false)
   } },
   { name: 'A13 真实传输超时：客户端截止生效、槽位释放、页面收到失败', async run(d) {

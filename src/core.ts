@@ -443,6 +443,17 @@ export class RefreshCore {
     }
   }
 
+  /**
+   * 这个句柄此刻算不算该身份的**读者**：订阅着它，或在它上面有未撤销的刷新要求。
+   *
+   * 视图层据此决定「要不要跟随结果表的新值」：读者跟随，不是读者（暂停、失活、卸载中）就冻结在最后一帧，
+   * 但暂停页自己 `refresh()` 那一次仍在要求里，因此那次结果照样更新画面（A05、G6）。
+   */
+  isReader(handle: Handle): boolean {
+    const resource = this.resourceOf(handle)
+    return resource !== undefined && (resource.subscribers.has(handle) || resource.waiters.has(handle))
+  }
+
   /** 把一次成功写进结果表。**实例入口**：结果住结果表，实例只在成功这一刻与它打交道。 */
   writeResult(resource: Resource, entry: Entry): void {
     this.sink.write(resource.source.name, resource.parameters.key, entry)
