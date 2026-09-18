@@ -162,6 +162,19 @@ function reader(core: RefreshCore, view: Page): boolean {
   return core.isReader(view.handle)
 }
 
+/**
+ * 队列不变量：`queue` 里的任务必定就是它实例的当前执行。
+ *
+ * `queue` 的唯一写入者是 `placeTask`，它只在「这个任务就是当前执行」时把它放进队列，因此
+ * `startQueued` 不再复核归属（ADR-62 删掉了那个已不可达的分支）。这条断言把那个前提钉住：
+ * 一旦有人新增第二个入队路径，它会红。
+ */
+function assertQueueConsistent(core: RefreshCore): void {
+  for (const task of core.snapshot().queued) {
+    assert.equal(task.resource.task, task, '队列里的任务必须是它实例的当前执行')
+  }
+}
+
 /** 让微任务与 0ms 定时器跑完（每个 `await` 一跳）。 */
 const settle = async (rounds = 3): Promise<void> => {
   for (let index = 0; index < rounds; index++) await new Promise(resolve => { setTimeout(resolve, 0) })
@@ -635,6 +648,7 @@ test('A09 并发上限约束真实在途请求：满槽排队，不自旋', asyn
   await settle()
   assert.equal(resolvers.length, 1)
   assert.equal(core.snapshot().queued.length, 1)
+  assertQueueConsistent(core)
 
   resolvers[0]?.(1)
   await settle()

@@ -58,7 +58,7 @@ useRefresh（组件 setup）
 
 reconcile  = coordinate ＋ flushSoon（两步必须分开：coordinate 在 flush 里也会跑，那里不能再排 flush）
 coordinate → 有身份就登记为**声明者**（挂载期间一直算）；没有资格就不再是读者并结算未完成的刷新要求，但不撤销声明
-flush      → 协调句柄 → 一趟：到期入队 ＋ 收齐最早到期时刻 → 按 FIFO 占槽启动 → 安排唯一唤醒 Timer
+flush      → 四步：coordinateAll（协调句柄）→ enqueueDue（到期入队并收齐最早到期时刻）→ startQueued（按 FIFO 占槽启动）→ scheduleWakeup（安排唯一唤醒 Timer）
 runTask    → http.post(URL, 参数副本) → 复核任务身份 → Resource.settle：写结果表 ＋ 记结算时刻 ＋ 结算这一批要求 → finally：清计时、释放槽位、补未满足的要求、再调度
 expire     → 上限到期：先撤销在册身份 → abort → 按请求失败结算 → 补后继 → 再调度
 Resource.settle  → 先写结果表（唯一真值），再结算这一批刷新要求（顺序不能反：结算可能让实例当场释放，而释放会删掉刚写的条目）
@@ -146,7 +146,7 @@ flowchart LR
 1. 需求关系只有一处事实：句柄在某实例的 `declarers` 里 ⟺ 它声明了该身份。登记只 `add`、撤销只 `delete`，没有第二份需要保持同步的副本；**资格不另存集合**，由 `config.enabled && config.active && RefreshCore.visible` 现算。（`coordinate` 登记、`dropDeclaration` 撤销；ADR-57、ADR-61）
 2. 注册表只指向当前生存期的实例；实例被删除后不再被 `flush` 遍历到，也不接受新的订阅。（`resourceFor` 建立、`releaseIfUnused` 删桶）
 3. 每次调度都在**有资格的声明者**里现算 `every` 的最小值：没有有资格的声明者就不取数、不安排唤醒。不缓存间隔，也不缓存「下次到期」以外的派生值。（`Resource.dueAt` / `Resource.eligibleEvery`）
-4. 一个实例至多一个当前任务；任务的位置（在队／在跑／被弃／已结算）与它是不是「当前执行」只由 `placeTask` 一处改写，`enqueue`、`flush` 起跑、`runTask` 的 `finally`、`expire`、`releaseIfUnused` 都经它；abort 不释放槽位，`expire` 除外。仅有的两处例外是 `dispose` 整表清空 `queue` 与 `flush` 丢弃过期项。（ADR-56）
+4. 一个实例至多一个当前任务；任务的位置（在队／在跑／被弃／已结算）与它是不是「当前执行」只由 `placeTask` 一处改写，`enqueue`、`startQueued` 起跑、`runTask` 的 `finally`、`expire`、`releaseIfUnused` 都经它；abort 不释放槽位，`expire` 除外。**唯一的例外是 `dispose` 整表清空 `queue`**（`placeTask` 是队列的唯一写入者，所以队列里的任务恒为它实例的当前执行，`startQueued` 不再需要归属复核——ADR-56、ADR-62）
 5. 结果只来自该实例的当前任务的成功；删除后旧请求不得重建该实例。（`runTask` 在 `await` 之后与复制结果之后各复核一次，`Resource.settle` 只被它调用）
 6. 结果只由共享路径写入结果表（`Resource.settle` → `RefreshCore.writeResult`），写的是**同一个对象**，读的人拿到它也是同一个对象——要改自己复制；`display.args` 仍然每次读取复制一份。（ADR-59）
 7. 当前任务的正常成功/失败在写结果与通知之前更新 `settledAt`；取消与旧任务不更新。（`Resource.settle` 与 `Resource.fail` 的第一行）
@@ -299,11 +299,11 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 ### 5.1 一次 flush
 
 ```text
-清本轮标记并取消旧 Timer
-→ 协调当前全部句柄
-→ 一趟遍历：到期实例入队，同时收齐其余实例的最早到期时刻
-→ 按 FIFO 和可用槽位启动
-→ 队列已空且仍有到期项时安排唯一唤醒 Timer
+flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消旧 Timer（clearWakeup）
+→ coordinateAll：协调当前全部句柄
+→ enqueueDue：一趟遍历，到期实例入队，同时收齐其余实例的最早到期时刻
+→ startQueued：按 FIFO 和可用槽位启动（队列里的任务必是它实例的当前执行，不再复核）
+→ scheduleWakeup：队列已空且仍有到期项时安排唯一唤醒 Timer
 ```
 
 **这一轮只读一次时钟。** `Resource.dueAt` 接收这个读数，不在函数内再读一次：真实时钟在一次 flush 内会前进，
@@ -339,7 +339,9 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 - `readConfig` 是 watch 的取值函数，因此必须同步、纯、不抛：整体只兜一层 `catch`（任一项读不出即返回 `null`）。
   **边界**：某一项 getter 抛错时，它之后的项当轮不再被读取，Vue 也会清掉当轮未重新收集的依赖，
   恢复要靠抛错那一项自身的变化。常见的「配置非法」是值不对（`undefined` / 非布尔）而不是抛错，
-  那种情况三项都会读完、依赖齐全；要让三项在任何情况下都各自完成依赖收集，就得逐项捕错（旧实现的写法，多 4 行）。
+  那种情况 `options` 的**两个 `Ref`** 都会读完、依赖齐全；要让两项在任何情况下都各自完成依赖收集，
+  就得逐项捕错（旧实现的写法，多 4 行）。快照里的第三项 `active` 不是调用方的 getter，而是适配层自己的
+  `shallowRef`（watch 取值函数在 `readConfig` 之外读它），因此不参与这段边界（ADR-61）。
 - `every` 只接受正安全整数毫秒，不转换、不取整；只在 `enabled` 为真时必需，省略而开启为真按配置非法拒绝。
 
 ### 6.2 生命周期
@@ -429,6 +431,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 | `RefreshCore.dispose` | 销毁：幂等、不可复用 |
 | `RefreshCore.enqueue` / `releaseIfUnused` / `writeResult` | 给实例用的三个跨实例入口（排队／回收／把结果写进结果表）；public 但不在包契约内 |
 | `RefreshCore.placeTask`（私有） | 任务位置的唯一迁移点：在队／在跑／被弃／已结算，`Resource.task` 与 `queue`／`running` 一起改 |
+| `RefreshCore.flush`（私有） | 一次合并调度＝四步：`coordinateAll`（协调全部句柄）→ `enqueueDue`（到期入队并收齐最早到期时刻）→ `startQueued`（按 FIFO 占槽启动）→ `scheduleWakeup`（安排唯一唤醒 Timer） |
 | `Resource.dueAt` / `eligibleEvery` / `isEligible` | 下次到期时刻／有资格声明者里的最小间隔／单个声明者有没有资格；都现算，不缓存 |
 | `Resource.settle` / `fail` | 一次请求的两种结局：成功（写结果表 ＋ 结算要求），或失败结算（只通知，不写表） |
 | `RefreshCore.isReader` | 本页此刻算不算该身份的读者（订阅 ∪ 未撤销要求）；视图据此决定跟随还是冻结 |

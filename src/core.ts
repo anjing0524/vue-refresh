@@ -197,7 +197,7 @@ function isolate(effect: () => unknown): void {
 }
 
 /** 经 `onError` 通知页面：**只报共享请求失败**，参数是原始异常（ADR-51）。框架自身的失败不进这条通道。 */
-export function report(handle: Handle, error: unknown): void {
+function report(handle: Handle, error: unknown): void {
   isolate(() => handle.onError(error))
 }
 
@@ -561,21 +561,28 @@ export class RefreshCore {
     queueMicrotask(() => { this.flush() })
   }
 
-  /**
-   * 一次 flush：协调句柄 → 到期入队 → 按 FIFO 用可用槽位启动 → 设置唯一唤醒 Timer。
-   *
-   * 满槽的队列由任务结束唤醒（不自旋）；本轮内新增的请求留给下一轮。
-   */
+  /** 一次 flush：协调句柄 → 到期入队 → 按 FIFO 用可用槽位启动 → 设置唯一唤醒 Timer。 */
   private flush(): void {
     this.flushing = false
     if (this.disposed) return
     this.clearWakeup()
-    for (const handle of [...this.handles]) this.coordinate(handle)
+    this.coordinateAll()
+    const next = this.enqueueDue(Date.now())
+    this.startQueued()
+    this.scheduleWakeup(next)
+  }
 
-    const now = Date.now()
+  /** 第一步：让每个在册句柄按最新事实重新协调（资格变化在这里被吸收）。 */
+  private coordinateAll(): void {
+    for (const handle of [...this.handles]) this.coordinate(handle)
+  }
+
+  /** 第二步：把到期的实例登记进队列，返回最早的下次到期时刻（`Infinity`＝没有要等的）。 */
+  private enqueueDue(now: number): number {
     let next = Infinity
     for (const bucket of this.buckets.values()) {
       for (const resource of bucket.values()) {
+        // 有当前执行的实例不重复入队（A08）。
         if (resource.task) continue
         const due = resource.dueAt(now, this.visible)
         // `Infinity` ＝ 这个身份没有有资格的声明者：不取数，也不参与唤醒时刻。
@@ -583,15 +590,26 @@ export class RefreshCore {
         else next = Math.min(next, due)
       }
     }
+    return next
+  }
+
+  /**
+   * 第三步：按 FIFO 用当前可用槽位启动。
+   *
+   * 队列里的任务必定就是它实例的当前执行——`queue` 的唯一写入者是 `placeTask`，它只在
+   * 「这个任务就是当前执行」时才把它放进队列（§3.5 第 4 条）。因此这里不再需要复核归属。
+   * 满槽时由任务结束唤醒（不自旋）；本轮内新增的请求留给下一轮。
+   */
+  private startQueued(): void {
     for (const task of [...this.queue]) {
-      if (task.resource.task !== task) {
-        this.queue.delete(task)
-        continue
-      }
       if (this.running.size >= this.maxConcurrent) break
       this.placeTask(task, 'running')
       void this.runTask(task)
     }
+  }
+
+  /** 第四步：队列已清空且还有明确的到期时刻时，安排唯一唤醒 Timer。 */
+  private scheduleWakeup(next: number): void {
     if (this.queue.size === 0 && next < Infinity) this.setWakeup(next)
   }
 
