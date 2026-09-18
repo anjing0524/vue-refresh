@@ -398,7 +398,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 | 一个页面的需求怎么变成共享实例 | `RefreshCore.submit` → `RefreshCore.resourceFor` → `RefreshCore.coordinate` | §3.1 对象关系、§3.3 所有权表、§3.5 第 8／11 条 |
 | 隐藏、卸载、销毁之后还剩什么 | `RefreshCore.setVisible` / `RefreshCore.removeHandle` / `RefreshCore.dispose` | §3.6 更新表、§3.9 第一／二条、§3.5 第 9 条 |
 
-### 9.2 读代码前先记住的五个词
+### 9.2 读代码前先记住的七个词
 
 | 词 | 一句话含义 | 谁保证它 |
 |---|---|---|
@@ -408,7 +408,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 | 当前任务 | 一个实例至多一个任务，它至多在队列或在执行之一 | `placeTask`（`enqueue` / `flush` 起跑 / `runTask` 的 `finally` / `expire` / `releaseIfUnused` 都经它） |
 | 刷新要求 | 这个句柄此刻想要一次取数；是**标志不是队列**，没有回执 | `Resource.waiters`；`refresh` 登记、`Resource.clearRequest` 撤销 |
 | 结果表 | 结果的唯一真值：`URL → 参数键 → Entry`；页面按**已声明身份**读它，读到的就是那一份对象 | `useRefreshStore`（`store.ts`）：`Resource.settle` 写、`releaseIfUnused` 删、`display` 读 |
-| 读者 | 本页此刻订阅着该身份，或它上面有未撤销的刷新要求；不是读者就冻结画面 | `RefreshCore.isReader`（`display` 的更新闸门） |
+| 读者 | 本页此刻**有资格**（声明着它、开启、激活、浏览器可见），或它上面有未撤销的刷新要求；不是读者就冻结画面 | `RefreshCore.isReader`（`display` 的更新闸门） |
 
 ### 9.3 每个符号做什么
 
