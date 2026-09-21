@@ -77,6 +77,51 @@ failure（失败出口）→ 同一个副作用里的第二件事：这一格最
 `U07`–`U09` → `Resource.dueAt`、`flush`、`run`；`U11`–`U13` → `Resource.settle`（成功与失败都只记时刻、置「这一轮已经产出」）、核心写表时的 `sink.write` / `sink.fail`、`useRefreshStore`；
 `U14` → `refresh` 的三条分支、核心私有的 `enqueue` 与「补一轮」；`U15` → `prepareParameters`、`parameterKey`；`U16`–`U18` → `vue.ts` 提交边界（参数准备的抛错就地变同步 `rejected`）、`dispose`、`display` 的写入驱动节流。
 
+### 2.2 数据流图
+
+一次取数里**谁把什么交给谁**（只画端口、方向与数据形态；机制见 §3、§5）：
+
+```mermaid
+flowchart LR
+  subgraph Page["页面 / 调用方"]
+    Inputs["enabled / every 两个 Ref<br/>参数与生命周期"]
+    Outlet["display / failure 两个只读出口"]
+  end
+  subgraph Adapter["适配层 vue.ts"]
+    Slot["配置槽 Config<br/>enabled / every / present"]
+    Gate["读闸门"]
+    Reader["读取面（写入事件驱动）"]
+  end
+  subgraph Core["核心 core.ts"]
+    Registry["身份注册表<br/>identityOf(url, key)"]
+    Wake["唯一唤醒 Timer"]
+    SlotQueue["queue 待取顺序 / running 并发槽"]
+  end
+  subgraph Shared["共享实例 Resource"]
+    Declarers["declarers 声明者集合"]
+    Round["produced / needsNext / controller"]
+  end
+  Table[("结果表 store.ts<br/>ResultCell 四字段")]
+  Http["传输 http.post（注入）"]
+  Inputs -->|"提交边界：复制 → 值域 → 身份键"| Registry
+  Inputs -->|"setConfig：三个值"| Slot
+  Slot --> Registry
+  Registry --> Declarers
+  Declarers --> Wake
+  Wake -->|"到期"| SlotQueue
+  SlotQueue -->|"参数副本"| Http
+  Http -->|"response.data"| Round
+  Round -->|"结算时刻 ＋ 结果"| Table
+  Table -->|"整格 cell"| Reader
+  Reader --> Gate
+  Gate --> Outlet
+  Slot -->|"资格现算"| Gate
+```
+
+三条口径：**参数**从页面到传输，每经一手复制一份（`args` 发给消费者、`display.args` 抄写时再一份）；
+**结果**只复制一次（入站 `copyResult`），此后所有人读到的都是结果表里那一份对象；
+**资格**不流动，它是每次现算的判定（页面报上三个值，核心与适配层各自算一次），因此图上没有「资格」这条数据。
+
 ## 3. 数据模型
 
 本节是**内部字段、所有权与算法**的唯一维护入口；统一文档只保留对外含义与指针。
@@ -85,14 +130,14 @@ failure（失败出口）→ 同一个副作用里的第二件事：这一格最
 
 ```mermaid
 flowchart LR
-  Url[资源：URL 字符串] --> Parameters[Parameters 快照与 key]
-  Url -. 同一个 URL .-> Config[Config 每页一份配置槽，就是它在核心里的登记]
-  Config -. 按身份读 .-> Table[结果表: identityOf(url, key) → ResultCell 四字段]
-  Resource[Resource 共享实例] --> Decl[declarers: 装 Config 的声明者集合]
-  Resource --> Round[produced / needsNext ＝ 这一轮产出了没有 / 还欠一轮]
-  Resource --> Controller[controller: 这次执行]
-  Core[RefreshCore 身份注册表 / 队列 / 槽位] -. 写表、回收、排队 .-> Resource
-  Core -. sink .-> Table
+  Url["资源：URL 字符串"] --> Parameters["Parameters 快照与 key"]
+  Url -. "同一个 URL" .-> Config["Config：每页一份配置槽，就是它在核心里的登记"]
+  Config -. "按身份读" .-> Table["结果表：identityOf(url, key) → ResultCell 四字段"]
+  Resource["Resource 共享实例"] --> Decl["declarers：装 Config 的声明者集合"]
+  Resource --> Round["produced / needsNext ＝ 这一轮产出了没有 / 还欠一轮"]
+  Resource --> Controller["controller：这次执行"]
+  Core["RefreshCore：身份注册表 / 队列 / 槽位"] -. "写表、回收、排队" .-> Resource
+  Core -. "sink" .-> Table
 ```
 
 `Config` **就是这一页在核心里的登记**：每页一个对象、适配层原地改写，谁声明了这个身份 ＝ 这个对象挂在哪个实例的
@@ -257,6 +302,46 @@ flowchart LR
 与**认人**（`run` 在成功路径的**复制结果前后**各复核一次 `resource.controller !== controller`——复制要读属性、取值器可能同步重入；失败路径进 `catch` 时再复核一次，
 迟到的结束因此被丢弃）。过去承担「这一次执行」的那个独立对象随上限一起删除；请求必然终止由注入的传输负责
 （axios 的 `timeout`、反向代理或宿主自己的截止），框架不再设内部截止。
+
+### 3.10 一次取数的流程（图）
+
+把 §3.1–§3.6 的条文串成一次完整取数——**决策点就是代码里的那些 `if`**（§9.4）：
+
+```mermaid
+flowchart TD
+  Start(["挂载 / 参数变化 / 到期 / 手动刷新"]) --> Submit["submit：参数准备（复制 → 值域 → 身份键）"]
+  Submit --> Legal{"参数合格？"}
+  Legal -->|"否"| Rejected["rejected：不改动任何已定事实"]
+  Legal -->|"是"| Find["resourceOf 扫描 → 摘旧 declarers → 挂到 resourceFor"]
+  Find --> Eligible{"有资格？<br/>声明 ∧ 环境允许 ∧ 开启意愿 ∧ 周期有效"}
+  Eligible -->|"否"| Hold["声明保留、新的入队停下<br/>已经排上的那次照常走完"]
+  Eligible -->|"是"| Due["enqueueDue：到期入队"]
+  Manual["refresh 命令"] --> Branch{"有执行吗？结果产出没有？"}
+  Branch -->|"没有执行"| Front["插到队头"]
+  Branch -->|"有执行、结果还没产出"| Use["什么都不做：这一轮的结果就够"]
+  Branch -->|"有执行、结果已产出"| Next["needsNext ＝ true：本轮结束补一轮"]
+  Front --> Idle
+  Due --> Idle{"有空闲并发槽？"}
+  Idle -->|"否"| Wait["等真实结束（不自旋）"]
+  Wait --> Idle
+  Idle -->|"是"| Run["run：http.post（参数副本）"]
+  Run --> After{"await 之后仍是当前执行？"}
+  After -->|"否"| Drop["丢弃这次结束：不写表、不动结果表"]
+  After -->|"是"| Copy["copyResult：复制结果"]
+  Copy --> AfterCopy{"复制之后仍是当前执行？"}
+  AfterCopy -->|"否"| Drop
+  AfterCopy -->|"是"| Settle["Resource.settle：记结算时刻、置 produced"]
+  Settle --> Write["核心写表：sink.write / sink.fail"]
+  Write --> Publish["适配层读取面被同步唤醒（§6.5）"]
+  Write --> Finish["finally：交还槽位、清 produced、<br/>needsNext 就插到队头补一轮、再调度"]
+  Next --> Finish
+  Finish --> Idle
+```
+
+**读图要点**：①「有资格？」只在入队那一刻问一次（图中「声明保留、新的入队停下」与「到期入队」两条去路）；
+②认人两次复核分别落在**复制结果前后**（`copyResult` 的两侧），失败路径进 `catch` 时还有一次；
+③写表会**同步唤醒页面副作用**：页面在那一拍里再点一次刷新时，命令落在「needsNext ＝ true」那条分支（`produced` 已经为真）；
+④收尾之后回到并发槽判定，队列非空就继续占槽。
 
 ## 4. 参数与结果边界
 
@@ -446,6 +531,34 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
   它们的抛错由宿主上报，因此不在承诺内。
 - 后台失败保留声明与开启意愿，旧结果不变，下个周期继续；框架不改写调用方的 `enabled`。
 
+### 6.5 读取面发布的流程（图）
+
+一条结果从结果表到画面：**一个副作用、一个读闸门、两个出口**（§3.3、§6.2、§6.4）：
+
+```mermaid
+flowchart TD
+  Wake(["结果表被替换：sink.write / sink.fail"]) --> Bound{"安装槽里有协调者？"}
+  Bound -->|"否"| Clear["display ＝ null、failure ＝ null<br/>读取基准与两个身份键清空"]
+  Bound -->|"是"| Params{"这一页提交过身份？"}
+  Params -->|"否"| Stop1["返回：没有可抄的格，也没有依赖可登记"]
+  Params -->|"是"| Cell["readResult 读这一格（这一次读登记依赖）"]
+  Cell --> Exists{"这一格写过吗？"}
+  Exists -->|"否"| Stop2["画面停在上一帧"]
+  Exists -->|"是"| Gate{"读闸门：有资格，<br/>或还没有读取基准且浏览器可见？"}
+  Gate -->|"否"| Stop3["冻结：两个出口都不动"]
+  Gate -->|"是"| Fail["publishFailure：这一格换了一笔新失败就发布<br/>（不参与数据窗口）"]
+  Fail --> Stale{"这一步里换了身份或已卸载？"}
+  Stale -->|"是"| Wake2["wakeReader：下一拍重新订上新身份那一格的依赖"]
+  Stale -->|"否"| Data["publishData：同一身份同一版不抄第二遍<br/>新格距画面里那一版满一个 every 才换画面"]
+  Data --> Stale2{"这一步里换了身份或已卸载？"}
+  Stale2 -->|"是"| Wake2
+  Stale2 -->|"否"| Done["整格抄进 display，读取基准 ＝ 这一版的 updatedAt"]
+```
+
+**读图要点**：①读闸门只问一次，两个出口共用（先失败出口、再数据出口）；
+②失败**不参与数据窗口**，所以它不受 `every` 约束；③读取基准只在「身份落定 / 重新成为读者 / 显式 `refresh()`」这三处被置空，
+其余写入都要过窗口；④发布是同步的，页面 watcher 可能就在发布当中换身份或卸载，因此每一步之后都要回看快照（那两处「换了身份或已卸载？」）。
+
 ## 7. 顺序约束
 
 1. **换身份三步有序：扫描 → 摘旧 → 挂新。** `resourceOf` 先定位当前登记，再把这份配置从旧实例的 `declarers` 摘掉（旧实例若没人声明了就就地回收），最后挂到 `resourceFor` 给出的实例上。
@@ -473,8 +586,9 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 | 你想弄清 | 从这里开始 | 接着读 |
 |---|---|---|
-| 一次取数怎么走完 | `src/index.ts`（两个导出）→ `vue.ts` 的 `useRefresh` | §2.1 的链路，再看 `RefreshCore.submit` → `flush` → `run` → `Resource.settle`（记结算时刻与 `produced`） |
+| 一次取数怎么走完 | `src/index.ts`（两个导出）→ `vue.ts` 的 `useRefresh` | **先看 §2.2 数据流图与 §3.10 流程图**，再看 §2.1 的链路与 `RefreshCore.submit` → `flush` → `run` → `Resource.settle`（记结算时刻与 `produced`） |
 | 一个页面的配置槽怎么变成共享实例 | `RefreshCore.submit` → `RefreshCore.resourceOf`（扫描）→ `RefreshCore.resourceFor` | §3.1 对象关系、§3.3 所有权表、§3.5 第 8／10 条 |
+| 数据从结果表到画面怎么走 | `vue.ts` 的读取副作用（`publishData` / `publishFailure`） | **§6.5 流程图**、§6.4 读闸门、§3.3 两个出口 |
 | 隐藏、卸载、销毁之后还剩什么 | `RefreshCore.undeclare` / `RefreshCore.dispose`；适配层的 `visible` / `released` / `lastReadAt` | §3.6 命令表、§3.9 第一／二条、§3.5 第 9 条、§6.4 |
 
 ### 9.2 读代码前先记住的七个词
