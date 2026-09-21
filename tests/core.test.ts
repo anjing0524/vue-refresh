@@ -618,6 +618,47 @@ test('A06 刷新不留账：刷新之后立刻卸载，实例当场回收，不�
   assert.equal(snapshot(core).results.length, 0, '实例已经回收：迟到的结果写不进表')
 })
 
+test('A06/A13 释放之后那次请求才失败：迟到的失败不写进已释放身份的那一格', async () => {
+  let fail: ((error: Error) => void) | undefined
+  const source = '/api/core/412'
+  const core = newCore(2, () => new Promise<number>((_resolve, reject) => { fail = reject }))
+  const view = page(core, source)
+
+  view.submit({ id: 1 })
+  await settle()
+  assert.equal(snapshot(core).running.length, 1, '请求已经发出')
+
+  // 释放：实例与结果一并回收；那次请求还在跑，稍后才失败。
+  core.undeclare(view.config)
+  assert.equal(snapshot(core).results.length, 0)
+
+  fail?.(new Error('晚到的失败'))
+  await settle()
+  assert.equal(snapshot(core).running.length, 0, '真实结束后交还槽位')
+  assert.equal(snapshot(core).results.length, 0, '迟到的失败同样不写表：那一格已经随实例释放')
+})
+
+test('A12/A06 复制结果期间换了执行：旧执行的结果不写进结果表（复制会读属性，取值器可能同步重入）', async () => {
+  let release: (() => void) | undefined
+  const source = '/api/core/413'
+  let view!: Page
+  const core = newCore(2, () => new Promise<unknown>(resolve => {
+    // 响应对象的取值器在复制结果那一步被读到，那一刻同步释放这个身份。
+    release = () => { resolve({ get id() { core.undeclare(view.config); return 1 } }) }
+  }))
+  view = page(core, source)
+
+  view.submit({ id: 1 })
+  await settle()
+  assert.equal(snapshot(core).running.length, 1, '请求已经发出')
+
+  release?.()
+  await settle()
+  assert.equal(snapshot(core).running.length, 0, '真实结束后交还槽位')
+  assert.equal(snapshot(core).results.length, 0, '复制期间丢掉的执行：结果不写进结果表')
+})
+
+
 test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数；最后一个声明者退出则连实例一起销毁', async () => {
   let calls = 0
   const source = '/api/core/352'
