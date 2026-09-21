@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose, ref, watch } from 'vue'
+import { computed, createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import { useRefreshStore } from '../src/store.ts'
@@ -1051,4 +1051,137 @@ test('A11/A12 同一身份同一版不抄第二遍：同一格没换版本就不
   assert.equal(loads, 1, '重复声明不额外取数：这一格每 100 秒才到下一次')
   app.unmount()
   await tick()
+})
+
+test('A12/A21 身份落定不等窗口：换到的身份那一版比画面旧也立刻换画面', async () => {
+  let loads = 0
+  const quote = '/api/vue/1131'
+  const manager = newManager(2, async (_url, body) => { loads++; return (body as { symbol: string }).symbol })
+  let view!: RefreshHandle<{ symbol: string }, string>
+  let other!: RefreshHandle<{ symbol: string }, string>
+
+  const app = renderer.createApp(defineComponent({
+    setup: () => () => h('div', [h(Early), h(View)]),
+  }))
+  const Early = defineComponent({
+    setup() {
+      other = useRefresh<{ symbol: string }, string>(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const View = defineComponent({
+    setup() {
+      view = useRefresh<{ symbol: string }, string>(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  // 先把身份 Y 取好：这一版会比后面 X 那一版**旧**。
+  other.submit({ symbol: 'Y' })
+  await tick()
+  assert.equal(other.display.value?.data, 'Y')
+
+  view.submit({ symbol: 'X' })
+  await tick()
+  const xShown = view.display.value
+  assert.ok(xShown, 'X 已上屏')
+  assert.equal(xShown.data, 'X')
+  assert.equal(loads, 2, '两个身份各取一次')
+
+  // 身份落定是「不等窗口」三处中的第一处（U12）：画面里那一版是 X、窗口整整 100 秒，
+  // 换到 Y 之后必须立刻换成 Y 那一版——哪怕它在时间上比 X 旧。
+  view.submit({ symbol: 'Y' })
+  await tick()
+  const landed = view.display.value
+  assert.ok(landed, 'Y 已上屏')
+  assert.equal(landed.data, 'Y', '换身份后画面立刻是新身份那一份，不留在旧身份那一帧')
+  assert.ok(
+    landed.updatedAt !== null && xShown.updatedAt !== null && landed.updatedAt < xShown.updatedAt,
+    '这一版比画面里那一版旧：窗口本来会把它挡住，身份落定必须放行',
+  )
+  assert.equal(loads, 2, '换到已取过的身份：读结果表，不重新取数')
+  app.unmount()
+})
+
+test('A04 配置 getter 抛错：这一拍按配置非法处理，恢复靠抛错那一项自身的变化（§3.6 边界）', async () => {
+  let loads = 0
+  const manager = newManager(1, async () => { loads++; return 1 })
+  const broken = ref(true)
+  const every = ref(100_000)
+  // §3.6 的读法：页面可以用 `computed` 表达暂态条件；读不出即整槽按非法处理，框架不猜开关的值。
+  const enabled = computed(() => {
+    if (broken.value) throw new Error('这一拍读不出开启意愿')
+    return true
+  })
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/1155', { enabled, every })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+
+  assert.equal(loads, 0, '配置读不出＝配置非法：不取数')
+  assert.equal(api.failure.value, null, '配置非法不写失败：它是页面自己的输入')
+  const nothing: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
+  assert.equal(nothing, null, '还没有任何结果')
+
+  // §3.6 明说的边界：抛错那一项**之后**的项当轮不再被读取，Vue 也会清掉当轮未重新收集的依赖，
+  // 所以只改 `every` 不解开——恢复要靠抛错那一项自身的变化。
+  every.value = 50_000
+  await tick()
+  assert.equal(loads, 0, '改没被读到的那一项不解开（文档写明的边界）')
+
+  broken.value = false
+  await tick()
+  await tick()
+  assert.equal(loads, 1, '抛错那一项自身变了：按当前资格恢复并取一次')
+  const restored = api.display.value
+  assert.ok(restored, '恢复后结果上了屏')
+  assert.equal(restored.data, 1)
+  app.unmount()
+})
+
+test('A13 失败出口：error 原样带出——页面 throw undefined 也算一笔失败', async () => {
+  let loads = 0
+  const manager = newManager(1, async () => {
+    loads++
+    if (loads === 1) throw undefined // 页面连异常对象都不给：失败这件事仍然成立
+    return 7
+  })
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/1180', { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await until(() => api.failure.value !== null, '首查失败写进失败出口')
+
+  // §3.3 U13：`error` 原样带出原始异常（页面 `throw undefined` 也如实带出），
+  // 所以判断有没有失败看 `failure` 是不是 `null`，而不是看 `error` 是不是 `undefined`。
+  const failed: RefreshFailure | null = api.failure.value
+  assert.ok(failed, '失败出口给出的是一笔事实')
+  assert.equal(failed.error, undefined, '原始异常原样带出，不做兜底替换')
+  assert.ok(typeof failed.failedAt === 'number' && failed.failedAt > 0, '失败带自己的时刻')
+  assert.equal(api.display.value?.data, null, '首查失败：数据出口仍然给出「没有数据」这一版')
+
+  api.refresh()
+  await until(() => api.display.value?.data === 7, '成功之后拿到数据')
+  assert.equal(api.failure.value, null, '成功一到，失败清回 null')
+  app.unmount()
 })
