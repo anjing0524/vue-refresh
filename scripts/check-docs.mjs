@@ -305,7 +305,7 @@ for (const line of vocabulary.split('\n')) {
   if (!line.startsWith('|')) { tableHeader = null; continue }
   if (tableHeader === null) { tableHeader = line; continue }
   if (/^\|[-: |]+\|$/.test(line)) continue
-  if (/^\| 名称 \|/.test(tableHeader)) vocabularyRows.push(line.split('|')[1].trim())
+  if (/^\| (名称|词) \|/.test(tableHeader)) vocabularyRows.push(line.split('|')[1].trim())
 }
 const formsOf = cell => cell.replace(/`/g, '').split(' / ')
   .map(part => part.replace(/（[^）]*）?\s*$/, '').trim()).filter(Boolean)
@@ -460,12 +460,13 @@ for (const [kind, head] of [['函数', '| 函数 |'], ['状态常量对象', '| 
 //     `settleRequest`; §0 now registers 「刷新命令」 instead, so both must stay out of the normative
 //     text. The adapter keeps its own `pending` flag — that one is current code, not history.
 const RETIRED = ['caller', 'ErrorOrigin', 'CancelReason', 'RefreshError', 'readSnapshot', 'reported', 'INVALID_CONFIG_MESSAGE',
-  '刷新要求', 'settleRequest', 'defineRefresh', 'RefreshSource', 'place', 'find', 'declared', 'identities.clear']
+  '刷新要求', 'settleRequest', 'defineRefresh', 'RefreshSource', 'place', 'find', 'declared', 'identities.clear',
+  '需求', '订阅', '交付', '失去存在']
 for (const [file, text] of [['/README.md', read('/README.md')], ['/DESIGN.md', designText],
   ['/统一刷新管理.md', design.slice(0, catalogueEnd)]]) {
   for (const term of RETIRED) {
     check(!text.includes(`\`${term}\``), file,
-      `retired name \`${term}\` is back in the normative text (it no longer exists in src/; the history is in ADR.md)`)
+      `retired name \`${term}\` is back in the normative text; §0.7 says what replaced it (history is in ADR.md)`)
   }
 }
 
@@ -473,6 +474,14 @@ if (problems.length) {
   for (const problem of problems) console.error('[docs]', problem)
   process.exit(1)
 }
+// 18) §0 是「用词的唯一清单」（一个概念一个词），§3 是行为条文的唯一载体：因此 §3 的正文不得出现已退役的词，
+//     不管带不带反引号。测试标题与历史记录（§5、ADR、评审文档）保留原词，不在此列。
+const RETIRED_IN_RULES = ['需求', '订阅', '交付', '失去存在']
+for (const term of RETIRED_IN_RULES) {
+  check(!rulesText.includes(term), '统一刷新管理.md §3',
+    `§3 的条文里出现了退役词 "${term}"：§0 已把它并入别的概念，请改用 §0 的词（或把这段搬到历史记录）`)
+}
+
 // The leaf → test-title traceability report is printed, never enforced: a leaf absent from every
 // test title is a review aid, not a defect, so it must not fail this gate.
 console.log(execFileSync(process.execPath, [`${root}/scripts/trace-leaves.mjs`], { cwd: root, encoding: 'utf8' }).trimEnd())
