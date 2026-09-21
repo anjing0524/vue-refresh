@@ -12,7 +12,8 @@
     "build:demo": "vite build --outDir dist-demo",
     "test:browser": "playwright test",
     "complexity": "node scripts/complexity.mjs",
-    "check:docs": "node scripts/check-docs.mjs"
+    "check:docs": "node scripts/check-docs.mjs",
+    "check:docs:selftest": "node scripts/check-docs.selftest.mjs"
   },
   "devDependencies": {
     "@babel/parser": "7.29.8",

@@ -271,6 +271,16 @@ const TOPIC_CITATIONS = [
   { claim: '配置非法的通知', anchor: 'U05', phrase: '配置快照读不出' },
   { claim: '参数编码', anchor: 'U15', phrase: '键排序' },
 ]
+// 锚点 → 它那条规则的**整段**正文（续行以两个空格开头）。只取首行会让多行条文里的短语检查永远为假。
+const bulletOf = new Map()
+let openAnchor = null
+for (const line of rulesText.split('\n')) {
+  const head = /^- `(U\d{1,3})` /.exec(line)
+  if (head) { openAnchor = head[1]; bulletOf.set(openAnchor, line); continue }
+  if (openAnchor !== null && /^\s+\S/.test(line)) { bulletOf.set(openAnchor, `${bulletOf.get(openAnchor)}\n${line}`); continue }
+  if (line.trim() === '' || line.startsWith('- ') || line.startsWith('#')) openAnchor = null
+}
+const citedPairs = new Set()
 for (const line of design.split('\n')) {
   const citation = /^(.+?)的行为规则见 §3（(U\d{1,3}(?:、U\d{1,3})*)）/.exec(line)
   if (!citation) continue
@@ -280,16 +290,22 @@ for (const line of design.split('\n')) {
     + `${anchors.length} anchors: ${topics.join('、')} → ${anchors.join('、')}`)
   topics.forEach((topic, index) => {
     const anchor = anchors[index]
-    const bullet = rulesText.split('\n').find(value => value.startsWith(`- \`${anchor}\` `))
+    const bullet = bulletOf.get(anchor)
     check(Boolean(bullet), '统一刷新管理.md §3', `topic citation "${topic}" points at undeclared anchor ${anchor}`)
     const entry = TOPIC_CITATIONS.find(value => value.claim === topic && value.anchor === anchor)
     check(Boolean(entry), 'scripts/check-docs.mjs',
       `topic citation "${topic}" → ${anchor} is not declared in TOPIC_CITATIONS`)
+    citedPairs.add(`${topic}→${anchor}`)
     if (entry) {
       check(Boolean(bullet?.includes(entry.phrase)), '统一刷新管理.md §3',
         `topic citation "${topic}" points at ${anchor}, whose rule no longer mentions "${entry.phrase}"`)
     }
   })
+}
+// 引文行自己也可能被删——那样承诺不再有落点，而「没有引文」会让上面的循环静默通过。
+for (const entry of TOPIC_CITATIONS) {
+  check(citedPairs.has(`${entry.claim}→${entry.anchor}`), '统一刷新管理.md',
+    `主题引用「${entry.claim} → ${entry.anchor}」不再出现在任何一节里：删掉引用会让这条承诺失去落点`)
 }
 
 // 13) §0 is the document's lookup table, so it must behave like one. (a) Every row must offer at
