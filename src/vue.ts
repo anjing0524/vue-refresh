@@ -98,9 +98,9 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     failure.value = cell.failedAt === null ? null : { error: cell.error, failedAt: cell.failedAt }
   }
 
-  /** 发布期间换了身份（或这一页被释放）时本轮快照已过期：下一拍强制唤醒读取面一次。
-   * 正在运行的副作用不会被自己触发的变更唤醒，因此新身份那一格的依赖必须靠这一下重新订上。 */
-  const rebind = (): void => { queueMicrotask(() => { triggerRef(submitted) }) }
+  /** 强制唤醒读取面一次（下一拍）。两处用它：发布期间换了身份（或这一页被释放）时要重新订上新身份
+   * 那一格的依赖；重新成为读者时要立刻读回该身份当前那一版。正在运行的副作用不会被自己触发的变更唤醒。 */
+  const wakeReader = (): void => { queueMicrotask(() => { triggerRef(submitted) }) }
 
   watchEffect(() => {
     // 先读安装槽：它同时是这个副作用唯一的失效信号。
@@ -127,9 +127,9 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     if (!bound.isEligible(config, url, params.key) && !(lastReadAt === null && !document.hidden)) return
     publishFailure(cell, params.key)
     // 发布是同步的：页面 watcher 可能就在上面那一步里换了身份或卸载，本轮快照随即过期。
-    if (submitted.value !== params) { rebind(); return }
+    if (submitted.value !== params) { wakeReader(); return }
     publishData(cell, params)
-    if (submitted.value !== params) rebind()
+    if (submitted.value !== params) wakeReader()
   }, { flush: 'sync' })
 
   /** 这一页是否挂载/激活（KeepAlive 失活为假）。 */
@@ -145,9 +145,13 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       if (next.core !== null) next.core.setConfig(config, next.enabled, next.every, next.present)
       const viewer = currentCore()
       const after = key !== null && viewer !== null && viewer.isEligible(config, url, key)
-      // 只有「之前没资格、现在有资格」这一条边是 U12 的「重新成为读者」，才把读取基准置空；
+      // 只有「之前没资格、现在有资格」这一条边是 U12 的「重新成为读者」：把读取基准置空，并唤醒读取面
+      // 立刻读回该身份**当前**那一版（后台更新过的最新数据），而不是停在失活前那一帧。
       // 同一份配置内的变化（改频率、改可见性）只重排调度，不动基准——否则它们会白白放行一次窗口。
-      if (after && !before) lastReadAt = null
+      if (after && !before) {
+        lastReadAt = null
+        wakeReader()
+      }
     },
     { flush: 'sync', immediate: true },
   )

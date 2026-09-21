@@ -294,7 +294,7 @@ test('A04/A06 点过刷新之后失活：缓存里那一帧仍会更新；失活
   app.unmount()
 })
 
-test('A06 重新成为读者不会自己补抄：下一份写入到达时才上屏，而且不等窗口', async () => {
+test('A06 重新成为读者立即读回该身份当前那一版：不重新取数，此后按窗口跟随', async () => {
   let loads = 0
   const quote = '/api/vue/911'
   const manager = newManager(1, async () => { loads++; return loads })
@@ -328,15 +328,15 @@ test('A06 重新成为读者不会自己补抄：下一份写入到达时才上�
   await until(() => reader.display.value?.data === 2, '读者拿到第二版')
   assert.equal(paused.display.value?.data, 1, '它有上次读取时间了：窗口内不换画面')
 
-  // 恢复：这一拍**不会**自己把表里已有的那一版补抄进来（读取面只由数据写入与换身份唤醒，ADR-73）。
+  // 恢复：重新成为读者的那一条边上**立刻读回该身份当前那一版**（表里已是 2，不重新取数、不等窗口）。
   enabled.value = true
-  await tick()
-  await tick()
-  assert.equal(paused.display.value?.data, 1, '重新成为读者不补抄，等下一份写入')
+  await until(() => paused.display.value?.data === 2, '重新成为读者立即读回当前那一版')
+  assert.equal(loads, 2, '读回不产生新的请求')
 
-  // 下一份写入到达：上次读取时间已在恢复时被清掉，所以它不等窗口，直接上屏。
+  // 读回之后按新的窗口跟随：下一份写入还在窗口内，画面不动。
   reader.refresh()
-  await until(() => paused.display.value?.data === 3, '下一份写入到达时上屏，不等窗口')
+  await until(() => reader.display.value?.data === 3, '读者拿到第三版')
+  assert.equal(paused.display.value?.data, 2, '读回之后按窗口跟随')
   app.unmount()
 })
 
