@@ -3,6 +3,7 @@ import { afterEach, test } from 'node:test'
 import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
+import { useRefreshStore } from '../src/store.ts'
 import type { RefreshHttp } from '../src/core.ts'
 import type { RefreshDisplay, RefreshFailure, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
 import type { Ref } from 'vue'
@@ -49,6 +50,17 @@ function newManager(maxConcurrent: number, post: FakePost = async () => undefine
 afterEach(() => {
   for (const manager of managers.splice(0)) manager.dispose()
 })
+
+/** 需要直接核对结果表储存的用例用这个：把这张表用的 Pinia 一起给出来。 */
+function newManagerWithStore(maxConcurrent: number, post: FakePost = async () => undefined): {
+  readonly manager: RefreshManager
+  readonly store: ReturnType<typeof useRefreshStore>
+} {
+  const pinia = createPinia()
+  const manager = createRefreshManager({ maxConcurrent, axios: fakeHttp(post), pinia })
+  managers.push(manager)
+  return { manager, store: useRefreshStore(pinia) }
+}
 
 /**
  * 观测面取一份快照；协调者已销毁时返回 `undefined`。
@@ -936,4 +948,38 @@ test('A12/A17 发布期间卸载：释放之后不再把过期的那一版上屏
   await sleep(20)
   const after: RefreshDisplay<{ id: number }, number> | null = api.display.value
   assert.equal(after, null, '卸载发生在发布期间：这一版不再写进画面')
+})
+
+test('A06 结果表的储存随最后声明者离开收敛：换身份不留格，同一个身份重建仍唤得醒', async () => {
+  let loads = 0
+  const { manager, store } = newManagerWithStore(1, async () => { loads += 1; return loads })
+  const enabled = ref(true)
+  let api!: RefreshHandle<{ symbol: string }, number>
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/285', { enabled, every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  api.submit({ symbol: 'A' })
+  await tick()
+  assert.equal(store.size(), 1, '一个活跃身份一格')
+
+  api.submit({ symbol: 'B' })
+  await tick()
+  assert.equal(store.size(), 1, '换身份：旧格随实例释放一起删掉，不留空壳')
+
+  // 同一个身份重建：新格的 ref 要在下一拍重新被订阅，重写才唤得醒。
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value?.args.symbol === 'A', '同一个身份重建后照样上屏')
+  const shown: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
+  assert.notEqual(shown?.updatedAt, null, '重建后的新结果照样交付')
+
+  app.unmount()
+  await tick()
+  assert.equal(store.size(), 0, '最后一个声明者离开：储存键数收敛到 0')
 })

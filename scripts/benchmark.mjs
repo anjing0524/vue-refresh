@@ -18,6 +18,7 @@ globalThis.document = { hidden: false, addEventListener() {}, removeEventListene
 import { createRenderer, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore } from '../src/vue.ts'
+import { useRefreshStore } from '../src/store.ts'
 import { useRefresh } from '../src/vue.ts'
 import { snapshot } from './observe.ts'
 
@@ -93,6 +94,7 @@ async function measure() {
     render: () => h('div', cards.map((identity, index) => h(Card, { key: index, identity }))),
   })
   const pinia = createPinia()
+  const store = useRefreshStore(pinia)
   const manager = createRefreshManager({ maxConcurrent, axios: http, pinia })
   app.use(pinia)
   app.use(manager)
@@ -113,7 +115,7 @@ async function measure() {
     resources: after.resources.length,
     declarers: after.resources.reduce((total, resource) => total + resource.declarers.size, 0),
     queued: after.queued.length,
-    running: after.running.length, entries: after.results.length,
+    running: after.running.length, entries: after.results.length, cells: store.size(),
   }
   const heapAfter = process.memoryUsage().heapUsed
   const expectedCycles = Math.max(1, Math.round(elapsed / every))
