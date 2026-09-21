@@ -151,7 +151,7 @@ flowchart LR
 1. 声明关系只有一处事实：这一页的 `Config` 在某实例的 `declarers` 里 ⟺ 它声明了该身份。登记只 `add`（`submit`）、撤销只 `delete`（`undeclare`），没有第二份需要保持同步的副本；**资格不另存集合**，由 `config.enabled && config.active && RefreshCore.visible` 现算。（`resourceOf` 扫描定位、`releaseIfUnused` 回收；ADR-57、ADR-61、ADR-66）
 2. 注册表只指向当前生存期的实例；实例被删除后不再被 `flush` 遍历到，也不接受新的声明或刷新命令。（`resourceFor` 建立、`releaseIfUnused` 删桶）
 3. 每次调度都在**有资格的声明者**里现算 `every` 的最小值：没有有资格的声明者就不取数、不安排唤醒。不缓存间隔，也不缓存「下次到期」以外的派生值。（`Resource.dueAt` / `Resource.eligibleEvery`）
-4. 一个实例至多一个当前执行；执行的位置由 `queue`（数组：待取顺序）与 `running`（在途集合：并发槽）两处表达，成员只在 `enqueue` ／ `dequeue` ／ `startQueued` ／ `run` 的收尾 ／ `releaseIfUnused` 里迁移；「这次执行还算不算数」另存为 `Resource.controller`，`controller === null` 同时表达「没有执行」与「这次结束已不算数」，因此不需要独立的执行对象。abort 不释放槽位（回收时只把它从队列摘掉并清空 `controller`，请求仍占着 `running` 里那一格直到自己结束）。队列里的实例恒握着这次执行的把手，`startQueued` 不需要归属复核（ADR-56、ADR-62、ADR-65、ADR-70）
+4. 一个实例至多一个当前执行；执行的位置由 `queue`（数组：待取顺序）与 `running`（在途集合：并发槽）两处表达，成员只在 `enqueue` ／ `dequeue` ／ `startQueued` ／ `run` 的收尾 ／ `releaseIfUnused` 里迁移；「这次执行还算不算数」另存为 `Resource.controller`，`controller === null` 同时表达「没有执行」与「这次结束已不算数」，因此不需要独立的执行对象。abort 不释放槽位（回收时只把它从队列摘掉并清空 `controller`，请求仍占着 `running` 里那一格直到自己结束）。队列里的实例恒握着这次执行的把手，`startQueued` 不需要归属复核；同一实例在队里至多一个（`enqueue` 不去重，靠调用点保证、由探针守着）（ADR-56、ADR-62、ADR-65、ADR-70）
 5. 结果只来自该实例的当前执行的成功；删除后旧请求不得重建该实例。（`run` 在 `await` 之后与复制结果之后各复核一次 `resource.controller !== controller`，`Resource.settle` 只被它调用）
 6. 结果只由共享路径写入结果表（成功与失败都在 `run` 里各写一次 `sink.write` / `sink.fail`；实例的 `settle` 只记结算时刻并置「这一轮已经产出」），写的是**同一个对象**，读的人拿到它也是同一个对象——要改自己复制；`display.args` 仍然每次抄写复制一份。（ADR-59、ADR-65）
 7. 当前执行的正常成功/失败在写结果表之前更新 `settledAt`；取消与旧执行不更新。（`Resource.settle` 的第一行）
@@ -410,7 +410,8 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 - 安装顺序固定为「先检查后修改」：被拒的安装不破坏已有合法绑定，也不新增监听或请求。
 - 每个协调者只注册一个 `visibilitychange` 监听。
-- 当前协调者放在模块级变量里：安装时若现有实例还活着就拒绝，已销毁则直接替换（HMR、会话切换），
+- 当前协调者放在模块级变量里：安装时槽里有占位者就拒绝；槽里只会有活着的协调者（`uninstall` 在 `core.dispose()` 之前置空），
+  所以「已销毁就能原地接管」靠的是槽空着，而不是安装时现场判死活（HMR、会话切换），
   组件适配不经过 `provide` / `inject`。安装槽本身是配置 watcher 的依赖，因此接管后每一页在下一拍把当前配置
   重新报给新协调者；身份仍要由调用方 `submit` 登记（核心不接旧协调者的登记）。
 - `dispose` 先失效再清理自己的队列／Timer／实例与配置槽；卸载钩子调用 `dispose`。**核心不持有任何回调，适配层的拆卸由适配层自己做**：`install` 在 `app.onUnmount` 里摘掉可见性监听、返回的 `dispose()` 也摘（ADR-64）。
@@ -505,7 +506,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 | `RefreshCore.dispose` | 销毁：幂等、不可复用；先清每个实例的 `declarers`，再逐个回收 |
 | `RefreshCore.resourceOf` / `releaseIfUnused` / `enqueue` / `dequeue` / `enqueueDue` / `startQueued` / `run`（全部私有） | 扫描定位配置槽登记在哪个实例／回收实例（`declarers` 空，并把欠的一轮与这次执行的认人一起作废）／排进队尾或插到队头（手动刷新与补的那一轮排在到期取数前面）／从队里摘掉／到期入队并收齐最早到期时刻／按队列顺序占槽启动／执行一次取数（两个结局都经核心各写一次结果表；实例不持有核心（ADR-65、ADR-70） |
 | `RefreshCore.flush`（私有） | 一次合并调度：`clearWakeup`（取消旧 Timer）→ `enqueueDue`（到期入队并收齐最早到期时刻）→ `startQueued`（按队列顺序占槽启动）→ 队列空了就安排唯一唤醒 Timer |
-| `Resource.dueAt` / `eligibleEvery` / `isPresent` / `isEligible` | 下次到期时刻／有资格声明者里的最小间隔／环境允不允许（激活且可见且配置有效）／单个声明者有没有资格；都现算，不缓存 |
+| `Resource.dueAt` / `eligibleEvery` / `isPresent` / `isEligible` | 下次到期时刻／有资格声明者里的最小间隔／环境允不允许（激活且可见且配置有效）／单个声明者有没有资格；都现算，不缓存。**`isPresent` 与 `isEligible` 由核心问它**（`refresh` 的入口闸、调度与读闸门），另两个留在实例内部 |
 | `Resource.settle` | 一次执行的两种结局都走它：只记结算时刻并把「这一轮已经产出」置起（失败也算结算，因此不自动重试）；写成功那一格、写失败那一格与回收都在核心 |
 | `prepareParameters` | 提交边界只执行一次：复制 → 值域检查 → 编码身份键（不跑任何回调，ADR-74） |
 | `useRefreshStore` | 结果表本身：`write` / `fail` / `remove` / `list`（内核写入端）与 `read`（页面读出口）；模块级定义，一个 Pinia 一张表 |

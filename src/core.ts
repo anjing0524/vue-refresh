@@ -141,9 +141,9 @@ export class RefreshCore {
   /** 显式刷新：让这个身份再取一次。返回值只说这句命令收下了没有，不是取数回执。 */
   refresh(config: Config, url: string, key: string): boolean {
     if (this.disposed) return false
-    if (!config.active || config.every === null || !this.visible) return false
     const resource = this.identities.get(identityOf(url, key))
     if (resource === undefined) return false
+    if (!resource.isPresent(config, this.visible)) return false
 
     if (!resource.hasExecution()) this.enqueue(resource, true)
     // 结果已经产出了才需要「再来一轮」；还没产出的话本轮结果就够。
@@ -208,9 +208,8 @@ export class RefreshCore {
 
   // ══════════════════════════ 后台执行 ══════════════════════════
 
-  /** 排进待取队列（`first` 插到队头），并给它这次执行的把手。 */
+  /** 排进待取队列（`first` 插到队头），并给它这次执行的把手；调用点都保证它此刻不在队里。 */
   private enqueue(resource: Resource, first = false): void {
-    this.dequeue(resource)
     if (first) this.queue.unshift(resource)
     else this.queue.push(resource)
     resource.controller = new AbortController()

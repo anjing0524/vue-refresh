@@ -219,6 +219,8 @@ function assertQueueConsistent(core: RefreshCore): void {
     assert.notEqual(resource.controller, null, '在队的实例必须带着这次执行的 controller')
     assert.equal(view.running.includes(resource), false, '在队的实例不可能同时在跑')
   }
+  // `enqueue` 不去重：前提是调用点都保证它不在队里，这条探针替运行期守着。
+  assert.equal(new Set(view.queued).size, view.queued.length, '队列里没有重复项：一个实例一次只排一次')
 }
 
 /** 让微任务与 0ms 定时器跑完（每个 `await` 一跳）。 */

@@ -180,9 +180,8 @@ export function createRefreshManager(options: {
   if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
     throw new TypeError('maxConcurrent 必须是正安全整数')
   }
-  const store = useRefreshStore(options.pinia)
   // 结果表的四个动作签名与核心的端口一致，直接把 store 交进去。
-  const core = new RefreshCore(options.maxConcurrent, options.axios, store)
+  const core = new RefreshCore(options.maxConcurrent, options.axios, useRefreshStore(options.pinia))
   /** 摘掉可见性监听。 */
   let stopWatchingVisibility: (() => void) | null = null
 
@@ -199,9 +198,8 @@ export function createRefreshManager(options: {
       if (core.isDisposed()) throw new Error('已销毁的刷新协调者不能再安装')
       const current = installed.value
       if (current === core) return // 同一个实例重复安装无副作用。
-      if (current !== null && !current.isDisposed()) {
-        throw new Error('刷新协调者安装冲突：同一进程里已有一个存活的实例')
-      }
+      // 槽里只会有活着的协调者（`uninstall` 在 `core.dispose()` 之前把槽置空），因此有占位者就是冲突。
+      if (current !== null) throw new Error('刷新协调者安装冲突：同一进程里已有一个存活的实例')
       installed.value = core
 
       // 浏览器可见性由框架自己监听。

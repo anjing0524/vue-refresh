@@ -32,7 +32,7 @@ export class Resource {
   }
 
   /** 环境允许：这一页激活、配置有效、浏览器可见（与「开启意愿」是两件事）。 */
-  private isPresent(config: Config, visible: boolean): boolean {
+  isPresent(config: Config, visible: boolean): boolean {
     return visible && config.every !== null && config.active
   }
 
