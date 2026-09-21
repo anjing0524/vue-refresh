@@ -160,8 +160,9 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       }
       const result = bound.submit(config, url, parameters)
       if (result.status === 'accepted') {
-        // 新身份的第一份内容不等窗口。
-        lastReadAt = null
+        // 新身份的第一份内容不等窗口；相同身份重复声明幂等（核心那一侧不摘不挂），不动读取基准。
+        const previous = submitted.value
+        if (previous === null || previous.key !== parameters.key) lastReadAt = null
         submitted.value = parameters
       }
       return result

@@ -83,6 +83,7 @@ export class RefreshCore {
 
   /** 把这一页的配置写进它自己那份槽并重排调度；三个值非法时只把 `every` 置 `null`（＝这一拍配置非法）。 */
   setConfig(config: Config, enabled: unknown, every: unknown, present: boolean): void {
+    if (this.disposed) return
     if (typeof enabled !== 'boolean' || typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) {
       config.every = null
     } else {

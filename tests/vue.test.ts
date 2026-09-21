@@ -413,6 +413,56 @@ test('A21 节流：慢页面不跟着快页面跳，节流窗口内的新版本�
   app.unmount()
 })
 
+test('A03/A21 相同身份重复声明幂等：不动读取基准，慢页面仍停在窗口内那一帧', async () => {
+  let loads = 0
+  const quote = '/api/vue/941'
+  const manager = newManager(2, async () => { loads++; return loads })
+  let slow!: RefreshHandle<{ symbol: string }, number>
+  let quick!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup: () => () => h('div', [h(Slow), h(Quick)]),
+  }))
+  const Slow = defineComponent({
+    setup() {
+      slow = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const Quick = defineComponent({
+    setup() {
+      quick = useRefresh<{ symbol: string }, number>(quote, { enabled: ref(true), every: ref(20) })
+      return () => h('div')
+    },
+  })
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  slow.submit({ symbol: 'A' })
+  quick.submit({ symbol: 'A' })
+  await tick()
+
+  const latest = (): unknown => {
+    const cell = snapshotOf()?.results[0]?.cell
+    return cell === undefined || cell.updatedAt === null ? null : cell.data
+  }
+  assert.equal(slow.display.value?.data, 1, '慢页面的第一份内容立即上屏')
+  // 快页面把共享取数推到更后面，慢页面在 100 秒的窗口里停在首查那一帧。
+  await until(() => loads >= 3, '快页面把共享取数推到第 3 次')
+  assert.equal(slow.display.value?.data, 1, '窗口内结果表的新版本不改变慢页面的画面')
+
+  // 同身份重复声明：核心侧幂等（不新增请求、不换实例，见 core 用例 A03），适配层也**不能**
+  // 因此清掉读取基准——「清基准」只属于身份落定、重新成为读者、点过一次刷新这三处。
+  const settled = latest()
+  assert.equal(slow.submit({ symbol: 'A' }).status, 'accepted', '同身份重复声明照旧是 accepted')
+
+  // 下一份写入落表：基准若被误清，这一版会立刻上屏（下面的断言就会失败）。
+  await until(() => latest() !== settled && latest() !== null, '结果表又落了一版')
+  await sleep(30)
+  assert.equal(slow.display.value?.data, 1, '重复声明之后仍在窗口内：不换画面')
+  app.unmount()
+})
+
 test('A21 写端稀于本页 every 时写入即抄：节流不丢数据，新格一到就上屏', async () => {
   let loads = 0
   // 传输带 80ms 延迟：写入流的间隔（every ＋ 延迟）比本页 every（20ms）稀。
