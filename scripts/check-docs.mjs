@@ -476,16 +476,54 @@ for (const [file, text] of [['/README.md', read('/README.md')], ['/DESIGN.md', d
   }
 }
 
-if (problems.length) {
-  for (const problem of problems) console.error('[docs]', problem)
-  process.exit(1)
-}
 // 18) §0 是「用词的唯一清单」（一个概念一个词），§3 是行为条文的唯一载体：因此 §3 的正文不得出现已退役的词，
 //     不管带不带反引号。测试标题与历史记录（§5、ADR、评审文档）保留原词，不在此列。
 const RETIRED_IN_RULES = ['需求', '订阅', '交付', '失去存在']
 for (const term of RETIRED_IN_RULES) {
   check(!rulesText.includes(term), '统一刷新管理.md §3',
     `§3 的条文里出现了退役词 "${term}"：§0 已把它并入别的概念，请改用 §0 的词（或把这段搬到历史记录）`)
+}
+
+
+// 19) 需求与设计必须互相指得到：DESIGN §1.6 是「规格 → 设计」的对照表，各设计节以「> 需求：」反向指回规格。
+//     两边都不许漂——规格新增一个能力域（R）或根承诺（G），§1.6 不补就红；设计新增一节不写需求行也红。
+//     退役的承诺编号（G9，ADR-46）不在要求之列：它们只在历史上存在。
+const RETIRED_REQUIREMENTS = new Set(['G9'])
+const mapHeading = '### 1.6 需求与设计的对应'
+const mapAt = designText.indexOf(mapHeading)
+check(mapAt >= 0, 'DESIGN.md', 'missing the §1.6 requirement→design table')
+const mapText = mapAt < 0 ? '' : designText.slice(mapAt, designText.indexOf('\n## 2. ', mapAt))
+const specRequirements = [...new Set([...design.matchAll(/\b([RG]\d{1,2})\b/g)].map(match => match[1]))]
+  .filter(id => !RETIRED_REQUIREMENTS.has(id))
+for (const id of specRequirements) {
+  check(mapText.includes(id), 'DESIGN.md §1.6',
+    `规格声明的 ${id} 在 §1.6 的对照表里没有落点`)
+}
+const designSectionsWithoutRequirement = []
+let openSection = null
+for (const line of designText.split('\n')) {
+  const heading = /^### ([23]\.[0-9]+ [^\n]*)$/.exec(line)
+  if (heading) {
+    if (openSection && !openSection.marked) designSectionsWithoutRequirement.push(openSection.title)
+    openSection = { title: heading[1], marked: false }
+    continue
+  }
+  if (/^## /.test(line)) {
+    if (openSection && !openSection.marked) designSectionsWithoutRequirement.push(openSection.title)
+    openSection = null
+    continue
+  }
+  if (openSection && line.startsWith('> 需求：')) openSection.marked = true
+}
+if (openSection && !openSection.marked) designSectionsWithoutRequirement.push(openSection.title)
+check(designSectionsWithoutRequirement.length === 0, 'DESIGN.md',
+  `这些设计节缺少「> 需求：」行：${designSectionsWithoutRequirement.join('、')}`)
+
+
+// 所有规则跑完才判分：这一块必须在最后一条规则之后，否则它后面的检查全是死代码。
+if (problems.length) {
+  for (const problem of problems) console.error('[docs]', problem)
+  process.exit(1)
 }
 
 // The leaf → test-title traceability report is printed, never enforced: a leaf absent from every
@@ -495,6 +533,6 @@ console.log(`[docs] consistent: ${modules.length} modules, contract mirror, READ
   + `README artifact size, export-surface counts and API list, test totals, documented symbols, `
   + `retired names, `
   + `${declared.size} trigger anchors, capability blocks, `
-  + `dependency direction, published entry, core sections, ${TOPIC_CITATIONS.length} topic citations, `
+  + `dependency direction, published entry, core sections, requirement→design table, ${TOPIC_CITATIONS.length} topic citations, `
   + `${vocabularyRows.length} vocabulary rows, ${leaves.size} layered leaves, `
   + `${peerTypeEdges} peer type edges, ${backTypeEdges} type-only back edges`)
