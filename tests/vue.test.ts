@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
-import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose, ref } from 'vue'
+import { createRenderer, defineComponent, h, KeepAlive, nextTick, onScopeDispose, ref, watch } from 'vue'
 import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import type { RefreshHttp } from '../src/core.ts'
@@ -824,4 +824,116 @@ test('A17/A04 接管：新协调者按这一页当前的配置办事——空窗
   assert.equal(secondLoads, 1, '恢复后只取一次')
   app.unmount()
   await tick()
+})
+
+test('A11/A02 换身份后首查又失败：args 跟着换到新身份（同一版去重按身份划界）', async () => {
+  let api!: RefreshHandle<{ symbol: string }, number>
+  const manager = newManager(1, async () => { throw new Error('首查失败') })
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/281', { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value !== null, '首查就失败也要上屏（data 为 null）')
+  const first: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
+  assert.equal(first?.args.symbol, 'A')
+  assert.equal(first?.updatedAt, null, '从未成功过：两个出口的时间都是 null')
+
+  // 换身份之后这一格同样从未成功：`updatedAt` 还是 null，但它**不是**同一版，args 必须跟着换。
+  api.submit({ symbol: 'B' })
+  await until(() => api.display.value?.args.symbol === 'B', '换身份后 args 跟着换（不能拿「两个 null 相等」当同一版）')
+  app.unmount()
+  await tick()
+})
+
+test('A12/A06 发布期间换身份：读取面重新订上新身份的格（同步 failure watcher 里换身份）', async () => {
+  let api!: RefreshHandle<{ symbol: string }, number>
+  let failA = false
+  let loads = 0
+  const manager = newManager(2, async (_url, body) => {
+    if ((body as { symbol: string }).symbol === 'A' && failA) throw new Error('A 失败')
+    loads += 1
+    return loads
+  })
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/282', { enabled: ref(true), every: ref(20) })
+      // 页面在失败出口上换到备用身份：这一次发布是同步的，换身份就发生在发布当中。
+      watch(api.failure, () => { if (api.failure.value !== null) api.submit({ symbol: 'B' }) }, { flush: 'sync' })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value?.data === 1, 'A 先成功一版')
+  failA = true
+  api.refresh()
+  // 新身份必须**实际交付**：请求换成了 B 还不算，画面也得跟上（否则读取面永久停在 A）。
+  await until(() => api.display.value?.args.symbol === 'B', '换身份后读取面重新订上新身份的格')
+  app.unmount()
+  await tick()
+})
+
+test('A12/A06 发布期间换身份：display watcher 里换身份同样收敛到新身份', async () => {
+  let api!: RefreshHandle<{ symbol: string }, number>
+  let switched = false
+  let loads = 0
+  const manager = newManager(2, async (_url, body) => {
+    loads += 1
+    return (body as { symbol: string }).symbol === 'A' ? 1 : 100 + loads
+  })
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/283', { enabled: ref(true), every: ref(20) })
+      watch(api.display, () => {
+        const shown = api.display.value
+        if (!switched && shown?.args.symbol === 'A' && shown.data === 1) {
+          switched = true
+          api.submit({ symbol: 'B' })
+        }
+      }, { flush: 'sync' })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value?.args.symbol === 'B', '在数据出口里换身份之后同样收敛到新身份')
+  app.unmount()
+  await tick()
+})
+
+test('A12/A17 发布期间卸载：释放之后不再把过期的那一版上屏', async () => {
+  let unmount: (() => void) | null = null
+  let api!: RefreshHandle<{ id: number }, number>
+  const manager = newManager(1, async () => { throw new Error('首查失败') })
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ id: number }, number>('/api/vue/284', { enabled: ref(true), every: ref(100_000) })
+      // 失败出口发布的那一刻同步卸载整棵应用：这一次的 args 已经过期，不能再写进画面。
+      watch(api.failure, () => { if (api.failure.value !== null) unmount?.() }, { flush: 'sync' })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  unmount = () => app.unmount()
+  await tick()
+
+  api.submit({ id: 1 })
+  await tick()
+  await sleep(20)
+  const after: RefreshDisplay<{ id: number }, number> | null = api.display.value
+  assert.equal(after, null, '卸载发生在发布期间：这一版不再写进画面')
 })

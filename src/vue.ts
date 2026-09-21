@@ -1,5 +1,5 @@
 import {
-  getCurrentInstance, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, watch, watchEffect,
+  getCurrentInstance, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, triggerRef, watch, watchEffect,
 } from 'vue'
 import type { Pinia } from 'pinia'
 import { RefreshCore } from './core.ts'
@@ -71,11 +71,15 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   const failure = shallowRef<RefreshFailure | null>(null)
   /** 上次读取时间（`ResultCell.updatedAt`）；`null` ＝ 还没有读取过，下一份数据直接读。 */
   let lastReadAt: number | null = null
+  /** 数据出口里那一版属于哪个身份；失败出口里那一笔属于哪个身份。**换身份后同一个时间戳不算「同一版」**
+   * （两个从未成功的格 `updatedAt` 都是 `null`，只比时间会把新身份的 args 挡在外面）。 */
+  let shownKey: string | null = null
+  let failedKey: string | null = null
 
-  /** 数据出口：同一版不抄第二遍，只发布窗口已到的那一版。 */
+  /** 数据出口：**同一身份**的同一版不抄第二遍，只发布窗口已到的那一版。 */
   const publishData = (cell: ResultCell, parameters: Parameters): void => {
     const shown = display.value
-    if (shown !== null && cell.updatedAt === shown.updatedAt) return
+    if (shown !== null && shownKey === parameters.key && cell.updatedAt === shown.updatedAt) return
     // 窗口没到就不换画面；没有可比的时间（从未成功、或本页还没读到过）直接读。
     const every = config.every
     if (lastReadAt !== null && every !== null
@@ -86,15 +90,21 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       data: cell.updatedAt === null ? null : cell.data as ReadonlySnapshot<T>,
       updatedAt: cell.updatedAt,
     }
+    shownKey = parameters.key
     lastReadAt = cell.updatedAt
   }
 
   /** 失败出口：这一格换了一笔新的失败就立刻发布，成功就清回 `null`。 */
-  const publishFailure = (cell: ResultCell): void => {
+  const publishFailure = (cell: ResultCell, key: string): void => {
     const shown = failure.value
-    if (cell.failedAt === null ? shown === null : shown !== null && shown.failedAt === cell.failedAt) return
+    if (failedKey === key && (cell.failedAt === null ? shown === null : shown !== null && shown.failedAt === cell.failedAt)) return
+    failedKey = key
     failure.value = cell.failedAt === null ? null : { error: cell.error, failedAt: cell.failedAt }
   }
+
+  /** 发布期间换了身份（或这一页被释放）时本轮快照已过期：下一拍强制唤醒读取面一次。
+   * 正在运行的副作用不会被自己触发的变更唤醒，因此新身份那一格的依赖必须靠这一下重新订上。 */
+  const rebind = (): void => { queueMicrotask(() => { triggerRef(submitted) }) }
 
   watchEffect(() => {
     // 先读安装槽：它同时是这个副作用唯一的失效信号。
@@ -105,6 +115,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       display.value = null
       failure.value = null
       lastReadAt = null
+      shownKey = null
+      failedKey = null
       return
     }
     // 还没提交过：没有可抄的格，也没有依赖可登记。
@@ -117,8 +129,11 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     // 第二项问「浏览器可见」：读 DOM 而不是上面那个 ref，否则这一读会被登记成依赖，
     // 「恢复可见那一刻就把表里已有的新版本上屏」会顶掉既有口径（重新成为读者要等下一份写入）。
     if (!bound.isEligible(config, url, params.key) && !(lastReadAt === null && !document.hidden)) return
-    publishFailure(cell)
+    publishFailure(cell, params.key)
+    // 发布是同步的：页面 watcher 可能就在上面那一步里换了身份或卸载，本轮快照随即过期。
+    if (submitted.value !== params) { rebind(); return }
     publishData(cell, params)
+    if (submitted.value !== params) rebind()
   }, { flush: 'sync' })
 
   /** 这一页是否挂载/激活（KeepAlive 失活为假）。 */
