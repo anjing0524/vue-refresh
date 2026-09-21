@@ -14,7 +14,8 @@ export type SubmitResult =
   | { readonly status: 'rejected'; readonly error: unknown }
   | { readonly status: 'cancelled' }
 
-/** 数据读出口：`args`、`data` 与 `updatedAt` 同次整体发布，只装最后一次成功那一版。 */
+/** 数据读出口：`args`、`data` 与 `updatedAt` 同次整体发布，只装最后一次成功那一版。
+ * 来源是结果表格（`ResultCell`）成功对的投影，另加每页一份 `args` 副本。 */
 export interface RefreshDisplay<P extends object, T> {
   /** 本次发布对应的参数副本。 */
   readonly args: ReadonlySnapshot<P>
@@ -23,7 +24,8 @@ export interface RefreshDisplay<P extends object, T> {
   readonly updatedAt: number | null
 }
 
-/** 失败读出口：最近一次失败的原始异常与发生时刻；`null` ＝ 自最后一次成功以来没失败过。 */
+/** 失败读出口：最近一次失败的原始异常与发生时刻；`null` ＝ 自最后一次成功以来没失败过。
+ * 来源是结果表格（`ResultCell`）失败对的投影。 */
 export interface RefreshFailure {
   /** 最近一次失败的原始异常，原样带出。 */
   readonly error: unknown
@@ -35,7 +37,8 @@ export interface RefreshFailure {
 export interface RefreshOptions {
   /** 唯一开启意愿。框架只读取它，从不写入。 */
   readonly enabled: Ref<boolean>
-  /** 刷新间隔（毫秒），只接受正安全整数。它同时是取数间隔与本页读结果表的节流间隔。 */
+  /** 刷新间隔（毫秒），只接受正安全整数。它同时是取数间隔与本页读结果表的节流间隔——
+   *  两个用途取自同一个值但各计各的：取数到期＝最近结算时刻＋周期，读取窗口＝画面那一版的 `updatedAt`＋周期。 */
   readonly every: Ref<number>
 }
 

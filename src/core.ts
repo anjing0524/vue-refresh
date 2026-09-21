@@ -1,5 +1,6 @@
 import type { SubmitResult } from './public-types.ts'
 import type { Parameters } from './source.ts'
+import { identityOf } from './source.ts'
 import { Resource, type Config } from './resource.ts'
 
 /** 共享取数与调度核心：三件跨实例的事——身份注册表、待取队列与在途集合、唯一唤醒 Timer
@@ -7,7 +8,8 @@ import { Resource, type Config } from './resource.ts'
 
 /** 结果表的一格：最后一次成功 ＋ 最近一次失败，四个字段全平。
  * `updatedAt === null` ⟺ 从未成功过；`failedAt === null` ⟺ 自最后一次成功以来没失败过。
- * 只有整格是新对象这一件事代表「变过」。 */
+ * 只有整格是新对象这一件事代表「变过」。
+ * 两个公共出口都是它的投影：`RefreshDisplay` ＝ 成功对（另加每页一份 `args` 副本），`RefreshFailure` ＝ 失败对。 */
 export interface ResultCell {
   readonly data: unknown
   readonly updatedAt: number | null
@@ -28,17 +30,6 @@ export interface ResultSink {
 
 /** `setTimeout` 的平台上限（约 24.8 天）；更远的到期分段等待。 */
 const MAX_TIMER_DELAY = 2_147_483_647
-
-/** 身份键 `URL ＋ 参数值稳定键` 的字面形式（NUL 分隔）。注册表与结果表共用这一个键。 */
-export function identityOf(url: string, key: string): string {
-  return `${url}\u0000${key}`
-}
-
-/** 身份键拆回两级（`store.list()` 用）：分隔符取最后一个 NUL——键里的 NUL 一定被 JSON 编码转义，URL 里可能有。 */
-export function splitIdentity(identity: string): { readonly url: string; readonly key: string } {
-  const sep = identity.lastIndexOf('\u0000')
-  return { url: identity.slice(0, sep), key: identity.slice(sep + 1) }
-}
 
 /** 结果边界：拒绝 `undefined`，其余原生复制。 */
 function copyResult(input: unknown): unknown {
@@ -81,11 +72,14 @@ export class RefreshCore {
     return this.disposed
   }
 
-  /** 把这一页的配置写进它自己那份槽并重排调度；三个值非法时只把 `every` 置 `null`（＝这一拍配置非法）。 */
+  /** 把这一页的配置写进它自己那份槽并重排调度；任一值非法时**整组**置无效（`every ＝ null` 即本拍无资格，
+   * `enabled`／`present` 一并清回初始值，让下一拍合法写入不必依赖「旧值恰好也无效」这一隐含前提）。 */
   setConfig(config: Config, enabled: unknown, every: unknown, present: boolean): void {
     if (this.disposed) return
     if (typeof enabled !== 'boolean' || typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) {
+      config.enabled = false
       config.every = null
+      config.present = false
     } else {
       config.enabled = enabled
       config.every = every
@@ -130,7 +124,7 @@ export class RefreshCore {
     if (this.disposed) return false
     const resource = this.identities.get(identityOf(url, key))
     if (resource === undefined) return false
-    if (!resource.isPresent(config)) return false
+    if (!resource.isPresentAndValid(config)) return false
 
     if (!resource.hasExecution()) this.enqueue(resource, true)
     // 结果已经产出了才需要「再来一轮」；还没产出的话本轮结果就够。

@@ -4,20 +4,30 @@ import type { Parameters } from './source.ts'
  * 它不持有核心、也不持有页面。 */
 
 /** 一页报给核心的配置快照，同时就是这一页在核心里的登记。`every === null` ＝ 这一拍配置非法；
- * `present` ＝ 环境允许（这一页激活且浏览器可见，由适配层合成后报进来）。 */
+ * `present` ＝ 环境允许（这一页激活且浏览器可见，由适配层合成后报进来）。
+ * 注意：它**不是**调用方传入的 `RefreshOptions`——那是两个 `Ref` 的源头配置；本接口是核心持有的登记槽，
+ * 适配层原地写、核心只读（ADR-66）。 */
 export interface Config {
   enabled: boolean
   every: number | null
   present: boolean
 }
 
-/** 一个「URL ＋ 参数值」的共享实例：这个身份的全部状态与判定。 */
+/** 一个**身份**（`URL ＋ 参数值`）的全部状态与判定：声明者、这一轮的结果产出了没有、到期与当前执行。
+ * 它不持有核心、也不持有页面；不是 URL 本身（URL 只是身份的一半），也不是网络资源。 */
 export class Resource {
   /** 取数 URL：身份的一半，也是结果表分区的第一级。 */
   readonly url: string
   readonly parameters: Parameters
   /** 声明了本身份的配置（页面挂载期间一直算，暂停、失活、隐藏都不撤销）。 */
   readonly declarers = new Set<Config>()
+  /** 「一次执行」由 `controller`／`produced`／`needsNext` 三个位联合表达（ADR-65 不设独立执行对象、
+   *  ADR-70 不把两个布尔并成三态字段），合法组合与迁移点如下——读这三个位之前先对齐这张表：
+   *  ① `controller === null`（无执行）⟹ `produced`／`needsNext` 必为 `false`；
+   *  ② `controller !== null && !produced`：在队或在跑、结果还没产出（刷新命令落「用这一轮」分支）；
+   *  ③ `controller !== null && produced`：结算到收尾之间（刷新命令落「补一轮」分支，置 `needsNext`）。
+   *  迁移点各只有几处：`enqueue` 建把手；`settle` 置 `produced`；`core.refresh` 只在 ③ 上置 `needsNext`；
+   *  `run` 的 finally 清 `controller`／`produced` 并消费 `needsNext`；`releaseIfUnused` 清 `controller`／`needsNext`。 */
   /** 这一轮的结果已经产出了没有（写表之前置起、一轮结束时清掉）。 */
   produced = false
   /** 产出之后又有人点过刷新：本轮结束后再排一次。 */
@@ -32,8 +42,9 @@ export class Resource {
     this.parameters = parameters
   }
 
-  /** 环境允许：配置有效且这一页报的环境允许（与「开启意愿」是两件事）。 */
-  isPresent(config: Config): boolean {
+  /** 环境允许且配置有效（`refresh` 的入口闸口径）：`every !== null` 是周期有效，`config.present` 是环境允许。
+   *  名字带 `AndValid` 是明说：它比字段 `present` 多判一项「配置有效」，两者不是同一个概念（§0.4／§3 U14）。 */
+  isPresentAndValid(config: Config): boolean {
     return config.every !== null && config.present
   }
 
@@ -54,7 +65,7 @@ export class Resource {
 
   /** 一个声明者此刻是否有资格取数：环境允许 ＋ 开启意愿为真。 */
   isEligible(config: Config): boolean {
-    return this.isPresent(config) && config.enabled
+    return this.isPresentAndValid(config) && config.enabled
   }
 
   /** 有效间隔现算：有资格的声明者里最小的 `every`；没有就是 `Infinity`。 */

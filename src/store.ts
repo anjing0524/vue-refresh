@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { shallowRef } from 'vue'
 import type { ShallowRef } from 'vue'
-import { identityOf, splitIdentity } from './core.ts'
+import { identityOf, splitIdentity } from './source.ts'
 import type { ResultCell } from './core.ts'
 
 /**
@@ -13,7 +13,9 @@ import type { ResultCell } from './core.ts'
 export const useRefreshStore = defineStore('vue-refresh', () => {
   const cells = new Map<string, ShallowRef<ResultCell | undefined>>()
 
-  /** 取或建对应 cell ref；首次建时是 `undefined`。 */
+  /** 取或建对应 cell ref；首次建时是 `undefined`。
+   *  **建不只发生在写入侧**：`read` 也走这里——读取副作用必须在首次写入之前就订阅上这一格的 ref，
+   *  后台第一笔写入才唤得醒它；没有已声明就没有结果，所以键数仍随活跃身份收敛（ADR-90）。 */
   const refOf = (url: string, key: string): ShallowRef<ResultCell | undefined> => {
     const k = identityOf(url, key)
     let ref = cells.get(k)
@@ -41,6 +43,7 @@ export const useRefreshStore = defineStore('vue-refresh', () => {
     cells.delete(identityOf(url, key))
   }
 
+  /** 读这一格；没建过就先建（订阅前提，见 `refOf` 的说明）。 */
   const read = (url: string, key: string): ResultCell | undefined => refOf(url, key).value
 
   /** 表里实际有多少格（含已建 ref 但还没写过值的）；给观测面与基准看，不是包契约。 */

@@ -43,7 +43,7 @@ function fakeHttp(post: FakePost): RefreshHttp {
 const managers: RefreshManager[] = []
 /** 每个用例一个 Pinia 实例：结果表挂在它上面，用例之间因此互不可见。 */
 function newManager(maxConcurrent: number, post: FakePost = async () => undefined): RefreshManager {
-  const manager = createRefreshManager({ maxConcurrent, axios: fakeHttp(post), pinia: createPinia() })
+  const manager = createRefreshManager({ maxConcurrent, http: fakeHttp(post), pinia: createPinia() })
   managers.push(manager)
   return manager
 }
@@ -57,7 +57,7 @@ function newManagerWithStore(maxConcurrent: number, post: FakePost = async () =>
   readonly store: ReturnType<typeof useRefreshStore>
 } {
   const pinia = createPinia()
-  const manager = createRefreshManager({ maxConcurrent, axios: fakeHttp(post), pinia })
+  const manager = createRefreshManager({ maxConcurrent, http: fakeHttp(post), pinia })
   managers.push(manager)
   return { manager, store: useRefreshStore(pinia) }
 }

@@ -49,3 +49,14 @@ export function prepareParameters(input: object): Parameters {
   if (key === null) throw new TypeError('参数无法稳定编码：存在循环引用或无法序列化的值')
   return { args, key }
 }
+
+/** 身份键 `URL ＋ 参数值稳定键` 的字面形式（NUL 分隔）。注册表与结果表共用这一个键。 */
+export function identityOf(url: string, key: string): string {
+  return `${url}\u0000${key}`
+}
+
+/** 身份键拆回两级（`store.list()` 用）：分隔符取最后一个 NUL——键里的 NUL 一定被 JSON 编码转义，URL 里可能有。 */
+export function splitIdentity(identity: string): { readonly url: string; readonly key: string } {
+  const sep = identity.lastIndexOf('\u0000')
+  return { url: identity.slice(0, sep), key: identity.slice(sep + 1) }
+}

@@ -40,6 +40,7 @@ const QuoteCard = defineComponent({
 
     return () => {
       const display = task.display.value
+      const failure = task.failure.value
       // 首查就失败时 display 不是 null，而是 `data: null`：空态只看 data，失败在 `task.failure` 上。
       const data = display?.data ?? null
       return h('section', { class: 'card', 'data-testid': 'qp-card' }, [
@@ -52,6 +53,10 @@ const QuoteCard = defineComponent({
           : '已提交参数：尚未交付'),
         h('p', { 'data-testid': 'qp-submits' }, `提交次数：${submits}`),
         h('p', { 'data-testid': 'qp-failures' }, `后台失败次数：${failures.value}`),
+        // 失败出口的 `failedAt`：画面级消费它（相对时间按 U16/§2.5 的建议把差值钳制到 0）。
+        h('p', { 'data-testid': 'qp-last-failure' }, failure !== null
+          ? `最近失败：${ageLine(failure.failedAt)}（failedAt ${failure.failedAt}）`
+          : '最近失败：无'),
         h('p', { 'data-testid': 'qp-note' }, failures.value > 0 ? '后台失败不关闭需求：保留开启意愿，下个周期继续' : ''),
       ])
     }

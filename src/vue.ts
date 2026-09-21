@@ -1,5 +1,5 @@
 import {
-  getCurrentInstance, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, triggerRef, watch, watchEffect,
+  getCurrentInstance, onActivated, onDeactivated, onMounted, onScopeDispose, shallowRef, watch, watchEffect,
 } from 'vue'
 import type { Pinia } from 'pinia'
 import { RefreshCore } from './core.ts'
@@ -20,7 +20,9 @@ import type {
  */
 const installed = shallowRef<RefreshCore | null>(null)
 
-/** 浏览器此刻是否可见：唯一的写入点是安装与可见性监听；配置 watcher 依赖它重排调度。 */
+/** 浏览器此刻是否可见：唯一的写入点是安装与可见性监听；配置 watcher 依赖它重排调度。
+ * 它是 **watcher 的依赖源**；读闸门 `canRead` 不读它、直读 `document.hidden`（避免把可见性登记成依赖）——
+ * 同一事实的两种取用方式，改这里时两处要一起想。 */
 const visible = shallowRef(true)
 
 /** 读此刻活着的协调者；页面入口与演示面板、基准脚本共用这一个读点。 */
@@ -55,8 +57,12 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   /** 这一页在核心里的全部内容：一页一份配置快照，按身份挂在实例的 `declarers` 里。 */
   const config: Config = { enabled: false, every: null, present: false }
 
-  /** 本页已提交的声明（身份键 ＋ 参数副本）；`null` ＝ 还没提交过。 */
+  /** 本页已提交的声明（身份键 ＋ 参数副本）；`null` ＝ 还没提交过。只装数据，不作事件总线用。 */
   const submitted = shallowRef<Parameters | null>(null)
+
+  /** 读取面的显式唤醒信号：`wakeReader()` 在下一拍递增它，让读取副作用重跑一次。
+   * 与 `submitted` 分工：后者是「当前声明是什么」的数据，值不变也要重读的场合归这里。 */
+  const readTick = shallowRef(0)
 
   /** 这一页是否已被释放；释放后 `submit`／`refresh` 一概不产生事实。 */
   let released = false
@@ -65,54 +71,82 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   const display = shallowRef<RefreshDisplay<P, T> | null>(null)
   /** 本页看到的最近一次失败；与数据同一个来源，但不参与数据窗口。`null` ＝ 没有失败。 */
   const failure = shallowRef<RefreshFailure | null>(null)
-  /** 上次读取时间（`ResultCell.updatedAt`）；`null` ＝ 还没有读取过，下一份数据直接读。 */
-  let lastReadAt: number | null = null
-  /** 数据出口里那一版属于哪个身份；失败出口里那一笔属于哪个身份。**换身份后同一个时间戳不算「同一版」**
-   * （两个从未成功的格 `updatedAt` 都是 `null`，只比时间会把新身份的 args 挡在外面）。 */
-  let shownKey: string | null = null
-  let failedKey: string | null = null
+  /** 读取面的「上一帧」账本（三个事实集中一处，重置只有下面两个具名入口）：
+   *  数据出口那一版的身份与基准、失败出口那一笔的身份。
+   *  `dataBaseline` 就是 §0.5 的「读取基准」：上一份抄进 `display` 那一版的 `updatedAt`，`null` ＝ 下一份数据直接读。
+   *  它与 `display.updatedAt` 是同一事实的两份，只在「基准被置空、画面保留最后一帧」（三处不等窗口）时分叉。
+   *  **换身份后同一个时间戳不算「同一版」**（两个从未成功的格 `updatedAt` 都是 `null`，只比时间会把新身份的 args 挡在外面）。 */
+  const readState: {
+    dataIdentity: string | null
+    dataBaseline: number | null
+    failureIdentity: string | null
+  } = { dataIdentity: null, dataBaseline: null, failureIdentity: null }
 
-  /** 数据出口：**同一身份**的同一版不抄第二遍，只发布窗口已到的那一版。 */
+  /** 基准置空：三处不等窗口（身份落定、重新成为读者、显式 `refresh()`）共用——下一份数据直接读，不比对窗口。 */
+  const resetBaseline = (): void => {
+    readState.dataBaseline = null
+  }
+
+  /** 账本整组重置：协调者退场、两个出口一起清回 `null` 时用。 */
+  const resetReadState = (): void => {
+    readState.dataIdentity = null
+    readState.dataBaseline = null
+    readState.failureIdentity = null
+  }
+
+  /** 数据出口：**同一身份**的同一版不抄第二遍，只发布窗口已到的那一版。
+   *  第一个守卫比的是**画面那一版**（`shown.updatedAt`）而不是基准：基准刚被置空时画面还留着旧帧，
+   *  此时同一版不得重发（U12「同一身份同一版不发布第二遍」）；第二个守卫才比基准（窗口）。 */
   const publishData = (cell: ResultCell, parameters: Parameters): void => {
     const shown = display.value
-    if (shown !== null && shownKey === parameters.key && cell.updatedAt === shown.updatedAt) return
+    if (shown !== null && readState.dataIdentity === parameters.key && cell.updatedAt === shown.updatedAt) return
     // 窗口没到就不换画面；没有可比的时间（从未成功、或本页还没读到过）直接读。
     const every = config.every
-    if (lastReadAt !== null && every !== null
+    if (readState.dataBaseline !== null && every !== null
       && cell.updatedAt !== null
-      && lastReadAt + every > cell.updatedAt) return
+      && readState.dataBaseline + every > cell.updatedAt) return
     display.value = {
       args: structuredClone(parameters.args) as unknown as ReadonlySnapshot<P>,
       data: cell.updatedAt === null ? null : cell.data as ReadonlySnapshot<T>,
       updatedAt: cell.updatedAt,
     }
-    shownKey = parameters.key
-    lastReadAt = cell.updatedAt
+    readState.dataIdentity = parameters.key
+    readState.dataBaseline = cell.updatedAt
   }
 
   /** 失败出口：这一格换了一笔新的失败就立刻发布，成功就清回 `null`。 */
   const publishFailure = (cell: ResultCell, key: string): void => {
     const shown = failure.value
-    if (failedKey === key && (cell.failedAt === null ? shown === null : shown !== null && shown.failedAt === cell.failedAt)) return
-    failedKey = key
+    if (readState.failureIdentity === key && (cell.failedAt === null ? shown === null : shown !== null && shown.failedAt === cell.failedAt)) return
+    readState.failureIdentity = key
     failure.value = cell.failedAt === null ? null : { error: cell.error, failedAt: cell.failedAt }
   }
 
-  /** 强制唤醒读取面一次（下一拍）。两处用它：发布期间换了身份（或这一页被释放）时要重新订上新身份
-   * 那一格的依赖；重新成为读者时要立刻读回该身份当前那一版。正在运行的副作用不会被自己触发的变更唤醒。 */
-  const wakeReader = (): void => { queueMicrotask(() => { triggerRef(submitted) }) }
+  /** 取数资格（§0.4 的「资格」，四组输入的合取；「声明还在」由实例存在蕴含）。
+   *  具名判定让读闸门与配置边沿检测各自引用同一句口径，不再各自展开。 */
+  const canPoll = (core: RefreshCore, key: string): boolean => core.isEligible(config, url, key)
+
+  /** 读者资格（§0.5 的「读者」）：有资格，或还没读取过且浏览器可见。
+   *  问「浏览器可见」读 DOM 而不是 `visible` 那个 ref，否则这一读会被登记成依赖，
+   *  「恢复可见那一刻就把表里已有的新版本上屏」会顶掉既有口径（重新成为读者要等下一份写入）。 */
+  const canRead = (core: RefreshCore, key: string): boolean =>
+    canPoll(core, key) || (readState.dataBaseline === null && !document.hidden)
+
+  /** 唤醒读取面一次（下一拍，走独立的信号通道）。两处用它：发布期间换了身份（或这一页被释放）时要
+   *  重新订上新身份那一格的依赖；重新成为读者时要立刻读回该身份当前那一版。
+   *  正在运行的副作用不会被自己触发的变更唤醒。 */
+  const wakeReader = (): void => { queueMicrotask(() => { readTick.value++ }) }
 
   watchEffect(() => {
-    // 先读安装槽：它同时是这个副作用唯一的失效信号。
+    // 先读唤醒信号与安装槽：前者是 `wakeReader()` 的落点，后者是协调者退场的失效信号。
+    void readTick.value
     const bound = installed.value
     const params = submitted.value
-    // 没有协调者：两个出口一起清回 `null`。
+    // 没有协调者：两个出口一起清回 `null`，账本整组重置。
     if (bound === null) {
       display.value = null
       failure.value = null
-      lastReadAt = null
-      shownKey = null
-      failedKey = null
+      resetReadState()
       return
     }
     // 还没提交过：没有可抄的格，也没有依赖可登记。
@@ -121,10 +155,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     const cell = bound.readResult(url, params.key)
     // 没有写过这一格：画面停在上一帧。
     if (cell === undefined) return
-    // 读闸门：有资格，或还没读取过且浏览器可见。
-    // 第二项问「浏览器可见」：读 DOM 而不是上面那个 ref，否则这一读会被登记成依赖，
-    // 「恢复可见那一刻就把表里已有的新版本上屏」会顶掉既有口径（重新成为读者要等下一份写入）。
-    if (!bound.isEligible(config, url, params.key) && !(lastReadAt === null && !document.hidden)) return
+    // 读闸门（读者资格）：有资格，或还没读取过且浏览器可见（见 `canRead` 的注释）。
+    if (!canRead(bound, params.key)) return
     publishFailure(cell, params.key)
     // 发布是同步的：页面 watcher 可能就在上面那一步里换了身份或卸载，本轮快照随即过期。
     if (submitted.value !== params) { wakeReader(); return }
@@ -141,15 +173,15 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     next => {
       const key = submitted.value?.key ?? null
       // 先按**旧**配置问一句资格：本页配置槽的唯一写入口就在下一行，核心此刻手里还是旧值。
-      const before = key !== null && next.core?.isEligible(config, url, key) === true
+      const before = key !== null && next.core !== null && canPoll(next.core, key)
       if (next.core !== null) next.core.setConfig(config, next.enabled, next.every, next.present)
       const viewer = currentCore()
-      const after = key !== null && viewer !== null && viewer.isEligible(config, url, key)
+      const after = key !== null && viewer !== null && canPoll(viewer, key)
       // 只有「之前没资格、现在有资格」这一条边是 U12 的「重新成为读者」：把读取基准置空，并唤醒读取面
       // 立刻读回该身份**当前**那一版（后台更新过的最新数据），而不是停在失活前那一帧。
       // 同一份配置内的变化（改频率、改可见性）只重排调度，不动基准——否则它们会白白放行一次窗口。
       if (after && !before) {
-        lastReadAt = null
+        resetBaseline()
         wakeReader()
       }
     },
@@ -184,7 +216,7 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       if (result.status === 'accepted') {
         // 新身份的第一份内容不等窗口；相同身份重复声明幂等（核心那一侧不摘不挂），不动读取基准。
         const previous = submitted.value
-        if (previous === null || previous.key !== parameters.key) lastReadAt = null
+        if (previous === null || previous.key !== parameters.key) resetBaseline()
         submitted.value = parameters
       }
       return result
@@ -195,22 +227,22 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       const params = submitted.value
       if (params === null) return
       // 显式刷新不等窗口：清掉读取基准，数据一到就抄。
-      if (bound.refresh(config, url, params.key)) lastReadAt = null
+      if (bound.refresh(config, url, params.key)) resetBaseline()
     },
   }
 }
 
-/** 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限，`axios` 是取数实例，`pinia` 承载结果表。 */
+/** 创建应用级协调者：`maxConcurrent` 是共享请求的并发上限，`http` 是取数传输（只需要 `post`，接入方通常传自己的 axios 实例），`pinia` 承载结果表。 */
 export function createRefreshManager(options: {
   readonly maxConcurrent: number
-  readonly axios: RefreshHttp
+  readonly http: RefreshHttp
   readonly pinia: Pinia
 }): RefreshManager {
   if (!Number.isSafeInteger(options.maxConcurrent) || options.maxConcurrent < 1) {
     throw new TypeError('maxConcurrent 必须是正安全整数')
   }
   // 结果表的四个动作签名与核心的端口一致，直接把 store 交进去。
-  const core = new RefreshCore(options.maxConcurrent, options.axios, useRefreshStore(options.pinia))
+  const core = new RefreshCore(options.maxConcurrent, options.http, useRefreshStore(options.pinia))
   /** 摘掉可见性监听。 */
   let stopWatchingVisibility: (() => void) | null = null
 
