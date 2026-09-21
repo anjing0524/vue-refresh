@@ -1171,3 +1171,32 @@ test('边界总账：运行期失败只走返回值或结果表这一格，公�
   assert.doesNotThrow(() => { view.refresh() })
   assert.equal(snapshot(core).resources.length, 0, '未声明身份的刷新不产生实例或请求')
 })
+
+test('A06/A09 失去资格只挡新入队：已经排上的那次取数照常走完', async () => {
+  const started: number[] = []
+  const resolvers: Array<() => void> = []
+  const core = newCore(1, async (_url, body) => {
+    started.push((body as { id: number }).id)
+    await new Promise<void>(resolve => { resolvers.push(resolve) })
+    return (body as { id: number }).id
+  })
+  const source = '/api/core/602'
+  const first = page(core, source)
+  const second = page(core, source)
+  first.submit({ id: 1 })
+  second.submit({ id: 2 })
+  await settle()
+  assert.deepEqual(started, [1], '一号在途、二号在队（并发上限 1）')
+
+  // 两页同时失去环境（＝ 浏览器隐藏）：资格只在入队时判定，已经排上的那次照常走完。
+  first.set({ present: false })
+  second.set({ present: false })
+  await settle()
+  assert.deepEqual(started, [1], '失去资格期间不新入队、也不提前启动')
+  resolvers[0]?.()
+  await settle()
+  assert.deepEqual(started, [1, 2], '槽位空出后，队列里那一次照常发出')
+  resolvers[1]?.()
+  await settle()
+  core.dispose()
+})

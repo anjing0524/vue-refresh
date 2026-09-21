@@ -1025,3 +1025,30 @@ test('A21 改频率只重排调度、不放行窗口：同一份配置内的变�
   app.unmount()
   await tick()
 })
+
+test('A11/A12 同一身份同一版不抄第二遍：同一格没换版本就不换画面对象', async () => {
+  let api!: RefreshHandle<{ symbol: string }, number>
+  let loads = 0
+  const manager = newManager(1, async () => { loads += 1; throw new Error('首查失败') })
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/287', { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value !== null, '首查失败也上屏（data 为 null、updatedAt 为 null）')
+  const shown: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
+
+  // 这一格是「从未成功」：窗口没有可比的时间，只有「同一版不抄第二遍」挡得住重复发布。
+  api.submit({ symbol: 'A' })
+  await tick()
+  await sleep(20)
+  assert.equal(api.display.value, shown, '同一身份同一版不抄第二遍：画面对象保持不变')
+  assert.equal(loads, 1, '重复声明不额外取数：这一格每 100 秒才到下一次')
+  app.unmount()
+  await tick()
+})
