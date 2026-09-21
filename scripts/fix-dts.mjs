@@ -6,10 +6,8 @@
 // resolves `./app.js` to the sibling `./app.d.ts`, which is exactly the emitted file. Nothing points
 // at a `dist/app.js` at runtime, because the bundle is the only emitted JavaScript.
 //
-// The published shape is asserted here rather than in `check:docs`: this script only ever sees a
-// freshly emitted `dist/`, so the assertion cannot be fooled by a stale build. `check:docs` keeps
-// the source-side half of the same rule (`export type *` in the entry), which holds regardless of
-// build state.
+// 产物形态就在这里断言：本脚本只看刚生成的 `dist/`，不会被过期的构建骗过。
+// 入口侧的 `export type *` 禁令在源码里守着（TS 5.0+ 才有的语法），与构建状态无关。
 //
 // Usage: node scripts/fix-dts.mjs
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'

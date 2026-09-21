@@ -1,7 +1,6 @@
 // Source-only metrics. Nested functions are measured independently, never twice.
-// Without arguments it prints the measurement as JSON (that is what check-docs consumes).
-// With --write it also rewrites the README metrics row from the same measurement, so the row is
-// never hand-copied: `pnpm complexity --write`.
+// 不带参数时打印 JSON；加 --write 时顺带按同一次测量重写 README 的度量行，
+// 所以那一行永远是机器写的：`pnpm complexity --write`。
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { parse } from '@babel/parser'
