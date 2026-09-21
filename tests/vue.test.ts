@@ -983,3 +983,45 @@ test('A06 结果表的储存随最后声明者离开收敛：换身份不留格�
   await tick()
   assert.equal(store.size(), 0, '最后一个声明者离开：储存键数收敛到 0')
 })
+
+test('A21 改频率只重排调度、不放行窗口：同一份配置内的变化不算重新成为读者', async () => {
+  const everySlow = ref(100_000)
+  let slow!: RefreshHandle<{ symbol: string }, number>
+  let fast!: RefreshHandle<{ symbol: string }, number>
+  let loads = 0
+  const manager = newManager(1, async () => { loads += 1; return loads })
+  const Slow = defineComponent({
+    setup() {
+      slow = useRefresh<{ symbol: string }, number>('/api/vue/286', { enabled: ref(true), every: everySlow })
+      return () => h('div')
+    },
+  })
+  const Fast = defineComponent({
+    setup() {
+      fast = useRefresh<{ symbol: string }, number>('/api/vue/286', { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  })
+  const app = renderer.createApp(defineComponent({ setup: () => () => h('div', [h(Slow), h(Fast)]) }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+
+  slow.submit({ symbol: 'A' })
+  fast.submit({ symbol: 'A' })
+  await until(() => slow.display.value?.data === 1, '两页共享第一版')
+  fast.refresh()
+  await until(() => fast.display.value?.data === 2, '读者拿到第二版')
+  assert.equal(slow.display.value?.data, 1, '它有上次读取时间：窗口内不换画面')
+
+  // 只改频率：这是同一份配置内的变化，不该被当成「重新成为读者」而放行窗口。
+  everySlow.value = 200_000
+  await tick()
+  fast.refresh()
+  await until(() => fast.display.value?.data === 3, '读者拿到第三版')
+  assert.equal(slow.display.value?.data, 1, '改频率之后窗口照新频率，画面不跟着跳')
+
+  // 真正的资格边沿（暂停→开启）仍然放行：下一份写入立即上屏。
+  app.unmount()
+  await tick()
+})

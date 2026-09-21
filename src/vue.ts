@@ -141,12 +141,15 @@ export function useRefresh<P extends JsonParameters<P>, T>(
 
   // 唯一的配置写入口；安装槽也在依赖里，所以换了协调者会重新报一次。非法配置不通知。
   const stopWatching = watch(() => [installed.value, ...readConfig(options, active.value, visible.value)] as const, () => {
+    const key = submitted.value?.key ?? null
+    // 先按**旧**配置问一句资格：本页配置槽的唯一写入口就在下一行，核心此刻手里还是旧值。
+    const before = key !== null && currentCore()?.isEligible(config, url, key) === true
     reportConfig()
-    // 重新成为读者时清掉读取基准，下一份写入就不等窗口；失去资格那一侧不动。
     const viewer = currentCore()
-    if (viewer === null) return
-    const changed = submitted.value
-    if (changed !== null && viewer.isEligible(config, url, changed.key)) lastReadAt = null
+    const after = key !== null && viewer !== null && viewer.isEligible(config, url, key)
+    // 只有「之前没资格、现在有资格」这一条边是 U12 的「重新成为读者」，才把读取基准置空；
+    // 同一份配置内的变化（改频率、改可见性）只重排调度，不动基准——否则它们会白白放行一次窗口。
+    if (after && !before) lastReadAt = null
   }, { flush: 'sync', immediate: true })
 
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。
