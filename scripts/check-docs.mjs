@@ -326,7 +326,7 @@ for (const form of new Set(allForms)) {
 const INTERNAL_FIELDS = ['parameters', 'subscription', 'subscribers', 'declarers', 'waiters',
   'produced', 'needsNext',
   'settledAt', 'entry', 'task', 'controller', 'wakeup', 'flushing', 'cleanup', 'disposed',
-  'visible', 'buckets', 'handles', 'queue', 'running', 'snapshot', 'settle', 'active']
+  'visible', 'buckets', 'handles', 'queue', 'running', 'snapshot', 'settle', 'present']
 for (const field of INTERNAL_FIELDS) {
   check(!vocabulary.includes(field), '统一刷新管理.md §0',
     `§0 states outward meaning only, but names the internal field ${field} (DESIGN §3.3)`)

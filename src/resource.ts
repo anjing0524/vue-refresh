@@ -3,11 +3,12 @@ import type { Parameters } from './source.ts'
 /** 一个身份（`URL ＋ 参数值`）自己的全部状态与判定：声明者、这一轮的结果产出了没有、到期与当前执行。
  * 它不持有核心、也不持有页面。 */
 
-/** 一页报给核心的配置快照，同时就是这一页在核心里的登记。`every === null` ＝ 这一拍配置非法。 */
+/** 一页报给核心的配置快照，同时就是这一页在核心里的登记。`every === null` ＝ 这一拍配置非法；
+ * `present` ＝ 环境允许（这一页激活且浏览器可见，由适配层合成后报进来）。 */
 export interface Config {
   enabled: boolean
   every: number | null
-  active: boolean
+  present: boolean
 }
 
 /** 一个「URL ＋ 参数值」的共享实例：这个身份的全部状态与判定。 */
@@ -31,9 +32,9 @@ export class Resource {
     this.parameters = parameters
   }
 
-  /** 环境允许：这一页激活、配置有效、浏览器可见（与「开启意愿」是两件事）。 */
-  isPresent(config: Config, visible: boolean): boolean {
-    return visible && config.every !== null && config.active
+  /** 环境允许：配置有效且这一页报的环境允许（与「开启意愿」是两件事）。 */
+  isPresent(config: Config): boolean {
+    return config.every !== null && config.present
   }
 
   /** 这个身份此刻有没有执行（在队或在跑）。 */
@@ -52,15 +53,15 @@ export class Resource {
   }
 
   /** 一个声明者此刻是否有资格取数：环境允许 ＋ 开启意愿为真。 */
-  isEligible(config: Config, visible: boolean): boolean {
-    return this.isPresent(config, visible) && config.enabled
+  isEligible(config: Config): boolean {
+    return this.isPresent(config) && config.enabled
   }
 
   /** 有效间隔现算：有资格的声明者里最小的 `every`；没有就是 `Infinity`。 */
-  private eligibleEvery(visible: boolean): number {
+  private eligibleEvery(): number {
     let every = Infinity
     for (const config of this.declarers) {
-      if (!this.isEligible(config, visible)) continue
+      if (!this.isEligible(config)) continue
       const value = config.every
       if (value !== null) every = Math.min(every, value)
     }
@@ -68,8 +69,8 @@ export class Resource {
   }
 
   /** 下次到期时刻：`settledAt ＋ 当前最小间隔`；从未结算过的立即到期；没有有资格的人返回 `Infinity`。 */
-  dueAt(now: number, visible: boolean): number {
-    const every = this.eligibleEvery(visible)
+  dueAt(now: number): number {
+    const every = this.eligibleEvery()
     if (every === Infinity) return Infinity
     return this.settledAt === null ? now : this.settledAt + every
   }

@@ -253,7 +253,7 @@ function mountHarness(): void {
     },
     nestedOuter(shown: boolean) { nestedOuterShown.value = shown },
     // 受控可见性：真实浏览器里覆写 document.hidden 并派发真正的 visibilitychange 事件，
-    // 走的是 vue.ts 安装时注册的那条监听，而不是直接调用核心的 setVisible。
+    // 走的是 vue.ts 安装时注册的那条监听——适配层因此重报每页快照，核心不持有可见性。
     visibility(hidden: boolean) {
       Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden })
       document.dispatchEvent(new Event('visibilitychange'))

@@ -81,9 +81,6 @@ async function measure() {
     props: { identity: { type: Number, required: true } },
     setup(props) {
       core = currentCore()
-      // 本库只服务 SPA：Node 里跑基准要先给出最小浏览器环境，再显式声明可见，
-      // 与 tests/vue.test.ts 的做法一致（自定义渲染器不冒充浏览器可见性测试）。
-      core.setVisible(true)
       const task = useRefresh('/api/benchmark', { enabled: ref(true), every: ref(every) })
       // 失败不再回调推送：交付面出现新的失败时刻时计一次（这是原输出字段 `failures` 的来源）。
       watch(() => task.display.value?.failedAt, failedAt => { if (failedAt !== null) failures += 1 })

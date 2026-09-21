@@ -51,7 +51,7 @@ export interface RefreshHttp {
   post(url: string, data: unknown, config: { readonly signal: AbortSignal }): Promise<{ readonly data: unknown }>
 }
 
-/** 跨身份的协调者：身份注册表、待取队列与在途集合、唯一唤醒 Timer、可见性与销毁。 */
+/** 跨身份的协调者：身份注册表、待取队列与在途集合、唯一唤醒 Timer 与销毁。 */
 export class RefreshCore {
   private readonly maxConcurrent: number
   private readonly http: RefreshHttp
@@ -66,8 +66,6 @@ export class RefreshCore {
   private wakeup: (() => void) | null = null
   /** 已安排、尚未执行的一轮合并调度。 */
   private flushing = false
-  /** 浏览器可见性。 */
-  private visible = true
   private disposed = false
 
   constructor(maxConcurrent: number, http: RefreshHttp, sink: ResultSink) {
@@ -83,26 +81,14 @@ export class RefreshCore {
     return this.disposed
   }
 
-  /** 浏览器此刻是否可见。 */
-  isVisible(): boolean {
-    return this.visible
-  }
-
-  /** 浏览器可见性：隐藏让所有页面失去资格，已经发出的请求不受影响。 */
-  setVisible(visible: boolean): void {
-    if (this.disposed || this.visible === visible) return
-    this.visible = visible
-    this.flushSoon()
-  }
-
   /** 把这一页的配置写进它自己那份槽并重排调度；三个值非法时只把 `every` 置 `null`（＝这一拍配置非法）。 */
-  setConfig(config: Config, enabled: unknown, every: unknown, active: boolean): void {
+  setConfig(config: Config, enabled: unknown, every: unknown, present: boolean): void {
     if (typeof enabled !== 'boolean' || typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) {
       config.every = null
     } else {
       config.enabled = enabled
       config.every = every
-      config.active = active
+      config.present = present
     }
     this.flushSoon()
   }
@@ -143,7 +129,7 @@ export class RefreshCore {
     if (this.disposed) return false
     const resource = this.identities.get(identityOf(url, key))
     if (resource === undefined) return false
-    if (!resource.isPresent(config, this.visible)) return false
+    if (!resource.isPresent(config)) return false
 
     if (!resource.hasExecution()) this.enqueue(resource, true)
     // 结果已经产出了才需要「再来一轮」；还没产出的话本轮结果就够。
@@ -154,7 +140,7 @@ export class RefreshCore {
 
   /** 这一份配置此刻有没有取数资格。 */
   isEligible(config: Config, url: string, key: string): boolean {
-    return this.identities.get(identityOf(url, key))?.isEligible(config, this.visible) ?? false
+    return this.identities.get(identityOf(url, key))?.isEligible(config) ?? false
   }
 
   /** 读这一格的结果；读取面（适配层）用它。 */
@@ -282,7 +268,7 @@ export class RefreshCore {
     let next = Infinity
     for (const resource of [...this.identities.values()]) {
       if (resource.hasExecution()) continue
-      const due = resource.dueAt(now, this.visible)
+      const due = resource.dueAt(now)
       if (due <= now) this.enqueue(resource)
       else next = Math.min(next, due)
     }

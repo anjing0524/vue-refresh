@@ -20,17 +20,21 @@ import type {
  */
 const installed = shallowRef<RefreshCore | null>(null)
 
+/** 浏览器此刻是否可见：唯一的写入点是安装与可见性监听；配置 watcher 依赖它重排调度。 */
+const visible = shallowRef(true)
+
 /** 读此刻活着的协调者；页面入口与演示面板、基准脚本共用这一个读点。 */
 export function currentCore(): RefreshCore | null {
   return installed.value
 }
 
-/** 读这一页的两个 `Ref` ＋ 生命周期；读不出或抛错都回 `[undefined, undefined, active]`。 */
-function readConfig(options: RefreshOptions, active: boolean): readonly [enabled: unknown, every: unknown, active: boolean] {
+/** 读这一页的两个 `Ref` ＋ 生命周期与可见性，合成这一页报给核心的「环境允许」；读不出或抛错都按非法值回。 */
+function readConfig(options: RefreshOptions, active: boolean, shown: boolean): readonly [enabled: unknown, every: unknown, present: boolean] {
+  const present = active && shown
   try {
-    return [options.enabled.value, options.every.value, active]
+    return [options.enabled.value, options.every.value, present]
   } catch {
-    return [undefined, undefined, active]
+    return [undefined, undefined, present]
   }
 }
 
@@ -45,14 +49,14 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   if (installed.value === null) throw new Error('需要先安装一个存活的刷新协调者')
 
   /** 这一页在核心里的全部内容：一页一份配置快照，按身份挂在实例的 `declarers` 里。 */
-  const config: Config = { enabled: false, every: null, active: false }
+  const config: Config = { enabled: false, every: null, present: false }
 
   /** 把配置报给此刻活着的协调者；没有协调者时不写槽、不通知。 */
   const reportConfig = (): void => {
     const viewer = currentCore()
     if (viewer === null) return
-    const [nextEnabled, nextEvery, nextActive] = readConfig(options, active.value)
-    viewer.setConfig(config, nextEnabled, nextEvery, nextActive)
+    const [nextEnabled, nextEvery, nextPresent] = readConfig(options, active.value, visible.value)
+    viewer.setConfig(config, nextEnabled, nextEvery, nextPresent)
   }
 
   /** 本页已提交的声明（身份键 ＋ 参数副本）；`null` ＝ 还没提交过。 */
@@ -110,7 +114,9 @@ export function useRefresh<P extends JsonParameters<P>, T>(
     // 没有写过这一格：画面停在上一帧。
     if (cell === undefined) return
     // 读闸门：有资格，或还没读取过且浏览器可见。
-    if (!bound.isEligible(config, url, params.key) && !(lastReadAt === null && bound.isVisible())) return
+    // 第二项问「浏览器可见」：读 DOM 而不是上面那个 ref，否则这一读会被登记成依赖，
+    // 「恢复可见那一刻就把表里已有的新版本上屏」会顶掉既有口径（重新成为读者要等下一份写入）。
+    if (!bound.isEligible(config, url, params.key) && !(lastReadAt === null && !document.hidden)) return
     publishFailure(cell)
     publishData(cell, params)
   }, { flush: 'sync' })
@@ -119,7 +125,7 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   const active = shallowRef(false)
 
   // 唯一的配置写入口；安装槽也在依赖里，所以换了协调者会重新报一次。非法配置不通知。
-  const stopWatching = watch(() => [installed.value, ...readConfig(options, active.value)] as const, () => {
+  const stopWatching = watch(() => [installed.value, ...readConfig(options, active.value, visible.value)] as const, () => {
     reportConfig()
     // 重新成为读者时清掉读取基准，下一份写入就不等窗口；失去资格那一侧不动。
     const viewer = currentCore()
@@ -203,10 +209,10 @@ export function createRefreshManager(options: {
       installed.value = core
 
       // 浏览器可见性由框架自己监听。
-      const onVisibilityChange = (): void => core.setVisible(!document.hidden)
+      const onVisibilityChange = (): void => { visible.value = !document.hidden }
       document.addEventListener('visibilitychange', onVisibilityChange)
       stopWatchingVisibility = () => document.removeEventListener('visibilitychange', onVisibilityChange)
-      core.setVisible(!document.hidden)
+      visible.value = !document.hidden
       app.onUnmount(() => { uninstall(); core.dispose() })
     },
 

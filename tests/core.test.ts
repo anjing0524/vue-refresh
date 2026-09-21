@@ -88,13 +88,14 @@ afterEach(() => {
 })
 
 /**
- * 配置快照的两项默认值：挂载且激活、开启意愿、超长周期。
+ * 配置快照的默认值：环境允许（这一页激活且浏览器可见）、开启意愿、超长周期。
  *
- * ADR-61 把「这一页是否激活」并进了快照，所以旧契约里 `activate` 那一步现在等价于默认快照里的 `active: true`。
+ * `present` 是**适配层合成**的「环境允许」：ADR-61 起这一页是否激活在快照里，可见性也由适配层并进来
+ * ——核心只读这一份快照，不持有全局可见性。
  */
-const DEFAULT_CONFIG: Config = { enabled: true, every: 100_000, active: true }
+const DEFAULT_CONFIG: Config = { enabled: true, every: 100_000, present: true }
 /** 只给要改的那几项；`null` 表示整份快照非法。 */
-type PartialConfig = { enabled?: boolean; every?: number; active?: boolean }
+type PartialConfig = { enabled?: boolean; every?: number; present?: boolean }
 
 /** 一页：一份配置槽 ＋ 按身份读结果表。与适配层同一分工（ADR-64、ADR-66）。 */
 interface Page {
@@ -126,7 +127,7 @@ function page(
   // 交给核心的只有数据：URL、配置快照与身份（参数准备在提交边界做）——与适配层同一分工（ADR-64、ADR-66）。
   // 资源声明现在就是 URL 字符串本身：没有定义对象、也没有准入回调（ADR-74）。
   const config: Config = initial === null
-    ? { enabled: false, every: null, active: false }
+    ? { enabled: false, every: null, present: false }
     : { ...DEFAULT_CONFIG, ...initial }
   /** 本页已声明身份的副本：页面 → 身份这条映射归调用方（核心只按身份登记，ADR-66）。 */
   let declared: Parameters | null = null
@@ -165,7 +166,7 @@ function page(
     },
     set(next) {
       if (next === null) core.setConfig(config, undefined, undefined, false)
-      else core.setConfig(config, next.enabled ?? config.enabled, next.every ?? config.every, next.active ?? config.active)
+      else core.setConfig(config, next.enabled ?? config.enabled, next.every ?? config.every, next.present ?? config.present)
     },
     get last() {
       if (declared === null) return undefined
@@ -199,7 +200,7 @@ function declared(core: RefreshCore, view: Page): Resource | undefined {
  * 这一页此刻有没有取数资格（环境 ＋ 开启意愿）。
  *
  * 注意这里**只问资格**：ADR-66 把「谁该跟随结果表」的读闸门搬到了适配层
- * （`immediate && isVisible`），核心不再回答那个问题——读闸门的效果由 tests/vue.test.ts 的 A05 用例证明。
+ * （`isEligible` ＋「还没有读取时间且浏览器可见」），核心不再回答那个问题——读闸门的效果由 tests/vue.test.ts 的 A05 用例证明。
  */
 function eligible(core: RefreshCore, view: Page): boolean {
   const key = view.key()
@@ -526,7 +527,7 @@ test('A04/A05 关闭开启意愿后停止周期取数，但页面仍可显式刷
   assert.equal(calls, 2, '刷新不会把暂停页变回订阅')
 })
 
-test('A04/A06 浏览器隐藏与组件失活只失去资格：要求被撤销、声明与在途都留着', async () => {
+test('A04/A06 失去环境（浏览器隐藏与组件失活由适配层合成同一个 present）只失去资格：要求被撤销、声明与在途都留着', async () => {
   let calls = 0
   const source = '/api/core/297'
   const core = newCore(2, () => { calls++; return new Promise<number>(() => {}) })
@@ -538,16 +539,16 @@ test('A04/A06 浏览器隐藏与组件失活只失去资格：要求被撤销、
   await settle()
   assert.equal(snapshot(core).resources.length, 1, '声明让实例留在册')
 
-  core.setVisible(false)
+  view.set({ present: false })
   await settle()
-  assert.equal(eligible(core, view), false, '隐藏即失去读者身份')
+  assert.equal(eligible(core, view), false, '环境不允许即失去读者身份')
   assert.notEqual(declared(core, view), undefined, '声明还在')
-  assert.equal(snapshot(core).resources.length, 1, '隐藏只失去资格：实例与在途都留着（ADR-61）')
+  assert.equal(snapshot(core).resources.length, 1, '失去环境只失去资格：实例与在途都留着（ADR-61）')
 
   view.refresh()
   await settle()
-  assert.equal(snapshot(core).resources.length, 1, '隐藏期间刷新不新建实例')
-  assert.equal(calls, 1, '隐藏期间刷新不发请求（入口闸：激活且浏览器可见）')
+  assert.equal(snapshot(core).resources.length, 1, '失去环境期间刷新不新建实例')
+  assert.equal(calls, 1, '失去环境期间刷新不发请求（入口闸：配置有效且环境允许）')
 })
 
 test('A06 组件失活只失去资格：点过的那次刷新继续等当前请求，声明与实例都留着', async () => {
@@ -560,7 +561,7 @@ test('A06 组件失活只失去资格：点过的那次刷新继续等当前请�
   view.refresh()
   await settle()
 
-  view.set({ active: false })
+  view.set({ present: false })
   await settle()
   assert.equal(eligible(core, view), false, '失活即失去读者身份')
   assert.notEqual(declared(core, view), undefined, '声明还在')
@@ -630,10 +631,10 @@ test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数
   await settle()
   assert.equal(calls, 1)
 
-  view.set({ active: false })
+  view.set({ present: false })
   await settle()
   const written = view.writes()
-  view.set({ active: true })
+  view.set({ present: true })
   await settle()
   assert.equal(view.writes(), written, '恢复不产生新的写入：读的是结果表里已有的那份')
   assert.equal(view.last?.data, 1)
@@ -654,13 +655,13 @@ test('A07 长时间挂起后恢复只取一次，不补跑漏掉的周期', asyn
   await settle()
   assert.equal(calls, 1)
 
-  core.setVisible(false)
+  view.set({ present: false })
   await sleep(200)
-  core.setVisible(true)
+  view.set({ present: true })
   await settle()
   assert.equal(calls, 2, '恢复只取一次，不按漏掉的周期补跑')
 
-  core.setVisible(false)
+  view.set({ present: false })
 })
 
 test('A05 暂停只失去资格：已点过的那次刷新继续等当前请求的结果，声明、实例与结果都保留', async () => {
@@ -960,7 +961,7 @@ test('A16 零回调：传输失败只写结果表，核心不认识页面也不�
   assert.equal(snapshot(core).resources.flatMap(resource => [...resource.declarers]).includes(victim.config), false,
     '释放只动声明，不调用任何页面代码')
   assert.equal(declared(core, witness)?.declarers.size, 1, '另一个需求的声明不受影响')
-  const pure: Config = { enabled: true, every: 1000, active: true }
+  const pure: Config = { enabled: true, every: 1000, present: true }
   // @ts-expect-error `Config` 没有回调字段：核心不持有任何可调用的东西（ADR-64、ADR-66）
   const withCallback: Config = { ...pure, cleanup: () => {} }
   void withCallback

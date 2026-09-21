@@ -61,7 +61,9 @@ function newCore(maxConcurrent) {
   return { core, table, pending }
 }
 
-const config = (enabled, every = 100_000, active = true) => ({ enabled, every, active })
+const config = (enabled, every = 100_000, present = true) => ({ enabled, every, present })
+/** 环境允许是适配层合成的：脚本里直接改写快照，与 `useRefresh` 报上来的是同一个位。 */
+const present = (core, slot, value) => { core.setConfig(slot, slot.enabled, slot.every, value) }
 const params = args => prepareParameters(args)
 
 /** 一步一行：先打印这一步做了什么，再打印核心此刻的结构。 */
@@ -141,10 +143,10 @@ const settle = () => new Promise(resolve => { setTimeout(resolve, 0) })
   await settle()
   pending[0].resolve(4)
   await settle()
-  core.setVisible(false)
+  present(core, a, false)
   await settle()
   step(trace, 'S4 隐藏', core)
-  core.setVisible(true)
+  present(core, a, true)
   await settle()
   step(trace, 'S4 恢复（未到期不取）', core)
   core.dispose()
