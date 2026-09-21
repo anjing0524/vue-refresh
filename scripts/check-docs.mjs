@@ -302,7 +302,9 @@ for (const line of design.split('\n')) {
 //     header is `名称`; §0.1's disambiguation table has its own header and is not a row source, but it
 //     is §0 text and still counts for (c). The §2.2 code block is skipped in (a): every public type
 //     name appears there by definition, so counting it would make the check vacuous.
-const vocabulary = design.slice(design.indexOf('## 0. 名词解释'), design.indexOf('## 1. 目标与范围'))
+// §1 的标题是文档自己的措辞（曾经叫「目标与范围」）：按编号找边界，不写死标题。
+const section1 = design.indexOf('\n## 1. ') + 1
+const vocabulary = design.slice(design.indexOf('## 0. 名词解释'), section1)
 const vocabularyRows = []
 let tableHeader = null
 for (const line of vocabulary.split('\n')) {
@@ -313,7 +315,7 @@ for (const line of vocabulary.split('\n')) {
 }
 const formsOf = cell => cell.replace(/`/g, '').split(' / ')
   .map(part => part.replace(/（[^）]*）?\s*$/, '').trim()).filter(Boolean)
-const documentBody = design.slice(design.indexOf('## 1. 目标与范围'))
+const documentBody = design.slice(section1)
   .replace(/### 2\.2[\s\S]*?```[\s\S]*?```/, '')
 for (const cell of vocabularyRows) {
   const forms = formsOf(cell)
