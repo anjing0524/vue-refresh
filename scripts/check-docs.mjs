@@ -144,9 +144,13 @@ const doubled = [...declared].filter(([, count]) => count > 1).map(([id]) => id)
 check(doubled.length === 0, '统一刷新管理.md §3', `trigger anchors declared more than once: ${doubled.join(' ') || '-'}`)
 // ADR.md is excluded: it is a historical decision record and quotes the anchors in force at the time
 // (ADR-27 retires the previous anchor family wholesale, so those quotes must stay as written).
+// Retired anchors may be *mentioned* (the documents must say where they went), but they are not
+// landing points. The set is curated here, same as RETIRED above: adding an anchor means the
+// documents explain its retirement in the same change.
+const RETIRED_ANCHORS = new Set(['U10'])
 for (const file of ['/统一刷新管理.md', '/DESIGN.md', '/README.md']) {
   const danglingAnchors = [...new Set([...read(file).matchAll(/\bU\d{1,3}\b/g)].map(match => match[0]))]
-    .filter(id => !declared.has(id)).sort()
+    .filter(id => !declared.has(id) && !RETIRED_ANCHORS.has(id)).sort()
   check(danglingAnchors.length === 0, file,
     `references trigger anchors that §3 does not declare: ${danglingAnchors.join(' ') || '-'}`)
 }
