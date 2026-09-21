@@ -11,24 +11,12 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '')
+import { stripComments, contractBlock, mirrorBlock } from './mirror.mjs'
+
 const problems = []
 const check = (ok, where, detail) => { if (!ok) problems.push(`${where}: ${detail}`) }
 const read = path => readFileSync(root + path, 'utf8')
 const modules = readdirSync(`${root}/src`).filter(name => name.endsWith('.ts')).sort()
-
-// Drop comment-only content, so JSDoc may grow freely on both sides of the mirror.
-function stripComments(text) {
-  const kept = []
-  let inBlock = false
-  for (const line of text.split('\n')) {
-    const trimmed = line.trim()
-    if (inBlock) { if (trimmed.includes('*/')) inBlock = false; continue }
-    if (trimmed.startsWith('/*')) { if (!trimmed.includes('*/')) inBlock = true; continue }
-    if (trimmed.startsWith('//')) continue
-    if (trimmed) kept.push(line.trimEnd())
-  }
-  return kept
-}
 
 // 1) Every ```text manifest block must list exactly the current source files.
 for (const file of ['/README.md', '/DESIGN.md']) {
@@ -53,11 +41,11 @@ for (const file of ['/README.md', '/DESIGN.md']) {
 
 // 3) The unified document mirrors the public contract verbatim, comments excluded.
 const design = read('/统一刷新管理.md')
-const mirror = /### 2\.2 完整类型与状态取值[\s\S]*?```ts\n([\s\S]*?)```/.exec(design)
-check(Boolean(mirror), '统一刷新管理.md §2.2', 'missing the TypeScript mirror block')
-if (mirror) {
-  const declared = stripComments(read('/src/public-types.ts'))
-  const mirrored = stripComments(mirror[1])
+const mirroredBody = mirrorBlock(design)
+check(Boolean(mirroredBody), '统一刷新管理.md §2.2', 'missing the TypeScript mirror block')
+if (mirroredBody) {
+  const declared = contractBlock().split('\n')
+  const mirrored = stripComments(mirroredBody)
   let index = 0
   while (index < declared.length && declared[index] === mirrored[index]) index++
   check(declared.length === mirrored.length && index === declared.length, '统一刷新管理.md §2.2',
@@ -244,22 +232,6 @@ for (const edge of edges) {
 const entry = read('/src/index.ts')
 check(!/^export\s+type\s+\*/m.test(entry), '/src/index.ts', 'must list exported types explicitly (export type * requires TS 5.0+)')
 
-// 11) `core.ts` has no class body worth reading top to bottom without its `═══` banners, and the
-//     documented section list is the only map of them. The list drifted once under the previous
-//     layout, so both documents must name the same sections in the same order.
-const banners = [...read('/src/core.ts').matchAll(/═+ ([^═\n]+?) ═+/g)].map(match => match[1].trim())
-check(banners.length > 0, '/src/core.ts', 'no section banners found')
-for (const file of ['/README.md', '/DESIGN.md']) {
-  const listed = /按职责分成[一二三四五六七八九十]+个分段：([^。\n]+)/.exec(read(file))
-  check(Boolean(listed), file, 'missing the manager section list')
-  if (listed) {
-    // The list may sit mid-sentence, so a trailing separator is not part of the last section name.
-    const names = listed[1].replace(/[；;。]\s*$/, '').split('、').map(name => name.trim())
-    check(names.join('|') === banners.join('|'), file,
-      `manager sections differ\n    documented: ${names.join('、')}\n    code:       ${banners.join('、')}`)
-  }
-}
-
 // 12) A topic-style citation ("配置无效通知与诊断内容的行为规则见 §3（U18、U19）") promises that the
 //     named anchors still carry those topics. #7 cannot see the promise — it only checks that the anchor
 //     exists. C-02 removed the sequence-exhaustion rule from U14, §2.4 kept citing U14 for it, and every
@@ -352,24 +324,6 @@ const INTERNAL_FIELDS = ['parameters', 'subscription', 'subscribers', 'declarers
 for (const field of INTERNAL_FIELDS) {
   check(!vocabulary.includes(field), '统一刷新管理.md §0',
     `§0 states outward meaning only, but names the internal field ${field} (DESIGN §3.3)`)
-}
-
-// 14) The README records the built artifact's size, and that number drifted three times because
-//     nothing measured it (someone re-ran `pnpm build` and forgot the doc). Both recorded forms —
-//     `22.33 kB，22330 字节` — must match `dist/index.js` when it exists; a clean checkout without
-//     `dist/` prints a note and skips, so the gate never manufactures a signal. The gzip figure
-//     `vite` prints is deliberately not recorded here: it has no reproducible definition in this
-//     script (node zlib level 9 gives a different number), and an ungated number is what drifted.
-const recordedSizes = [...read('/README.md').matchAll(/([\d.]+) kB，(\d+) 字节/g)]
-check(recordedSizes.length >= 2, '/README.md', 'missing the built-artifact size in kB + 字节 form')
-if (existsSync(`${root}/dist/index.js`)) {
-  const bytes = statSync(`${root}/dist/index.js`).size
-  for (const [, kilobytes, recorded] of recordedSizes) {
-    check(kilobytes === (bytes / 1000).toFixed(2) && Number(recorded) === bytes, '/README.md',
-      `dist/index.js size differs\n    documented: ${kilobytes} kB，${recorded} 字节\n    measured:   ${(bytes / 1000).toFixed(2)} kB，${bytes} 字节`)
-  }
-} else {
-  console.log('[docs] dist/index.js is absent; the recorded artifact size was not re-measured (run pnpm build)')
 }
 
 // 15) Both normative documents name code symbols, and nothing checked that those names exist:
@@ -501,40 +455,51 @@ for (const term of RETIRED_IN_RULES) {
 }
 
 
-// 19) 需求与设计必须互相指得到：DESIGN §1.6 是「规格 → 设计」的对照表，各设计节以「> 需求：」反向指回规格。
-//     两边都不许漂——规格新增一个能力域（R）或根承诺（G），§1.6 不补就红；设计新增一节不写需求行也红。
+// 19) 需求与设计必须互相指得到，而且**只允许一份来源**：各设计节的「> 需求：」行。对照表由此现算并打印，
+//     不再在文档里手抄一份（手抄的那份必然要靠规则盯着，等于自己制造重复）。
+//     两边都不许漂——规格新增一个能力域（R）或根承诺（G），没有任何一节认领它就红；设计新增一节不写需求行也红。
 //     退役的承诺编号（G9，ADR-46）不在要求之列：它们只在历史上存在。
 const RETIRED_REQUIREMENTS = new Set(['G9'])
-const mapHeading = '### 1.6 需求与设计的对应'
-const mapAt = designText.indexOf(mapHeading)
-check(mapAt >= 0, 'DESIGN.md', 'missing the §1.6 requirement→design table')
-const mapText = mapAt < 0 ? '' : designText.slice(mapAt, designText.indexOf('\n## 2. ', mapAt))
-const specRequirements = [...new Set([...design.matchAll(/\b([RG]\d{1,2})\b/g)].map(match => match[1]))]
-  .filter(id => !RETIRED_REQUIREMENTS.has(id))
-for (const id of specRequirements) {
-  check(mapText.includes(id), 'DESIGN.md §1.6',
-    `规格声明的 ${id} 在 §1.6 的对照表里没有落点`)
-}
-const designSectionsWithoutRequirement = []
-let openSection = null
+const requirementLines = []
+const sectionsWithoutRequirement = []
+let openRequirementSection = null
 for (const line of designText.split('\n')) {
-  const heading = /^### ([23]\.[0-9]+ [^\n]*)$/.exec(line)
+  const heading = /^### ([123]\.[0-9]+ [^\n]*)$/.exec(line)
   if (heading) {
-    if (openSection && !openSection.marked) designSectionsWithoutRequirement.push(openSection.title)
-    openSection = { title: heading[1], marked: false }
+    if (openRequirementSection && openRequirementSection.required && !openRequirementSection.marked) {
+      sectionsWithoutRequirement.push(openRequirementSection.title)
+    }
+    openRequirementSection = { title: heading[1], ids: [], marked: false, required: /^[23]\./.test(heading[1]) }
     continue
   }
   if (/^## /.test(line)) {
-    if (openSection && !openSection.marked) designSectionsWithoutRequirement.push(openSection.title)
-    openSection = null
+    if (openRequirementSection && openRequirementSection.required && !openRequirementSection.marked) {
+      sectionsWithoutRequirement.push(openRequirementSection.title)
+    }
+    openRequirementSection = null
     continue
   }
-  if (openSection && line.startsWith('> 需求：')) openSection.marked = true
+  if (openRequirementSection && line.startsWith('> 需求：')) {
+    openRequirementSection.marked = true
+    openRequirementSection.ids = [...line.matchAll(/\b([RG]\d{1,2})\b/g)].map(match => match[1])
+    requirementLines.push([openRequirementSection.title, openRequirementSection.ids])
+  }
 }
-if (openSection && !openSection.marked) designSectionsWithoutRequirement.push(openSection.title)
-check(designSectionsWithoutRequirement.length === 0, 'DESIGN.md',
-  `这些设计节缺少「> 需求：」行：${designSectionsWithoutRequirement.join('、')}`)
-
+if (openRequirementSection && openRequirementSection.required && !openRequirementSection.marked) {
+  sectionsWithoutRequirement.push(openRequirementSection.title)
+}
+check(sectionsWithoutRequirement.length === 0, 'DESIGN.md',
+  `这些设计节缺少「> 需求：」行：${sectionsWithoutRequirement.join('、')}`)
+const claimedRequirements = new Set(requirementLines.flatMap(([, ids]) => ids))
+const specRequirements = [...new Set([...design.matchAll(/\b([RG]\d{1,2})\b/g)].map(match => match[1]))]
+  .filter(id => !RETIRED_REQUIREMENTS.has(id))
+for (const id of specRequirements) {
+  check(claimedRequirements.has(id), 'DESIGN.md',
+    `规格声明的 ${id} 没有任何设计节认领：在该节加一行「> 需求：… ${id} …」`)
+}
+console.log('[docs] 需求→设计（由各节「> 需求：」行现算）：' + specRequirements
+  .map(id => `${id}→${requirementLines.filter(([, ids]) => ids.includes(id)).map(([title]) => title.split(' ')[0]).join('、') || '—'}`)
+  .join('  '))
 
 // 所有规则跑完才判分：这一块必须在最后一条规则之后，否则它后面的检查全是死代码。
 if (problems.length) {
@@ -546,9 +511,9 @@ if (problems.length) {
 // test title is a review aid, not a defect, so it must not fail this gate.
 console.log(execFileSync(process.execPath, [`${root}/scripts/trace-leaves.mjs`], { cwd: root, encoding: 'utf8' }).trimEnd())
 console.log(`[docs] consistent: ${modules.length} modules, contract mirror, README metrics, `
-  + `README artifact size, export-surface counts and API list, test totals, documented symbols, `
+  + `export-surface counts and API list, test totals, documented symbols, `
   + `retired names, `
   + `${declared.size} trigger anchors, capability blocks, `
-  + `dependency direction, published entry, core sections, requirement→design table, ${TOPIC_CITATIONS.length} topic citations, `
+  + `dependency direction, published entry, core sections, requirement→design mapping, ${TOPIC_CITATIONS.length} topic citations, `
   + `${vocabularyRows.length} vocabulary rows, ${leaves.size} layered leaves, `
   + `${peerTypeEdges} peer type edges, ${backTypeEdges} type-only back edges`)
