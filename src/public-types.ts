@@ -2,7 +2,8 @@ import type { App, Ref } from 'vue'
 
 /** 公共契约：本文件是正式 API 类型的唯一代码入口。 */
 
-/** 递归只读视图：编译期约束。交付的每个值都是独立副本，因此它不承诺运行期不可写。 */
+/** 递归只读视图：编译期约束。交付的 `args` 是每页一份副本，`data` 是结果表里那一份共享对象，
+ * 因此它不承诺运行期不可写。 */
 export type ReadonlySnapshot<T> =
   T extends (...args: never[]) => unknown ? T :
   T extends object ? { readonly [K in keyof T]: ReadonlySnapshot<T[K]> } : T
@@ -40,7 +41,7 @@ export interface RefreshOptions {
 
 /** 组件句柄：声明订阅、主动刷新，并读取本页的两个出口。 */
 export interface RefreshHandle<P extends object, T> {
-  /** 本页看到的数据；按本页 `every` 节流，实例被释放时读回 `null`。 */
+  /** 本页看到的数据；按本页 `every` 节流。本页释放后不再更新（保留最后一帧），协调者退场时清回 `null`。 */
   readonly display: Readonly<Ref<RefreshDisplay<P, T> | null>>
   /** 本页看到的最近一次失败；与 `display` 共用一个读者闸门，但不参与数据窗口。 */
   readonly failure: Readonly<Ref<RefreshFailure | null>>
