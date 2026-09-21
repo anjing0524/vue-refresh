@@ -265,7 +265,7 @@ for (const file of ['/README.md', '/DESIGN.md']) {
 //     exists. C-02 removed the sequence-exhaustion rule from U14, §2.4 kept citing U14 for it, and every
 //     check stayed green: additions were gated, deletions were not. Each citation is therefore spelled out
 //     below as topic ↔ anchor ↔ the phrase that must still be in that anchor's rule, so deleting a
-//     behaviour fails here instead of going silent. §6.2 requires updating this table with the citation.
+//     behaviour fails here instead of going silent. 工程约定.md §2（原《统一刷新管理.md》§6.2）requires updating this table with the citation.
 //     The anchor list must be literal `U…` ids, so a sentence *about* citations (`§3（U…）`) is not one.
 const TOPIC_CITATIONS = [
   { claim: '配置非法的通知', anchor: 'U05', phrase: '配置快照读不出' },
@@ -391,7 +391,7 @@ if (coreRow) {
 
 // 16) The export surface and the test totals are prose in three documents, and nothing measured them:
 //     when the surface shrank from 8 public types to 7 and from two constant objects to one, four
-//     numbers stayed wrong through five green deliveries — "8 个公共类型" in §7, "三个状态常量对象"
+//     numbers stayed wrong through five green deliveries — "8 个公共类型" in 《统一刷新管理.md》§7（现已迁到 工程约定.md §5）, "三个状态常量对象"
 //     twice in DESIGN (contradicting its own §3.8), and README's "37 个用例（core 30）".
 //     Nothing below is curated: counts and names come from `src/index.ts` and from the test files.
 //     (a) every count stated in a document must equal the live number — surface sentences read the
