@@ -23,7 +23,8 @@ export interface RefreshDisplay<P extends object, T> {
   readonly args: ReadonlySnapshot<P>
   /** 最后一次成功的数据；从未成功过时为 `null`。 */
   readonly data: ReadonlySnapshot<T> | null
-  /** 最近一次请求（成功与失败都算）更新这一格的墙钟毫秒；还没有任何请求结算过时为 `null`。 */
+  /** 最近一次请求（成功与失败都算）更新这一格的墙钟毫秒。类型保留 `null` 让读取面自己判空
+   *  （ADR-63、ADR-122）；`display` 只在已结算过的那一版上发布，运行期它总有值。 */
   readonly updatedAt: number | null
   /** 最近一次请求是不是失败。它与 `updatedAt` 同属那一次请求——判它，而不是判 `error` 是不是 `undefined`
    *  （页面 `throw undefined` 时 `error` 读不出这件事）。 */

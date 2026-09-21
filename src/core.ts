@@ -12,7 +12,8 @@ import { Resource, type PageSlot } from './resource.ts'
  * 只有整格是新对象这一件事代表「变过」。唯一的公共出口 `RefreshDisplay` 就是它的投影（另加每页一份 `args` 副本）。 */
 export interface ResultCell {
   readonly data: unknown
-  readonly updatedAt: number | null
+  /** 最近一次请求（成功与失败都算）更新这一格的时刻；格子存在即至少结算过一次，因此总有值。 */
+  readonly updatedAt: number
   readonly failed: boolean
   readonly error: unknown
 }

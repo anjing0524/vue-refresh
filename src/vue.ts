@@ -103,11 +103,9 @@ export function useRefresh<P extends JsonParameters<P>, T>(
       readState.dataBaseline = baseline
     }
     if (shown !== null && identity === parameters.key && cell.updatedAt === shown.updatedAt) return rollback
-    // 窗口没到就不换画面；没有可比的时间（还没有任何请求结算过、或本页还没读到过）直接读。
+    // 窗口没到就不换画面；没有可比的时间（本页还没读到过、或基准刚被置空）直接读。
     const every = slot.every
-    if (baseline !== null && every !== null
-      && cell.updatedAt !== null
-      && baseline + every > cell.updatedAt) return rollback
+    if (baseline !== null && every !== null && baseline + every > cell.updatedAt) return rollback
     display.value = {
       args: structuredClone(parameters.args) as unknown as ReadonlySnapshot<P>,
       data: cell.data === undefined ? null : cell.data as ReadonlySnapshot<T>,
@@ -173,12 +171,14 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   const stopWatching = watch(
     () => ({ core: installed.value, ...readConfig(options, active.value, visible.value) }),
     next => {
+      const core = next.core
       const key = submitted.value?.key ?? null
       // 先按**旧**配置问一句资格：本页配置槽的唯一写入口就在下一行，核心此刻手里还是旧值。
-      const before = key !== null && next.core !== null && canPoll(next.core, key)
-      if (next.core !== null) next.core.setConfig(slot, next.enabled, next.every, next.present)
-      const viewer = currentCore()
-      const after = key !== null && viewer !== null && canPoll(viewer, key)
+      const before = core !== null && key !== null && canPoll(core, key)
+      if (core !== null) core.setConfig(slot, next.enabled, next.every, next.present)
+      // `setConfig` 不跑任何用户代码（`flushSoon` 只入队微任务），回调执行期间安装槽不会变，
+      // 前后两问是同一个核心——有变化的只是它手里这份配置槽的值。
+      const after = core !== null && key !== null && canPoll(core, key)
       // 只有「之前没资格、现在有资格」这一条边是 U12 的「重新成为读者」：把读取基准置空，并唤醒读取面
       // 立刻读回该身份**当前**那一版（后台更新过的最新数据），而不是停在失活前那一帧。
       // 同一份配置内的变化（改频率、改可见性）只重排调度，不动基准——否则它们会白白放行一次窗口。
