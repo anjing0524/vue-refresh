@@ -316,15 +316,15 @@ test('A20 同一个 URL 就是同一个身份：两处各声明一份定义仍�
   assert.equal(snapshot(core).resources.length, 2)
 })
 
-test('A20 身份键的拼与拆是同一处规则：往返还原两级，内层键里出现分隔符也不会串级', () => {
+test('A20 身份键的拼与拆是同一处规则：往返还原两级，URL 里出现 NUL 也不会串级', () => {
   const key = '{"symbol":"BTC","note":"a=b&c"}'
   const identity = identityOf('https://api.test/quote?x=1', key)
   assert.deepEqual(splitIdentity(identity), { url: 'https://api.test/quote?x=1', key }, '往返还原两级')
 
-  // 分隔符是 NUL：第一个 NUL 就是分界，因此 key 里再出现 NUL 也只是 key 的一部分，
-  // 不会被拆到 url 那一侧（拼接端只写一个 NUL，拆分端只认第一个）。
-  const tricky = identityOf('https://api.test/x', 'a\u0000b')
-  assert.deepEqual(splitIdentity(tricky), { url: 'https://api.test/x', key: 'a\u0000b' })
+  // 分隔符是 NUL：拼接端只写一个，拆分端认**最后**一个——键那一侧不可能含裸 NUL（编码把控制字符
+  // 写成六个字符的转义），URL 那一侧是调用方给的字符串、可能有，所以只有最后一个 NUL 说得准。
+  const tricky = identityOf('https://api.test/x\u0000a', 'b')
+  assert.deepEqual(splitIdentity(tricky), { url: 'https://api.test/x\u0000a', key: 'b' })
 })
 
 test('A04/A05 配置原地改写不改变声明：改 every／暂停／配置非法，声明者都还在（ADR-66 的可变配置槽）', async () => {

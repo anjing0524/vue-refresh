@@ -44,16 +44,12 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   if (!getCurrentInstance()) throw new Error('useRefresh 必须在组件的 setup 中同步调用')
   if (installed.value === null) throw new Error('需要先安装一个存活的刷新协调者')
 
-  /** 本页此刻报给哪个协调者；`null` ＝ 此刻没有活着的协调者。 */
-  let slot: RefreshCore | null = installed.value
-
   /** 这一页在核心里的全部内容：一页一份配置快照，按身份挂在实例的 `declarers` 里。 */
   const config: Config = { enabled: false, every: null, active: false }
 
-  /** 把配置报给此刻活着的协调者（协调者换了就换一份新槽）；没有协调者时不写槽、不通知。 */
+  /** 把配置报给此刻活着的协调者；没有协调者时不写槽、不通知。 */
   const reportConfig = (): void => {
     const viewer = currentCore()
-    slot = viewer
     if (viewer === null) return
     const [nextEnabled, nextEvery, nextActive] = readConfig(options, active.value)
     viewer.setConfig(config, nextEnabled, nextEvery, nextActive)
@@ -99,8 +95,6 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   watchEffect(() => {
     // 先读安装槽：它同时是这个副作用唯一的失效信号。
     const bound = installed.value
-    // 换了协调者：槽跟着换，下一拍配置报给新的那一个。必须在任何提前返回之前。
-    if (bound !== null && bound !== slot) slot = bound
     const params = submitted.value
     // 没有协调者：两个出口一起清回 `null`。
     if (bound === null) {
@@ -124,8 +118,8 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   /** 这一页是否挂载/激活（KeepAlive 失活为假）。 */
   const active = shallowRef(false)
 
-  // 唯一的配置写入口；`slot` 在依赖里，所以换了协调者会重新报一次。非法配置不通知。
-  const stopWatching = watch(() => [slot, ...readConfig(options, active.value)] as const, () => {
+  // 唯一的配置写入口；安装槽也在依赖里，所以换了协调者会重新报一次。非法配置不通知。
+  const stopWatching = watch(() => [installed.value, ...readConfig(options, active.value)] as const, () => {
     reportConfig()
     // 重新成为读者时清掉读取基准，下一份写入就不等窗口；失去资格那一侧不动。
     const viewer = currentCore()
@@ -141,8 +135,7 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   onScopeDispose(() => {
     released = true
     stopWatching()
-    // 摘声明要摘「上一拍报给的那个协调者」。
-    slot?.undeclare(config)
+    currentCore()?.undeclare(config)
     submitted.value = null
   })
 

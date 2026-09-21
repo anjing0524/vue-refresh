@@ -630,19 +630,18 @@ test('A17 协调者销毁后读取面一起清空：结果表已空，两个出�
   api.refresh()
   await tick()
 
-  // 原地接管：新协调者装上后，这一页**不用动任何配置 ref、也不用重新 submit**，新协调者就要按
-  // 重新报上的配置继续给这个身份取数——旧协调者手里的 `config` 槽已经没人读，新协调者不接旧槽；
-  // 不重报的话它永远停在 `every === null`，一次也不取数（这条由干净消费方的运行期场景先抓到）。
+  // 原地接管：新协调者装上后这一页**不用动任何配置 ref**，新协调者按**当前**配置继续给这个身份取数
+  // ——安装槽也在配置 watcher 的依赖里，装上那一刻这一页把当前的 `enabled`／`every`／`active` 重新报一遍。
+  // 身份仍要由 `submit` 登记：接管不改调用方手里那份声明（新协调者不接旧协调者的登记）。
   newManager(1, async () => 9)
   app.use(managers[managers.length - 1]!)
-  const submitResult = api.submit({ symbol: 'A' }) // 接管后重新声明同一个身份：新协调者必须立刻取数
-  console.log('DEBUG submit =', JSON.stringify(submitResult), 'display =', JSON.stringify(display.value))
+  api.submit({ symbol: 'A' }) // 接管后重新声明同一个身份：新协调者必须立刻取数
   await until(() => {
     const shown: RefreshDisplay<{ symbol: string }, number> | null = display.value
     return shown?.data === 9
   }, '接管后新协调者按重新报上的配置取数并上屏')
   const takeover: RefreshDisplay<{ symbol: string }, number> | null = display.value
-  assert.equal(takeover?.args.symbol, 'A', '身份还是销毁前那个：不是靠重新 submit 才登记上的')
+  assert.equal(takeover?.args.symbol, 'A', '身份参数还是销毁前那个（接管不改这一页的声明）')
 
   // 同一个句柄继续换身份也照旧。
   api.submit({ symbol: 'C' })
@@ -727,4 +726,52 @@ test('A05/A11 暂停页还没有读取时间时跟着第一份数据上屏一次
   await until(() => reader.display.value?.data === 4, '读者拿到第四版')
   assert.equal(paused.display.value?.data, 3, '没点刷新的那一拍不再跟随：停在自己拿到的那一版')
   app.unmount()
+})
+
+test('A17/A04 接管：新协调者按这一页当前的配置办事——空窗期关掉的意愿不会被旧协调者留下的那份槽顶掉', async () => {
+  let firstLoads = 0
+  let secondLoads = 0
+  const enabled = ref(true)
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const manager = newManager(1, async () => { firstLoads++; return 1 })
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/279', { enabled, every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+  assert.equal(firstLoads, 1, '先按开启意愿取一次')
+
+  // 空窗期：协调者先退场（页面还活着），这期间调用方把这一页关掉。配置槽是这一页自己的对象，
+  // 旧协调者写进去的旧值会一直留在上面，所以新协调者必须重新读一遍当前配置，而不是接旧槽。
+  manager.dispose()
+  await tick()
+  enabled.value = false
+  await tick()
+
+  const next = newManager(1, async () => { secondLoads++; return 2 })
+  app.use(next)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+  await tick()
+  const frozen: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
+  assert.equal(secondLoads, 0, '接管后按当前配置办事：空窗期关掉的页面不取数')
+  assert.equal(frozen, null, '也没有结果上屏')
+
+  // 再打开：同一份槽按新配置恢复取数，不需要重新 submit。
+  enabled.value = true
+  await until(() => {
+    const shown: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
+    return shown?.data === 2
+  }, '接管后重新打开意愿按当前配置取数')
+  assert.equal(secondLoads, 1, '恢复后只取一次')
+  app.unmount()
+  await tick()
 })

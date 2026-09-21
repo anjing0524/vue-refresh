@@ -75,7 +75,7 @@ failure（失败出口）→ 同一个副作用里的第二件事：这一格最
 
 锚点侧对应：`U01`–`U03` → `submit` 与 `resourceFor`；`U04`–`U06` → `isEligible`、`undeclare`、`releaseIfUnused`；
 `U07`–`U09` → `Resource.dueAt`、`flush`、`run`；`U11`–`U13` → `Resource.settle`（成功与失败都只记时刻、置「这一轮已经产出」）、核心写表时的 `sink.write` / `sink.fail`、`useRefreshStore`；
-`U14` → `refresh` 的三条分支、核心私有的 `enqueue` 与「补一轮」；`U15` → `prepareParameters`、`parameterKey`；`U16`–`U18` → `vue.ts` 提交边界（参数准备与 `validate` 的抛错就地变同步 `rejected`）、`dispose`、`display` 的写入驱动节流。
+`U14` → `refresh` 的三条分支、核心私有的 `enqueue` 与「补一轮」；`U15` → `prepareParameters`、`parameterKey`；`U16`–`U18` → `vue.ts` 提交边界（参数准备的抛错就地变同步 `rejected`）、`dispose`、`display` 的写入驱动节流。
 
 ## 3. 数据模型
 
@@ -142,7 +142,7 @@ flowchart LR
 | 后台成功 | `Resource.settle(at)` 先记结算时刻并把「这一轮已经产出」置起 → 核心写表 | 每次外部写入后复核当前执行归属；**先记时刻、再写表**（写表可能同步触发页面再点一次刷新，那一次落在下一轮）；页面在结果表上按身份自己读 |
 | 后台失败 | `Resource.settle(at)` 同形（失败也算结算，因此不自动重试）→ 核心把失败写进结果表同一格（已有的 `data` 与 `updatedAt` 保留） | 不推送：页面靠自己的失败出口（`failure`）在写入时**立刻**取走这笔失败——它不参与数据窗口（ADR-77）；下个周期继续 |
 | 声明空 | 最后一个声明者离开（卸载／换身份／销毁）→ 删除注册、结果表条目、排队项并 abort 在途 | 真实结束的执行在自己的 `finally` 里释放槽位；这里没有第二个条件——刷新不记账，所以「声明空」就是「没人要了」（ADR-70） |
-| `dispose` | 先置 `disposed`，再逐个清空实例的 `declarers` 并回收，最后 `identities.clear` | 幂等；迟到执行只能清自己的槽位；可见性监听由适配层自己摘（核心不持有回调） |
+| `dispose` | 先置 `disposed`，再逐个清空实例的 `declarers` 并回收（回收即从注册表与队列里摘掉，不需要再整表清空） | 幂等；迟到执行只能清自己的槽位；可见性监听由适配层自己摘（核心不持有回调） |
 
 ### 3.5 必须成立的不变量
 
@@ -155,9 +155,9 @@ flowchart LR
 5. 结果只来自该实例的当前执行的成功；删除后旧请求不得重建该实例。（`run` 在 `await` 之后与复制结果之后各复核一次 `resource.controller !== controller`，`Resource.settle` 只被它调用）
 6. 结果只由共享路径写入结果表（成功与失败都在 `run` 里各写一次 `sink.write` / `sink.fail`；实例的 `settle` 只记结算时刻并置「这一轮已经产出」），写的是**同一个对象**，读的人拿到它也是同一个对象——要改自己复制；`display.args` 仍然每次抄写复制一份。（ADR-59、ADR-65）
 7. 当前执行的正常成功/失败在写结果表之前更新 `settledAt`；取消与旧执行不更新。（`Resource.settle` 的第一行）
-8. 一个身份只保留一份参数对象：首次声明采用那份已准备参数，后加入者复用实例已持有的那一份；**核心不再把这份参数回写页面**——`display.args` 来自适配层自己那份副本（`declared`），页面改它改不到请求体或身份键。（`resourceFor` 采纳；ADR-52、ADR-66）
-9. `dispose` 后配置、注册表、队列、结果表条目与 Timer 已清（核心不持有监听或任何回调）；未结束的执行到真实结束才移除。（`dispose` → 逐个清空 `declarers` → `releaseIfUnused` → `identities.clear`）
-10. 注销只发生在声明空时，且空实例再也拿不到新的边：新声明只能落在 `resourceFor` 当前返回的实例上，刷新的命令也只能落在注册表里现存的实例上。（`releaseIfUnused` 是唯一注销点；`submit` 经 `resourceFor`，`refresh` 经 `find`）
+8. 一个身份只保留一份参数对象：首次声明采用那份已准备参数，后加入者复用实例已持有的那一份；**核心不再把这份参数回写页面**——`display.args` 来自适配层自己那份副本（`submitted`），页面改它改不到请求体或身份键。（`resourceFor` 采纳；ADR-52、ADR-66）
+9. `dispose` 后配置、注册表、队列、结果表条目与 Timer 已清（核心不持有监听或任何回调）；未结束的执行到真实结束才移除。（`dispose` → 逐个清空 `declarers` → `releaseIfUnused`）
+10. 注销只发生在声明空时，且空实例再也拿不到新的边：新声明只能落在 `resourceFor` 当前返回的实例上，刷新的命令也只能落在注册表里现存的实例上。（`releaseIfUnused` 是唯一注销点；`submit` 经 `resourceFor`，`refresh` 按 URL ＋ key 现查注册表）
 11. 有资格 ⟹ 配置槽有效：`enabled` 为真、`active` 为真、`every` 是正安全整数，且浏览器可见；因此最小间隔可以直接现算，不必在实例上另存一份。（`Resource.isEligible`）
 12. 两个出口只在写入与边沿上变，而且各有各的粒度：**数据出口**的每次发布都由「身份落定／重新成为读者／点过一次刷新（这三处把这一页的上次读取时间置 `null`）／一次写入且距画面里那一版满一个 `every`」之一触发，同一版（数据时间没变）不抄第二遍，窗口内的新版本不改变画面；**失败出口**由「这一格换了一笔新的失败（`failedAt` 变了，或从有到无）」触发，**不受窗口限制**，成功后是 `null`。两个出口发布的永远分别是那一格的成功侧与失败侧，因此都不需要版本号。（`vue.ts` 的 `publishData` / `publishFailure`；ADR-63、ADR-67、ADR-72、ADR-77）
 13. 「读者」只在适配层判定：核心不认识页面、也不回答谁该跟随结果表，只提供 `isEligible` 与 `isVisible` 两个只读判定；适配层自己算 `core.isEligible(config, url, key) || (lastReadAt === null && core.isVisible())`（第二项＝「这一页还没有读取时间」），**两个出口共用这一个闸门**。（§6.4；ADR-66、ADR-67、ADR-72、ADR-77）
@@ -175,7 +175,7 @@ flowchart LR
 | 同一轮内点几次 | 合并成一次 | 一个位，重复点只留一份——与哪一个页面点的无关 |
 | 执行成功 / 失败 | `settle(at)` 记结算时刻、置 `produced`（两种结局都走它），核心写表；`run` 的 `finally` 清 `produced` 并按 `needsNext` 插到队头补一轮 | 先记时刻、再写表、再收尾；失败也算这一轮的结算，因此不自动重试 |
 | 失去资格（隐藏 / 失活 / 暂停） | 不产生新的命令 | 已经排上的取数照常走完（资格只在入队时判定）；失活或隐藏期间 `refresh` 的入口闸不放行，暂停页仍可刷新一次，恢复后照旧 |
-| 卸载 / 销毁 | 命令无处可落（`find` 找不到身份） | 声明空即回收；结果表条目随实例释放删掉：不引入 TTL 或历史缓存 |
+| 卸载 / 销毁 | 命令无处可落（按 URL ＋ key 查不到身份） | 声明空即回收；结果表条目随实例释放删掉：不引入 TTL 或历史缓存 |
 
 一次失败的含义是「这次刷新没拿到新结果」：失败写进这一格（不推送、不改开关、不自动重试），与「失败保留
 画面、下个周期继续」一致（确认人 2026-09-17 裁决「有请求就直接使用，没启动就直接启动」，见 ADR-40）。
@@ -195,7 +195,7 @@ flowchart LR
 ### 3.7 派生值：不重复保存
 
 - 执行的位置由 `queue` / `running` 的归属决定；此外另存一个「本实例的当前执行」位 `Resource.controller`（它要回答的是「这次迟到的结束还算不算数」，不是位置）。两处只在 `enqueue` ／ `dequeue` ／ `startQueued` ／ `run` 收尾 ／ `releaseIfUnused` 里迁移，`controller === null` 同时表达「没有执行」与「这次不算数」（§3.5 第 4 条，ADR-65）。
-- 下次到期时刻由 `settledAt ＋ 当前最短 every` 现算，因此改频率立刻生效；`settledAt` 本身是事实（最近一次正常结束）。
+- 下次到期时刻由 `settledAt ＋ 当前最短 every` 现算，因此改频率立刻生效；`settledAt` 本身是事实（最近一次执行有结局，成功与失败都算）。
 - 有效最短间隔由各声明者的 `every` 现算，不缓存。
 - 资格由「声明还在」「配置开启且有周期」「这一页激活」「浏览器可见」四组事实现算，不镜像 `enabled`，也不存第二份集合（`Resource.isEligible`）。
 - 声明到哪个实例由该实例 `declarers` 的成员资格决定，配置槽上不存反向字段；`resourceOf` 换身份时扫描注册表（ADR-57、ADR-66）。核心**不再有名册**：这一页是否已释放由适配层的 `released` 自己记（§6.2）。
@@ -247,13 +247,13 @@ flowchart LR
 不再另判「实例是否仍在册」：「声明空」已经蕴含「在册」，因为注销是唯一的删除路径，而空实例再也拿不到新的边
 （§3.5 第 10 条；ADR-44 删掉那次在册复核的依据）。注销做四件事：删注册、
 **删结果表条目**、撤销当前执行、`abort` 在途；在跑的那次标为**被弃**——它仍占着并发槽位，直到迟到的结束自己交还，
-而当场交还就会让在途的请求与后来者并发；还在排队的执行同时从 `queue` 移除（`place`，ADR-56）。
+而当场交还就会让在途的请求与后来者并发；还在排队的执行同时从 `queue` 摘掉（`releaseIfUnused` 里的 `dequeue`）。
 `abort` 不承诺底层立刻结束，所以迟到的响应由 `run` 的身份复核（`resource.controller !== controller`）判为无效：
 不写结果、不动结果表；它的 `finally` 只清自己的槽位。
 
 **三、为什么一次执行不再需要独立对象（ADR-65）**
-框架不再自带取数上限，因此一个实例同时只会有一个执行：`enqueue` 时诞生一个 `AbortController`
-存进 `Resource.controller`，结束时由 `place` 清回 `null`。一个字段同时回答两件事——**取消**（释放实例时 `abort`）
+框架不再自带单次取数的截止，因此一个实例同时只会有一个执行：`enqueue` 时诞生一个 `AbortController`
+存进 `Resource.controller`，结束时由 `run` 的收尾清回 `null`。一个字段同时回答两件事——**取消**（释放实例时 `abort`）
 与**认人**（`run` 在 `await` 之后、复制结果之后、写表之前各复核一次 `resource.controller !== controller`，
 迟到的结束因此被丢弃）。过去承担「这一次执行」的那个独立对象随上限一起删除；请求必然终止由注入的传输负责
 （axios 的 `timeout`、反向代理或宿主自己的截止），框架不再设内部截止。
@@ -280,7 +280,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 
 观测面不属于包契约，因此也不住在 `src/`：只读计数投影一度是 `RefreshCore.snapshot()`，现已随 ADR-79 移到
 开发侧的支撑模块 `scripts/observe.ts`（一个读核心私有账本的纯函数）。它只有四个字段：实例数组 `resources`、
-**结果表的一份扁平副本**（`results`：`url` / `key` / `cell` 三列，`cell` 是 `ResultCell` 的四个平字段 `{ data, updatedAt, error, failedAt }`）、排队与在途执行（`queued` / `running` 都是 `Resource[]`）。`declarers`、`scheduled`、`flushing` 三个投影字段已删除（ADR-74）：声明者列表可由 `resources.flatMap(r => [...r.declarers])` 现推，另外两个是核心内部状态。
+**结果表的一份扁平副本**（`results`：`url` / `key` / `cell` 三列，`cell` 是 `ResultCell` 的四个平字段 `{ data, updatedAt, error, failedAt }`）、排队与在途执行（`queued` / `running` 都是 `Resource[]`）。`declarers`、`scheduled`、`flushing` 三个投影字段已删除（ADR-74、ADR-79）：声明者列表可由 `resources.flatMap(r => [...r.declarers])` 现推，另外两个是核心内部状态。
 集合是副本、元素仍是核心对象（比较身份是这些断言的要点），因此它是观察面而不是安全边界；
 支撑模块每次越界读私有账本前先做形状校验，内部结构漂移当场抛错，而不是静默返回空。
 
@@ -335,11 +335,11 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 - `queue` / `running` 是执行位置的唯一事实：`running` 统计真实尚未结束的请求，也就是并发槽。
 - 显式刷新与自动刷新共用队列与 `maxConcurrent`；满槽排队，不绕过这个上限。
-- **框架不设自己的取数上限**（ADR-65，作废 ADR-20 的 `10000` 毫秒）：请求必然终止由注入的传输负责——
+- **框架不给单次取数设自己的截止**（ADR-65，作废 ADR-20 的 `10000` 毫秒）：请求必然终止由注入的传输负责——
   axios 的 `timeout`、反向代理，或宿主自己的截止。一个永不结束的请求会永久占住一个并发槽，
   直到它的传输自己结束；框架不再有「挂死请求不会让应用停摆」这条保证，也不设内部截止。
 - 实例被释放后这次执行迟到的结束在身份复核处被判无效：不写结果、不动结果表；但它仍占着槽位。
-- 因此 `maxConcurrent` 约束的是**在册的执行数**；abort 不承诺服务端立即停止。
+- 因此 `maxConcurrent` 约束的是**在途请求数**（含已释放实例那次仍占着槽的请求）；abort 不承诺服务端立即停止。
 
 ### 5.3 结果有效性
 
@@ -351,7 +351,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 ### 6.1 配置槽
 
-- watch 源只读 `options.enabled.value` 与 `options.every.value`；两项都是必填的 `Ref`，改值即改配置。
+- watch 源读模块级的安装槽、`options.enabled.value`、`options.every.value` 与这一页的 `active`；两个 `Ref` 都是必填，改值即改配置，**换协调者也重新报一遍**——装上那一刻新协调者拿到的是这一页**当前**的配置，不是旧协调者留下的那份槽。
 - 每页一份可变配置槽（`Config`），**唯一写入口**是核心的 `setConfig`：两个 `Ref` 与这一页的激活状态在一个同步块里
   写进同一份槽；非法时只把 `every` 置 `null`（＝这一拍配置非法）——不取数、不自动刷新、不写结果表，修正后按当前资格恢复（ADR-51、ADR-66）。
   槽是可变对象，外部看不到半更新，全靠「中间不调用任何会回到框架的东西」。
@@ -411,13 +411,14 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 - 安装顺序固定为「先检查后修改」：被拒的安装不破坏已有合法绑定，也不新增监听或请求。
 - 每个协调者只注册一个 `visibilitychange` 监听。
 - 当前协调者放在模块级变量里：安装时若现有实例还活着就拒绝，已销毁则直接替换（HMR、会话切换），
-  组件适配不经过 `provide` / `inject`。
+  组件适配不经过 `provide` / `inject`。安装槽本身是配置 watcher 的依赖，因此接管后每一页在下一拍把当前配置
+  重新报给新协调者；身份仍要由调用方 `submit` 登记（核心不接旧协调者的登记）。
 - `dispose` 先失效再清理自己的队列／Timer／实例与配置槽；卸载钩子调用 `dispose`。**核心不持有任何回调，适配层的拆卸由适配层自己做**：`install` 在 `app.onUnmount` 里摘掉可见性监听、返回的 `dispose()` 也摘（ADR-64）。
 
 ### 6.4 零回调与读闸门
 
 - **核心不调用任何页面代码**：`core.ts` 拨出去的外部调用只剩两个注入端口——传输 `http.post(...)`
-  与结果表 `sink.write / fail / remove / list`；它们都是适配层传进来的端口，不是页面回调（ADR-64）。
+  与结果表 `sink.write / fail / remove / read`；它们都是适配层传进来的端口，不是页面回调（ADR-64）。
 - **框架不运行任何调用方代码**（ADR-64 的终点，ADR-74）：提交边界只做参数准备（复制／值域／编码），没有
   `validate` 这类准入回调；业务准入由调用方在 `submit` 之前自己判。参数准备的抛错在那里就地变成同步
   `rejected`（`vue.ts` 的 `submit` 包一层 `try`），既不进入核心，也不改变
@@ -478,7 +479,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 | 配置槽 | 每一页在核心里的登记：`{ enabled, every, active }` 一个对象，适配层原地改写；**`every === null` ＝ 这一拍配置非法** | 核心的 `setConfig`（唯一写入口，适配层给三个值）；别处只读（§3.3） |
 | 声明 | 这一页的配置槽挂在某个实例的 `declarers` 里；挂载期间一直算，暂停/失活/隐藏都不撤销 | `submit` 登记、`undeclare` 撤销（§3.5 第 1 条） |
 | 取数资格 | 声明还在 ＋ 这一页激活 ＋ 浏览器可见 ＋ 配置开启且有周期，四组缺一不可；**只决定要不要取数** | `Resource.isEligible`（§3.5 第 11 条） |
-| 当前执行 | 一个实例至多一个执行，它至多在队列或在执行之一；`controller === null` 同时表示没有执行与这次不算数 | `place`（`enqueueDue` 入队 / `startQueued` 起跑 / `run` 的 `finally` / `releaseIfUnused` 都经它） |
+| 当前执行 | 一个实例至多一个执行，它至多在队列或在执行之一；`controller === null` 同时表示没有执行与这次不算数 | `enqueue` 建把手与 `dequeue` 摘出（`enqueueDue` / `refresh`）／`startQueued` 起跑／`run` 的收尾与 `releaseIfUnused` 清回 `null` |
 | 刷新命令 | 一次显式刷新＝**给身份下的一句命令**：没有执行就插到队头；有执行且结果还没产出就用这一轮；结果已经写进表就记「还欠一轮」。**核心不记是谁点的**，同一轮内点几次合并成一次，没有回执 | `RefreshCore.refresh`（三条分支）、`Resource.produced` / `needsNext`、核心私有的 `enqueue`（插到队头）与收尾时的补一轮 |
 | 结果表 | 结果的唯一真值：`URL → 参数键 → ResultCell 四字段`；页面按**已声明身份**读它，读到的就是那一份对象 | `useRefreshStore`（`store.ts`）：核心直接调 `sink.write` / `sink.fail` 写、`releaseIfUnused` 删、`display`／`failure` 读 |
 | 读者 | 本页此刻跟着结果表走：**有资格**，或还没有读取过且此刻浏览器可见（`lastReadAt === null && core.isVisible()`）；不是读者就冻结画面。读者画面＝**写入驱动 ＋ 一个数 `lastReadAt`**（同一版不抄第二遍；新格距画面里那一版满一个本页 `every` 才换，一个窗口最多换一次） | **适配层的读闸门**：`core.isEligible(...) || (lastReadAt === null && core.isVisible())`（§6.4；核心不认识这个判定） |
@@ -516,10 +517,10 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 | 防什么 | 长相（具名判定，ADR-69） | 作用 |
 |---|---|---|
 | 已销毁 / 已释放 | 入口第一行的 `this.disposed`；适配层自己的 `released`（`onScopeDispose` 置位：`submit` 返回 `cancelled`、`refresh` 无副作用） | 销毁或释放之后任何入口都不再产生事实（§2.4「取消只有一个来源」） |
-| 身份不成立 | `find(url, key)` 返回 `undefined`（＝这个身份没声明过，或已经回收）；`resourceOf(config)` 返回 `undefined` | 没有身份时命令直接丢掉、不发请求、不判资格 |
+| 身份不成立 | 按 URL ＋ key 查注册表返回 `undefined`（＝这个身份没声明过，或已经回收）；`resourceOf(config)` 返回 `undefined` | 没有身份时命令直接丢掉、不发请求、不判资格 |
 | 这次执行已不是当前执行 | `!resource.isCurrent(controller)` | 每个 `await` 与每次外部效果之后：丢弃迟到的结束与迟到的异常，不写结果、不动结果表 |
 | 这个身份还有没有执行 / 还有没有人声明 | `resource.hasExecution()`、`resource.isWanted()` | 有执行就不重复入队（A08）、不补一轮；没有声明者（`declarers` 空）才回收（G4） |
-| 写表那一刻的同步重入 | **不是 `if` 而是顺序**：`settle` 先记结算时刻并把 `produced` 置起 → 核心写表 → `run` 的 `finally` 清 `produced` 并按 `needsNext` 插到队头补一轮 补一轮（`hasExecution()` 判要不要补） | 页面在 watcher 里当场 `refresh()` 时，那句命令落在**下一轮**（写表那一刻 `produced` 已经为真），不会被这一轮吃掉（§3.9 第一条） |
+| 写表那一刻的同步重入 | **不是 `if` 而是顺序**：`settle` 先记结算时刻并把 `produced` 置起 → 核心写表 → `run` 的 `finally` 清 `produced` 并按 `needsNext` 插到队头补一轮（这一句命令落在哪条分支，由 `refresh` 里的 `hasExecution()` 与 `produced` 判） | 页面在 watcher 里当场 `refresh()` 时，那句命令落在**下一轮**（写表那一刻 `produced` 已经为真），不会被这一轮吃掉（§3.9 第一条） |
 
 **这些守卫是承重的，不是冗余**；能叫出名字的都叫了名字，读的时候不必自己反推「这个 `if` 防的是哪一件」。
 核心**不再有名册**（ADR-66）：一页是否已释放是适配层 `released` 的事实，`isDisposed` 才是核心自己的事实；

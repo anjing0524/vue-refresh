@@ -34,9 +34,9 @@ export function identityOf(url: string, key: string): string {
   return `${url}\u0000${key}`
 }
 
-/** 身份键拆回两级（`store.list()` 用）；与 `identityOf` 成对。前提：入参一定是 `identityOf` 的产物。 */
+/** 身份键拆回两级（`store.list()` 用）：分隔符取最后一个 NUL——键里的 NUL 一定被 JSON 编码转义，URL 里可能有。 */
 export function splitIdentity(identity: string): { readonly url: string; readonly key: string } {
-  const sep = identity.indexOf('\u0000')
+  const sep = identity.lastIndexOf('\u0000')
   return { url: identity.slice(0, sep), key: identity.slice(sep + 1) }
 }
 
