@@ -11,7 +11,7 @@
 
 **需求与设计的对应**：每节开头一行「> 需求：…」是唯一来源（见 §1.6）。
 
-**读代码从附录 A 开始**：三条进入路线、读之前先记住的七个词、遇到 `if` 时按什么读；符号一句话作用在附录 B。
+**读代码从附录 A 开始**：四条进入路线、读之前先记住的七个词、遇到 `if` 时按什么读；符号一句话作用在附录 B。
 `src/core.ts` 的五个 `═══` 分段与 §1.3 的分工一一对应。
 
 ## 1. 整体架构
@@ -82,26 +82,6 @@ index.ts                   包入口（两个函数与 6 个公共类型；没�
 实例不持有核心——写表、回收、排队都是核心的动作（ADR-65）。
 `vue.ts` 只读公开入口、模块级单例（当前协调者与结果表）与结果表的读出口，`source.ts` 是无状态函数的边界。
 
-
-工程目录：`vue-refresh/`。运行时分层：
-
-```text
-public-types.ts            公共契约类型（判别联合，没有常量对象）；不依赖运行时模块
-source.ts                  参数边界：准备（复制、值域检查、稳定键）与身份键编码（`identityOf` / `splitIdentity`）
-resource.ts                一个身份自己的状态与判定（每页一份的 `Config` 配置槽 ＋ `Resource` 类）
-core.ts                    跨实例的协调者（身份注册表、队列与并发、调度）
-store.ts                   结果表（Pinia 模块级定义）：一张复合键 Map（`identityOf(url, key)`），整条替换，随实例释放即删
-vue.ts                     组件适配与安装：配置槽原地改写、生命周期、可见性、读闸门、结果表接线
-index.ts                   包入口（两个函数与 6 个公共类型；没有常量对象）
-```
-
-
-`core.ts` 用 `═══` 分成五个职责分段（分段名与顺序以源码为准，文档不再抄一份）。
-全部可变状态分三处：跨实例的挂在协调者上（身份注册表、队列与并发、唯一唤醒 Timer），
-一个身份自己的在 `Resource` 类里（声明者、这一轮的结果产出了没有、到期与当前执行），**结果住结果表**（`store.ts`，唯一真值）；
-实例不持有核心——写表、回收、排队都是核心的动作（ADR-65）。
-`vue.ts` 只读公开入口、模块级单例（当前协调者与结果表）与结果表的读出口，`source.ts` 是无状态函数的边界。
-
 ### 1.4 模块职责
 
 | 文件 | 职责 |
@@ -150,10 +130,11 @@ index.ts                   包入口（两个函数与 6 个公共类型；没�
 
 ```mermaid
 flowchart LR
-  Url["资源：URL 字符串"] --> Parameters["Parameters 快照与 key"]
-  Url -. "同一个 URL" .-> Config["Config：每页一份配置槽，就是它在核心里的登记"]
-  Config -. "按身份读" .-> Table["结果表：identityOf(url, key) → ResultCell 四字段"]
-  Resource["Resource 共享实例"] --> Decl["declarers：装 Config 的声明者集合"]
+  Url["URL：身份的一半"] --> Id["身份：identityOf(url, key)"]
+  Key["Parameters 快照与 key"] --> Id
+  Id --> Resource["Resource 共享实例（注册表的键就是身份）"]
+  Config["Config：每页一份配置槽，就是它在核心里的登记"] -. "挂在 declarers 里" .-> Resource
+  Id -. "按身份读" .-> Table["结果表：身份 → ResultCell 四字段"]
   Resource --> Round["produced / needsNext ＝ 这一轮产出了没有 / 还欠一轮"]
   Resource --> Controller["controller：这次执行"]
   Core["RefreshCore：身份注册表 / 队列 / 槽位"] -. "写表、回收、排队" .-> Resource
@@ -189,7 +170,7 @@ flowchart LR
   Shared -->|"请求体副本"| Http["传输 http.post"]
   Http -->|"response.data"| Core
   Core -->|"结果 / 失败"| Table[("结果表 store.ts")]
-  Table -->|"那一格 cell"| Adapter
+  Table -->|"那一格 cell（经核心 readResult 这一跳）"| Adapter
   Adapter -->|"display / failure"| Page
 ```
 
@@ -343,19 +324,26 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 
 > 需求：R2、R4、U07–U09、U14、G3、G6
 
-主干五步、四个判定；`refresh` 的三条分支不在图上，见 §3.4 的表。
+三条入口汇到同一条取数通道。**只有 `submit` 那条准备参数**：参数在提交边界准备一次，轮询、恢复与显式刷新都复用那一份（`U18`）；
+到期走调度，手动刷新走入口闸与三条分支（§3.4 的表）。
 
 ```mermaid
 flowchart TD
-  Start(["挂载 / 参数变化 / 到期 / 手动刷新"]) --> Prep["submit：准备参数（复制 → 值域 → 身份键）"]
+  Mount(["挂载 / 参数变化"]) --> Prep["submit：准备参数（复制 → 值域 → 身份键）"]
   Prep --> Legal{"参数合格？"}
   Legal -->|"否"| Reject["rejected：不改动任何已定状态"]
-  Legal -->|"是"| Eligible{"有资格？<br/>声明 ∧ 环境允许 ∧ 开启意愿 ∧ 周期有效"}
+  Legal -->|"是"| Declare["换身份：摘旧 → 挂新；相同身份幂等"]
+  Due(["到期"]) --> Sched["flush：现算最早到期<br/>（有资格的声明者里最小的 every）"]
+  Declare --> Sched
+  Sched --> Eligible{"有资格？<br/>声明 ∧ 环境允许 ∧ 开启意愿 ∧ 周期有效"}
   Eligible -->|"否"| Hold["声明留着、新的入队停下<br/>（已经排上的那次照常走完）"]
-  Eligible -->|"是"| Enqueue["入队（手动刷新插队头）"]
+  Eligible -->|"是"| Enqueue["入队"]
+  Manual(["手动刷新"]) --> Gate["refresh 入口闸：声明 ∧ 环境允许 ∧ 配置有效<br/>（不看开启意愿）"]
+  Gate --> Cmd["三条分支见 §3.4：插队头 / 用这一轮 / 补一轮"]
+  Cmd --> Enqueue
   Enqueue --> Slot{"有空闲并发槽？"}
-  Slot -->|"否"| Wait["等真实结束（不自旋）"]
-  Wait --> Slot
+  Slot -->|"否"| Full["等这次执行真实结束"]
+  Full -. "结束交还槽位后重排" .-> Sched
   Slot -->|"是"| Run["run：http.post（参数副本）"]
   Run --> Current{"仍是当前执行？<br/>（await 之后与复制结果之后各一次）"}
   Current -->|"否"| Drop["丢弃这次结束：不写表、不动结果表"]
@@ -421,8 +409,8 @@ flowchart TD
   Ready -->|"否"| Idle["清空两个出口 / 直接返回"]
   Ready -->|"是"| Gate{"读闸门：有资格，<br/>或还没有读取基准且浏览器可见？"}
   Gate -->|"否"| Freeze["冻结：两个出口都不动"]
-  Gate -->|"是"| Fail["失败出口：换了一笔新失败就发布（不参与窗口）"]
-  Fail --> Fresh{"数据出口：同一身份同一版？<br/>距画面里那一版够一个 every 吗？"}
+  Gate -->|"是"| Fail["失败出口（不参与窗口）：换了一笔新失败就发布，成功后清回 null"]
+  Gate -->|"是"| Fresh{"数据出口：同一身份同一版？<br/>距画面里那一版够一个 every 吗？"}
   Fresh -->|"同一版 / 窗口内"| Keep["保持画面"]
   Fresh -->|"新版本且满窗口"| Paint["整格抄进 display，读取基准 ＝ 这一版的 updatedAt"]
 ```
@@ -500,7 +488,7 @@ flowchart TD
 ⑤ 同一份配置内的变化（改频率、改可见性）只重排调度，不动读取基准（ADR-91、ADR-94）。
 
 **读取面**：没有自己的 Timer，由写入事件驱动；两个出口、一个读闸门、三处「没有读取时间就直接读」（身份落定、重新成为读者、显式 `refresh()`）——
-完整流程见 §6.5，条文见《统一刷新管理文档》§3 `U12`。
+完整流程见 §3.3，条文见《统一刷新管理文档》§3 `U12`。
 
 **两处角落（明说）**：还没有读取基准的暂停页会跟着第一份到达的数据上屏一次，此后有了基准就冻住；
 **点过刷新之后才失活**、浏览器仍可见的缓存页，那一帧仍会更新（确认人 2026-09-17 的裁决）。
@@ -541,14 +529,13 @@ flowchart TD
 ## 5. 验证
 
 `pnpm typecheck` 开着 `noUnusedLocals`／`noUnusedParameters`（ADR-92）：死变量、死导入与死参数当场报错。
-`pnpm typecheck` → `pnpm test` → `pnpm build` → `pnpm build:demo` → `pnpm test:browser`；
-`pnpm complexity` 输出每文件与函数的行数、结构分支、圈复杂度和嵌套深度。
+验证链：`pnpm typecheck` → `pnpm test` → `pnpm build` → `pnpm build:demo` → `pnpm test:browser`。
 实际执行环境与已通过项见 [README](./README.md)「实际验证与边界」。
 测试预期属于契约，修正测试前先确认契约。
 
 ## 附录 A 读码入口
 
-### A.1 三条进入路线
+### A.1 四条进入路线
 
 | 你想弄清 | 从这里开始 | 接着读 |
 |---|---|---|
