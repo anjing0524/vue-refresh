@@ -5,7 +5,7 @@ import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import { useRefreshStore } from '../src/store.ts'
 import type { RefreshHttp } from '../src/core.ts'
-import type { RefreshDisplay, RefreshFailure, RefreshHandle, RefreshManager, RefreshOptions } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshFailure, RefreshHandle, RefreshManager } from '../src/public-types.ts'
 import type { Ref } from 'vue'
 import { snapshot } from '../scripts/observe.ts'
 

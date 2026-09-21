@@ -29,12 +29,16 @@ export function currentCore(): RefreshCore | null {
 }
 
 /** 读这一页的两个 `Ref` ＋ 生命周期与可见性，合成这一页报给核心的「环境允许」；读不出或抛错都按非法值回。 */
-function readConfig(options: RefreshOptions, active: boolean, shown: boolean): readonly [enabled: unknown, every: unknown, present: boolean] {
+function readConfig(options: RefreshOptions, active: boolean, shown: boolean): {
+  readonly enabled: unknown
+  readonly every: unknown
+  readonly present: boolean
+} {
   const present = active && shown
   try {
-    return [options.enabled.value, options.every.value, present]
+    return { enabled: options.enabled.value, every: options.every.value, present }
   } catch {
-    return [undefined, undefined, present]
+    return { enabled: undefined, every: undefined, present }
   }
 }
 
@@ -50,14 +54,6 @@ export function useRefresh<P extends JsonParameters<P>, T>(
 
   /** 这一页在核心里的全部内容：一页一份配置快照，按身份挂在实例的 `declarers` 里。 */
   const config: Config = { enabled: false, every: null, present: false }
-
-  /** 把配置报给此刻活着的协调者；没有协调者时不写槽、不通知。 */
-  const reportConfig = (): void => {
-    const viewer = currentCore()
-    if (viewer === null) return
-    const [nextEnabled, nextEvery, nextPresent] = readConfig(options, active.value, visible.value)
-    viewer.setConfig(config, nextEnabled, nextEvery, nextPresent)
-  }
 
   /** 本页已提交的声明（身份键 ＋ 参数副本）；`null` ＝ 还没提交过。 */
   const submitted = shallowRef<Parameters | null>(null)
@@ -139,18 +135,22 @@ export function useRefresh<P extends JsonParameters<P>, T>(
   /** 这一页是否挂载/激活（KeepAlive 失活为假）。 */
   const active = shallowRef(false)
 
-  // 唯一的配置写入口；安装槽也在依赖里，所以换了协调者会重新报一次。非法配置不通知。
-  const stopWatching = watch(() => [installed.value, ...readConfig(options, active.value, visible.value)] as const, () => {
-    const key = submitted.value?.key ?? null
-    // 先按**旧**配置问一句资格：本页配置槽的唯一写入口就在下一行，核心此刻手里还是旧值。
-    const before = key !== null && currentCore()?.isEligible(config, url, key) === true
-    reportConfig()
-    const viewer = currentCore()
-    const after = key !== null && viewer !== null && viewer.isEligible(config, url, key)
-    // 只有「之前没资格、现在有资格」这一条边是 U12 的「重新成为读者」，才把读取基准置空；
-    // 同一份配置内的变化（改频率、改可见性）只重排调度，不动基准——否则它们会白白放行一次窗口。
-    if (after && !before) lastReadAt = null
-  }, { flush: 'sync', immediate: true })
+  // 唯一的配置写入口，取值函数同时收齐这一拍的三项与安装槽；回调直接用当轮新值，不再重读一次 refs。
+  const stopWatching = watch(
+    () => ({ core: installed.value, ...readConfig(options, active.value, visible.value) }),
+    next => {
+      const key = submitted.value?.key ?? null
+      // 先按**旧**配置问一句资格：本页配置槽的唯一写入口就在下一行，核心此刻手里还是旧值。
+      const before = key !== null && next.core?.isEligible(config, url, key) === true
+      if (next.core !== null) next.core.setConfig(config, next.enabled, next.every, next.present)
+      const viewer = currentCore()
+      const after = key !== null && viewer !== null && viewer.isEligible(config, url, key)
+      // 只有「之前没资格、现在有资格」这一条边是 U12 的「重新成为读者」，才把读取基准置空；
+      // 同一份配置内的变化（改频率、改可见性）只重排调度，不动基准——否则它们会白白放行一次窗口。
+      if (after && !before) lastReadAt = null
+    },
+    { flush: 'sync', immediate: true },
+  )
 
   // mounted/activated 与 deactivated 存在交叠（KeepAlive），两个方向都必须幂等。
   onMounted(() => { active.value = true })

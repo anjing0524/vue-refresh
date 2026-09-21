@@ -229,11 +229,6 @@ const settle = async (rounds = 3): Promise<void> => {
   for (let index = 0; index < rounds; index++) await new Promise(resolve => { setTimeout(resolve, 0) })
 }
 
-/** 只跑微任务，不依赖被伪造的定时器。 */
-const micro = async (rounds = 8): Promise<void> => {
-  for (let index = 0; index < rounds; index++) await Promise.resolve()
-}
-
 const sleep = (ms: number): Promise<void> => new Promise(resolve => { setTimeout(resolve, ms) })
 
 test('A01/A11 首次订阅立即取一次，结果按 args／data／时间整体读出', async () => {

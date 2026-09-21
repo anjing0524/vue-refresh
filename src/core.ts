@@ -267,7 +267,9 @@ export class RefreshCore {
   /** 第一步：把到期的实例排进队列，返回最早的下次到期时刻（`Infinity`＝没有要等的）。 */
   private enqueueDue(now: number): number {
     let next = Infinity
-    for (const resource of [...this.identities.values()]) {
+    // 这一趟扫描不跑任何外部代码（到期判定是纯函数、入队只建把手），因此直接迭代 Map 视图；
+    // `dispose` 那趟不能这样写——那里的 `sink.remove` 会同步唤醒页面 watcher。
+    for (const resource of this.identities.values()) {
       if (resource.hasExecution()) continue
       const due = resource.dueAt(now)
       if (due <= now) this.enqueue(resource)

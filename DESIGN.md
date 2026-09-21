@@ -458,6 +458,7 @@ flush：清本轮标记（flushing = false）→ 已销毁则返回 → 取消�
 
 ## 8. 验证
 
+`pnpm typecheck` 开着 `noUnusedLocals`／`noUnusedParameters`（ADR-92）：死变量、死导入与死参数当场报错。
 `pnpm typecheck` → `pnpm test` → `pnpm check:docs` → `pnpm build` → `pnpm build:demo` → `pnpm test:browser`；
 `pnpm complexity` 输出每文件与函数的行数、结构分支、圈复杂度和嵌套深度。
 实际执行环境与已通过项见 [README](./README.md)「实际验证与边界」。

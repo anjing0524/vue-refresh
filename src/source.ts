@@ -1,5 +1,4 @@
 import stringify from 'fast-json-stable-stringify'
-import type { ReadonlySnapshot } from './public-types.ts'
 
 /** 参数边界：提交边界的一次准备（复制 → 值域检查 → 编码身份键）。 */
 
