@@ -1,7 +1,7 @@
 /**
  * 代表页面 2 · 行情面板。
  *
- * 展示：无查询按钮、一次提交已准备参数对象、响应式频率、显示数据多旧、
+ * 展示：无查询按钮、一次提交已准备参数对象、响应式频率、显示最近一次请求的时刻、
  * 后台首查失败继续、失活冻结（KeepAlive 切走切回）。
  * 面板没有启停入口：开启意愿对组件是常量，框架从不改写它。
  */
@@ -26,10 +26,11 @@ const QuoteCard = defineComponent({
       // 频率是响应式输入：改动它就走配置变化路径，由框架替换当前任务。
       every: computed(() => props.every),
     })
-    // 失败不再由框架推送：失败出口出现**新的失败**就计一次。默认 flush 是 pre 且首次不触发；
-    // 成功会把失败出口清回 `null`，所以只在非空的一笔上计数即可。
-    watch(() => task.failure.value, failure => {
-      if (failure === null) return
+    // 失败不再由框架推送，也没有独立的失败出口：失败与数据是同一笔（`failed` 为真、`updatedAt` 推进）。
+    // 连续失败时 `failed` 一直为真、不会「从假变真」，所以按**版本的推进**计数：出口换出新的一份投影且 `failed` 为真就计一次
+    // （同一身份同一版不重发，因此不会重复计数；成功那一笔 `failed` 为假，不计）。默认 flush 是 pre 且首次不触发。
+    watch(() => task.display.value, display => {
+      if (display?.failed !== true) return
       failures.value += 1
       emit('failure')
     })
@@ -40,22 +41,21 @@ const QuoteCard = defineComponent({
 
     return () => {
       const display = task.display.value
-      const failure = task.failure.value
-      // 首查就失败时 display 不是 null，而是 `data: null`：空态只看 data，失败在 `task.failure` 上。
+      // 首查就失败时 display 不是 null，而是 `data: null`：空态只看 data，失败与它在同一个出口上（ADR-122）。
       const data = display?.data ?? null
       return h('section', { class: 'card', 'data-testid': 'qp-card' }, [
         h('h3', `行情 · ${props.symbol}`),
         h('p', { class: 'price', 'data-testid': 'qp-price' }, data ? data.quote.price.toFixed(2) : '等待首查'),
         h('p', { 'data-testid': 'qp-request' }, data ? `来自请求 ${data.quote.requestId}` : ''),
-        h('p', { 'data-testid': 'qp-age' }, display && display.updatedAt !== null ? `数据时间：${ageLine(display.updatedAt)}` : ''),
+        h('p', { 'data-testid': 'qp-age' }, display && display.updatedAt !== null ? `最近请求：${ageLine(display.updatedAt)}` : ''),
         h('p', { 'data-testid': 'qp-submitted' }, display
           ? `已提交参数：${display.args.account} / ${display.args.symbol}`
           : '已提交参数：尚未交付'),
         h('p', { 'data-testid': 'qp-submits' }, `提交次数：${submits}`),
         h('p', { 'data-testid': 'qp-failures' }, `后台失败次数：${failures.value}`),
-        // 失败出口的 `failedAt`：画面级消费它（相对时间按 U16/§2.5 的建议把差值钳制到 0）。
-        h('p', { 'data-testid': 'qp-last-failure' }, failure !== null
-          ? `最近失败：${ageLine(failure.failedAt)}（failedAt ${failure.failedAt}）`
+        // 出口上的失败那一笔：`failed` 为真时，`updatedAt` 就是这笔失败的时刻（相对时间按 U16/§2.5 的建议把差值钳制到 0）。
+        h('p', { 'data-testid': 'qp-last-failure' }, display?.failed === true && display.updatedAt !== null
+          ? `最近失败：${ageLine(display.updatedAt)}（updatedAt ${display.updatedAt}）`
           : '最近失败：无'),
         h('p', { 'data-testid': 'qp-note' }, failures.value > 0 ? '后台失败不关闭需求：保留开启意愿，下个周期继续' : ''),
       ])

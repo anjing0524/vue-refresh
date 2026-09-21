@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { RefreshCore } from '../src/core.ts'
 import type { ResultCell, ResultSink } from '../src/core.ts'
-import type { Config, Resource } from '../src/resource.ts'
-import { prepareParameters } from '../src/source.ts'
-import type { Parameters } from '../src/source.ts'
+import type { PageSlot, Resource } from '../src/resource.ts'
+import { prepareParameters } from '../src/parameters.ts'
+import type { Parameters } from '../src/parameters.ts'
 import type { RefreshDisplay, SubmitResult } from '../src/public-types.ts'
 import { snapshot } from '../scripts/observe.ts'
 
@@ -17,8 +17,8 @@ import { snapshot } from '../scripts/observe.ts'
 const cores: RefreshCore[] = []
 
 /**
- * 结果表替身：与 Pinia store 同形（格＝成功 ＋ 失败，整格换新对象、随实例释放即删），
- * 并记录成功写入次序供断言。`onWrite` 让用例模拟「写结果的那一刻页面代码同步重入」。
+ * 结果表替身：与 Pinia store 同形（格＝最近一次请求之后的 `data` ／ `updatedAt` ／ `failed` ／ `error`，
+ * 整格换新对象、随实例释放即删），并记录成功写入次序供断言。`onWrite` 让用例模拟「写结果的那一刻页面代码同步重入」。
  */
 function newTable() {
   const cells = new Map<string, ResultCell>()
@@ -27,15 +27,13 @@ function newTable() {
   const table = {
     sink: {
       write(url: string, key: string, data: unknown, updatedAt: number): void {
-        cells.set(id(url, key), { data, updatedAt, error: undefined, failedAt: null })
+        cells.set(id(url, key), { data, updatedAt, failed: false, error: undefined })
         writes.push({ url, key, data, updatedAt })
         table.onWrite?.()
       },
-      fail(url: string, key: string, error: unknown, failedAt: number): void {
+      fail(url: string, key: string, error: unknown, updatedAt: number): void {
         const previous = cells.get(id(url, key))
-        cells.set(id(url, key), {
-          data: previous?.data, updatedAt: previous?.updatedAt ?? null, error, failedAt,
-        })
+        cells.set(id(url, key), { data: previous?.data, updatedAt, failed: true, error })
         table.onWrite?.()
       },
       remove(url: string, key: string): void { cells.delete(id(url, key)) },
@@ -52,9 +50,13 @@ function newTable() {
     writes,
     onWrite: null as (() => void) | null,
     read(url: string, key: string): ResultCell | undefined { return cells.get(id(url, key)) },
-    /** 这一格上最近一次失败的时刻；成功过、或从未写过都是 `null`。 */
-    failedAt(url: string, key: string): number | null { return cells.get(id(url, key))?.failedAt ?? null },
-    /** 这一格上最近一次失败的原始异常。 */
+    /** 这一格上最近一次失败的时刻；自最后一次成功以来没失败过、或从未写过都是 `null`。
+     *  单出口之后失败也推进那一格的时间（ADR-122），所以这笔失败的时刻就是这一格的 `updatedAt`。 */
+    failedAt(url: string, key: string): number | null {
+      const cell = cells.get(id(url, key))
+      return cell?.failed === true ? cell.updatedAt : null
+    },
+    /** 这一格上最近一次失败的原始异常（最近一次是成功时为 `undefined`）。 */
     error(url: string, key: string): unknown { return cells.get(id(url, key))?.error },
   }
   return table
@@ -99,14 +101,14 @@ export function disposeAllCores(): void {
  * `present` 是**适配层合成**的「环境允许」：ADR-61 起这一页是否激活在快照里，可见性也由适配层并进来
  * ——核心只读这一份快照，不持有全局可见性。
  */
-export const DEFAULT_CONFIG: Config = { enabled: true, every: 100_000, present: true }
+export const DEFAULT_SLOT: PageSlot = { enabled: true, every: 100_000, present: true }
 /** 只给要改的那几项；`null` 表示整份快照非法。 */
-export type PartialConfig = { enabled?: boolean; every?: number; present?: boolean }
+export type PartialSlot = { enabled?: boolean; every?: number; present?: boolean }
 
 /** 一页：一份配置槽 ＋ 按身份读结果表。与适配层同一分工（ADR-64、ADR-66）。 */
 export interface Page {
   /** 这一页在核心里的**全部内容**：一份配置快照，原地改写，按身份挂在实例的 `declarers` 里。 */
-  readonly config: Config
+  readonly slot: PageSlot
   readonly url: string
   readonly last: RefreshDisplay<object, unknown> | undefined
   /** 已声明身份的参数键；没有身份时为 `null`（参数准备在调用方这一侧，与适配层同形）。 */
@@ -120,25 +122,25 @@ export interface Page {
   submit(args: object): SubmitResult
   refresh(): void
   /** 合并式写快照：只给要改的那项，其余沿用当前值（ADR-61 的单一写入口）；`null` 表示配置非法。 */
-  set(next: PartialConfig | null): void
+  set(next: PartialSlot | null): void
 }
 
 export function page(
   core: RefreshCore,
   source: string,
-  initial: PartialConfig | null = {},
+  initial: PartialSlot | null = {},
 ): Page {
   const table = tableOf(core)
   const url = source
   // 交给核心的只有数据：URL、配置快照与身份（参数准备在提交边界做）——与适配层同一分工（ADR-64、ADR-66）。
   // 资源声明现在就是 URL 字符串本身：没有定义对象、也没有准入回调（ADR-74）。
-  const config: Config = initial === null
+  const slot: PageSlot = initial === null
     ? { enabled: false, every: null, present: false }
-    : { ...DEFAULT_CONFIG, ...initial }
+    : { ...DEFAULT_SLOT, ...initial }
   /** 本页已声明身份的副本：页面 → 身份这条映射归调用方（核心只按身份登记，ADR-66）。 */
   let declared: Parameters | null = null
   return {
-    config,
+    slot,
     url,
     key: () => declared?.key ?? null,
     writes(): number {
@@ -162,29 +164,30 @@ export function page(
       } catch (error) {
         return { status: 'rejected', error }
       }
-      const result = core.submit(config, url, parameters)
+      const result = core.submit(slot, url, parameters)
       if (result.status === 'accepted') declared = parameters
       return result
     },
     refresh: () => {
       if (declared === null) return
-      core.refresh(config, url, declared.key)
+      core.refresh(slot, url, declared.key)
     },
     set(next) {
-      if (next === null) core.setConfig(config, undefined, undefined, false)
-      else core.setConfig(config, next.enabled ?? config.enabled, next.every ?? config.every, next.present ?? config.present)
+      if (next === null) core.setConfig(slot, undefined, undefined, false)
+      else core.setConfig(slot, next.enabled ?? slot.enabled, next.every ?? slot.every, next.present ?? slot.present)
     },
     get last() {
       if (declared === null) return undefined
       const cell = table.read(url, declared.key)
       if (!cell) return undefined
-      // `display` 的形状：`args` 每次读取复制一份（身份键所描述的那份值），`data` 是结果表里同一个对象。
+      // `display` 的形状：`args` 每次读取复制一份（身份键所描述的那份值），`data` 是结果表里同一个对象，
+      // `updatedAt` ／ `failed` ／ `error` 属于最近一次请求（成功与失败都算，ADR-122）。
       return {
         args: structuredClone(declared.args),
-        data: cell.updatedAt === null ? null : cell.data,
+        data: cell.data === undefined ? null : cell.data,
         updatedAt: cell.updatedAt,
+        failed: cell.failed,
         error: cell.error,
-        failedAt: cell.failedAt,
       }
     },
   }
@@ -199,7 +202,7 @@ export function page(
  *   它只决定画面跟不跟随新结果（冻结见 ADR-60），不决定实例在不在。
  */
 export function declared(core: RefreshCore, view: Page): Resource | undefined {
-  return snapshot(core).resources.find(resource => resource.declarers.has(view.config))
+  return snapshot(core).resources.find(resource => resource.declarers.has(view.slot))
 }
 
 /**
@@ -210,20 +213,20 @@ export function declared(core: RefreshCore, view: Page): Resource | undefined {
  */
 export function eligible(core: RefreshCore, view: Page): boolean {
   const key = view.key()
-  return key !== null && core.isEligible(view.config, view.url, key)
+  return key !== null && core.isEligible(view.slot, view.url, key)
 }
 
 /**
- * 队列不变量：在队的实例必须带着「这次执行」的 controller，而且不可能同时在跑。
+ * 队列不变量：在队的实例必须带着「这次执行」的 execution，而且不可能同时在跑。
  *
- * `queue` 的唯一写入者是 `place`，它进入 `queued` 时就建好 controller，因此 `startQueued`
+ * `queue` 的唯一写入者是 `place`，它进入 `queued` 时就建好 execution，因此 `startQueued`
  * 不再复核归属（ADR-62 删掉了那个已不可达的分支）。这条断言把那个前提钉住：一旦有人新增
  * 第二个入队路径，它会红。
  */
 export function assertQueueConsistent(core: RefreshCore): void {
   const view = snapshot(core)
   for (const resource of view.queued) {
-    assert.notEqual(resource.controller, null, '在队的实例必须带着这次执行的 controller')
+    assert.notEqual(resource.execution, null, '在队的实例必须带着这次执行的 execution')
     assert.equal(view.running.includes(resource), false, '在队的实例不可能同时在跑')
   }
   // `enqueue` 不去重：前提是调用点都保证它不在队里，这条探针替运行期守着。

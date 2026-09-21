@@ -112,7 +112,7 @@ export const scenarios: Array<{ name: string; run: (d: Driver) => Promise<void> 
     check((await d.requests())[0]!.status === 'aborted', 'transport saw the disconnect')
     // 失败是那一格的事实（ADR-63）：首查就失败时画面**不是** null，而是「有失败、没有数据」。
     const timedOut = state.pages['甲']
-    check(shown(timedOut) === null && (timedOut?.failedAt ?? null) !== null,
+    check(shown(timedOut) === null && timedOut?.failed === true,
       'timed-out request delivers a failure and no data')
     check(state.running === 0 && state.queued === 0, 'deadline releases the physical slot')
     await sleep(1_000)

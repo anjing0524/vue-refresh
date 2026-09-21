@@ -1,6 +1,5 @@
 import { ref } from 'vue'
 import { useRefresh } from '../src/index.ts'
-import type { RefreshFailure } from '../src/index.ts'
 interface Params { account: string; symbol: string; filter?: { page: number } }
 interface Quote { price: number }
 // URL 与参数值决定身份；`Quote` 是**声明**的原始返回结构（框架不做响应转换，所以没有取数函数可绑定）。
@@ -20,7 +19,7 @@ function contract() {
   // @ts-expect-error refresh takes no DTO argument
   task.refresh({ account: 'demo', symbol: 'A' })
   const settled = task.refresh()
-  // 结算结果只报成功/失败/取消，不携带 DTO：数据只经 display 交付。
+  // `refresh` 没有回执（U14）：它连结算结果都不返回，成功与失败都只经 display。
   // @ts-expect-error the settlement result carries no DTO
   settled.then(result => result.data)
   // @ts-expect-error status is a closed union
@@ -32,26 +31,37 @@ function contract() {
   // 正面探针：声明在定义点的 `Quote` 仍然决定 `display` 的数据类型。
   const price: number = task.display.value!.data!.price
   void price
-  // 首查就失败时从未成功过：`data` 与 `updatedAt` 都是 null，读取面必须自己判空（ADR-63）。
+  // 首查就失败时从未成功过：`data` 是 null；`updatedAt` 是那一次请求的时刻，读取面必须自己判空（ADR-63、ADR-122）。
   const maybeQuote: Quote | null = task.display.value!.data
   void maybeQuote
   const maybeTime: number | null = task.display.value!.updatedAt
   void maybeTime
-  // @ts-expect-error 失败不在数据出口上：它有自己的出口（ADR-77）
-  task.display.value!.failedAt
-  // @ts-expect-error 失败不在数据出口上：它有自己的出口（ADR-77）
-  task.display.value!.error
-  // 失败出口（ADR-77）：`null` ＝ 自最后一次成功以来没失败过（含从未失败过）。
-  const failure: RefreshFailure | null = task.failure.value
-  const cause: unknown = task.failure.value!.error
-  const failedAt: number = task.failure.value!.failedAt
-  void failure
+  // 失败与数据在同一个出口上（ADR-122）：判这笔结算看 `failed`，原因是 `error`。
+  const failed: boolean = task.display.value!.failed
+  const cause: unknown = task.display.value!.error
+  void failed
   void cause
-  void failedAt
-  // @ts-expect-error 失败是框架写的事实，页面不能改写它
-  task.failure.value = null
+  // @ts-expect-error 页面侧只有一个读出口：失败没有自己的 `Ref`（ADR-122）
+  void task.failure
   // @ts-expect-error 失败不再由框架推送：`onError` 这一项已删除（ADR-63）
   useRefresh<Params, Quote>(source, { enabled: ref(true), every: ref(1000), onError: () => {} })
+  // 读取面不带版本号／代次／「由谁触发」的标记（§2.5）：这三个名字一旦被加进公开形状，这里会红。
+  // @ts-expect-error 读取面没有版本号
+  void task.display.value!.generation
+  // @ts-expect-error 读取面没有代次
+  void task.display.value!.epoch
+  // @ts-expect-error 读取面没有「由谁触发」的标记
+  void task.display.value!.triggeredBy
+  // 框架不提供「正在刷新」这类实时状态（§2.5）：句柄与出口上都没有它。
+  // @ts-expect-error 句柄上没有「正在刷新」这个状态
+  void task.refreshing
+  // @ts-expect-error 出口上没有「正在刷新」
+  void task.display.value!.refreshing
+  // 结果表不是包契约（§2.5）：包入口不导出它，页面侧只有一个只读出口。
+  // @ts-expect-error 包入口不导出结果表
+  type InternalStore = import('../src/index.ts').useRefreshStore
+  void (null as unknown as InternalStore)
+
   // 擦除视图：类型参数写在调用上（`object` 是值域的最宽形态），异构注册表不必在接收点留类型断言；
   // 反向的代价是读出来的数据收不窄成具体 DTO。
   const erasedTask = useRefresh<object, unknown>(source, { enabled: ref(true), every: ref(1000) })

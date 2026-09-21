@@ -5,7 +5,7 @@ import { createPinia } from 'pinia'
 import { createRefreshManager, currentCore, useRefresh } from '../src/vue.ts'
 import { useRefreshStore } from '../src/store.ts'
 import type { RefreshHttp } from '../src/core.ts'
-import type { RefreshDisplay, RefreshFailure, RefreshHandle, RefreshManager } from '../src/public-types.ts'
+import type { RefreshDisplay, RefreshHandle, RefreshManager, SubmitResult } from '../src/public-types.ts'
 import type { Ref } from 'vue'
 import { snapshot } from '../scripts/observe.ts'
 
@@ -152,7 +152,7 @@ test('A04/A05 配置非法：不取数并停止订阅，修正后按当前资格
   await tick()
   await tick()
   // 配置非法不产生任何结果：它是本页自己的输入事实，框架只负责不订阅、不请求（ADR-51）。
-  assert.equal(api.failure.value, null, '配置非法不写失败')
+  assert.equal(api.display.value?.failed, false, '配置非法不写失败：出口上没有失败这一笔')
 
   every.value = 50_000
   await tick()
@@ -363,7 +363,7 @@ test('A04 运行期读到非布尔时按配置非法处理：不订阅、不写�
   ;(enabled as Ref<unknown>).value = undefined
   await tick()
   await tick()
-  assert.equal(api.failure.value, null, '配置非法不写失败')
+  assert.equal(api.display.value?.failed, false, '配置非法不写失败：出口上没有失败这一笔')
   api.submit({ symbol: 'B' })
   await tick()
   assert.equal(loads, 1, '配置非法时不订阅')
@@ -406,7 +406,7 @@ test('A21 节流：慢页面不跟着快页面跳，节流窗口内的新版本�
 
   const latest = (): unknown => {
     const cell = snapshotOf()?.results[0]?.cell
-    return cell === undefined || cell.updatedAt === null ? null : cell.data
+    return cell === undefined || cell.data === undefined ? null : cell.data
   }
   // 新身份的第一份内容不等节流：两个页面都立即拿到首查结果。
   assert.equal(slow.display.value?.data, 1, '慢页面的第一份内容立即上屏')
@@ -456,7 +456,7 @@ test('A03/A21 相同身份重复声明幂等：不动读取基准，慢页面仍
 
   const latest = (): unknown => {
     const cell = snapshotOf()?.results[0]?.cell
-    return cell === undefined || cell.updatedAt === null ? null : cell.data
+    return cell === undefined || cell.data === undefined ? null : cell.data
   }
   assert.equal(slow.display.value?.data, 1, '慢页面的第一份内容立即上屏')
   // 快页面把共享取数推到更后面，慢页面在 100 秒的窗口里停在首查那一帧。
@@ -509,7 +509,7 @@ test('A21 写端稀于本页 every 时写入即抄：节流不丢数据，新格
   app.unmount()
 })
 
-test('A13 失败有独立的读出口（不参与数据窗口）：首查失败也读得到，成功后清回 null，数据保留旧址', async () => {
+test('A13/A11 唯一出口：成功与失败是同一笔（同一个窗口）——首查失败也读得到，成功后清回假，数据保留旧址', async () => {
   let mode: 'ok' | 'fail' = 'fail'
   let loads = 0
   const manager = newManager(1, async () => {
@@ -531,27 +531,29 @@ test('A13 失败有独立的读出口（不参与数据窗口）：首查失败�
   api.submit({ symbol: 'A' })
   await tick()
 
-  // 首查就失败：数据出口照样发布（`data: null`），失败在它自己的出口上——否则首查失败无从读取。
+  // 首查就失败：出口照样发布（`data: null`、`failed: true`）——否则首查失败无从读取。
   assert.notEqual(api.display.value, null, '首查失败也发布画面（否则首查失败无从读取）')
+  assert.equal(api.display.value?.failed, true, '这一笔是失败')
   assert.equal(api.display.value?.data, null, '从未成功过：数据为 null')
-  assert.equal(api.display.value?.updatedAt, null)
-  assert.match(String((api.failure.value?.error as Error).message), /boom-1/, '原始异常原样带出')
+  assert.ok(typeof api.display.value?.updatedAt === 'number', '失败那一笔带自己的时刻：出口上只有一个时间')
+  assert.match(String((api.display.value?.error as Error).message), /boom-1/, '原始异常原样带出')
 
   mode = 'ok'
   api.refresh()
   await until(() => api.display.value?.data === 2, '显式刷新后读到成功结果')
-  assert.ok(api.failure.value === null, '成功清掉失败')
+  assert.equal(api.display.value?.failed, false, '成功清掉失败')
 
-  // 暂停页自己刷新那一次（A05、U14）：失败照样读得到，且不覆盖数据出口那一版。
+  // 暂停页那一侧（`enabled: false` 的页自己点刷新、失败从同一个出口读到）见下面的
+  // 「A13 暂停页显式刷新的失败也经唯一出口」——本条这一页是开着意愿的，只证明「刷新没有回执」。
   mode = 'fail'
   api.refresh()
-  await until(() => api.failure.value !== null, '失败重新可读')
+  await until(() => api.display.value?.failed === true, '失败重新可读')
   assert.equal(api.display.value?.data, 2, '失败不覆盖旧址（数据仍是上一次成功的）')
-  assert.equal(api.display.value?.updatedAt !== null, true, '失败不动结果的产生时间')
+  assert.ok((api.display.value?.updatedAt ?? 0) > 0, '失败把这一格的时间推进到这一次请求的时刻')
   app.unmount()
 })
 
-test('A13/A11 失败与数据是两个出口：周期性失败不等数据窗口就上屏，成功一到又清回 null', async () => {
+test('A13/A11 唯一出口：周期性失败也按同一个窗口到达画面，成功一到 `failed` 又清回假', async () => {
   let mode: 'ok' | 'fail' = 'ok'
   let loads = 0
   const manager = newManager(1, async () => {
@@ -563,7 +565,7 @@ test('A13/A11 失败与数据是两个出口：周期性失败不等数据窗口
 
   const app = renderer.createApp(defineComponent({
     setup() {
-      // 周期取正常值就够：失败那一笔不动 `updatedAt`，所以按数据窗口它永远进不了画面。
+      // 周期取正常值就够：失败那一笔也把 `updatedAt` 往前推，所以它按**同一个窗口**到达画面（ADR-122）。
       api = useRefresh<{ symbol: string }, number>('/api/vue/266', { enabled: ref(true), every: ref(20) })
       return () => h('div')
     },
@@ -573,21 +575,17 @@ test('A13/A11 失败与数据是两个出口：周期性失败不等数据窗口
   await tick()
   api.submit({ symbol: 'A' })
   await until(() => api.display.value?.data === 1, '首查成功')
-  const never: RefreshFailure | null = api.failure.value
-  assert.equal(never, null, '还没有失败过：失败出口是 null')
+  assert.equal(api.display.value?.failed, false, '还没有失败过：这一笔不是失败')
 
-  // 不点刷新：让**周期取数**自己失败。旧口径（失败挤在数据窗口里）下这一条只能等到超时。
+  // 不点刷新：让**周期取数**自己失败。旧口径（失败有自己的出口、不参与窗口）下它当场就上屏；
+  // 单出口之后它与数据共用窗口，最多晚一个周期到达——这里等它到达，再验证数据没被毁。
   mode = 'fail'
-  await until(() => api.failure.value !== null, '周期性失败立刻上屏，不等数据窗口')
-  const failed: RefreshFailure | null = api.failure.value
-  assert.match(String((failed?.error as Error).message), /late-2/, '原始异常原样带出')
-  assert.equal(api.display.value?.data, 1, '失败不动数据出口那一版')
+  await until(() => api.display.value?.failed === true, '周期性失败也到达画面（按同一个窗口）')
+  assert.match(String((api.display.value?.error as Error).message), /late-\d+/, '原始异常原样带出')
+  assert.equal(api.display.value?.data, 1, '失败不动旧址：数据仍是上一次成功的')
 
   mode = 'ok'
-  await until(() => api.failure.value === null, '下个周期成功：失败清回 null')
-  const cleared: RefreshFailure | null = api.failure.value
-  assert.equal(cleared, null, '成功之后失败出口是 null')
-  assert.ok((api.display.value?.data ?? 0) > 1, '成功也从数据出口读得到（这一版已过窗口）')
+  await until(() => api.display.value?.failed === false && (api.display.value?.data ?? 0) > 1, '下个周期成功：failed 清回假、数据跟上')
   app.unmount()
 })
 
@@ -669,11 +667,11 @@ test('A17 协调者销毁后读取面一起清空：结果表已空，两个出�
   await tick()
   assert.equal(display.value?.data, 7, '先成功一份，画面有内容可冻')
 
-  // 再让这一格失败一次：失败出口有内容，数据出口仍留着上一次成功（ADR-63）。
+  // 再让这一格失败一次：失败那一笔写进同一个出口，数据仍留着上一次成功（ADR-63、ADR-122）。
   mode = 'fail'
   api.refresh()
   await tick()
-  assert.notEqual(api.failure.value, null, '失败出口先有内容')
+  assert.equal(api.display.value?.failed, true, '失败那一笔到达画面')
 
   // 销毁协调者：结果表条目随 `releaseIfUnused` 清空，读取面必须跟着清——否则页面读的是
   // 一个已经不存在的协调者留下的最后一帧，且再也没有任何东西会叫醒它。
@@ -683,9 +681,7 @@ test('A17 协调者销毁后读取面一起清空：结果表已空，两个出�
   assert.equal(snapshotOf(), undefined, '观测面也拿不到一个已销毁的实例')
   // 这里用 `assert.equal` 断言会把这个 `Ref` 收窄成「值恒为 null」，所以先各取一份再判。
   const clearedDisplay = display.value
-  const clearedFailure = api.failure.value
-  assert.equal(clearedDisplay, null, '销毁后数据出口清空')
-  assert.equal(clearedFailure, null, '销毁后失败出口清空')
+  assert.equal(clearedDisplay, null, '销毁后出口清空')
 
   // 页面还活着，但协调者没了：这两个动作都不再产生事实（§2.4）。
   assert.deepEqual(api.submit({ symbol: 'B' }), { status: 'cancelled' }, '没有协调者时 submit 回 cancelled')
@@ -855,16 +851,18 @@ test('A11/A02 换身份后首查又失败：args 跟着换到新身份（同一�
   await until(() => api.display.value !== null, '首查就失败也要上屏（data 为 null）')
   const first: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
   assert.equal(first?.args.symbol, 'A')
-  assert.equal(first?.updatedAt, null, '从未成功过：两个出口的时间都是 null')
+  assert.equal(first?.data, null, '从未成功过：数据为 null')
+  assert.equal(first?.failed, true, '这一笔是失败')
 
-  // 换身份之后这一格同样从未成功：`updatedAt` 还是 null，但它**不是**同一版，args 必须跟着换。
+  // 换身份之后这一格同样没有数据，两个身份各自的时刻还可能落在同一毫秒：同一个时间戳**不是**同一版，
+  // args 必须跟着换（守卫比身份，不比时间）。
   api.submit({ symbol: 'B' })
-  await until(() => api.display.value?.args.symbol === 'B', '换身份后 args 跟着换（不能拿「两个 null 相等」当同一版）')
+  await until(() => api.display.value?.args.symbol === 'B', '换身份后 args 跟着换（同一个时间戳不算同一版）')
   app.unmount()
   await tick()
 })
 
-test('A12/A06 发布期间换身份：读取面重新订上新身份的格（同步 failure watcher 里换身份）', async () => {
+test('A12/A06 发布期间换身份：读取面重新订上新身份的格（同步 display watcher 里换身份）', async () => {
   let api!: RefreshHandle<{ symbol: string }, number>
   let failA = false
   let loads = 0
@@ -876,8 +874,8 @@ test('A12/A06 发布期间换身份：读取面重新订上新身份的格（同
   const app = renderer.createApp(defineComponent({
     setup() {
       api = useRefresh<{ symbol: string }, number>('/api/vue/282', { enabled: ref(true), every: ref(20) })
-      // 页面在失败出口上换到备用身份：这一次发布是同步的，换身份就发生在发布当中。
-      watch(api.failure, () => { if (api.failure.value !== null) api.submit({ symbol: 'B' }) }, { flush: 'sync' })
+      // 页面在失败那一笔里换到备用身份：这一次发布是同步的，换身份就发生在发布当中。
+      watch(api.display, () => { if (api.display.value?.failed === true) api.submit({ symbol: 'B' }) }, { flush: 'sync' })
       return () => h('div')
     },
   }))
@@ -921,7 +919,7 @@ test('A12/A06 发布期间换身份：display watcher 里换身份同样收敛�
   await tick()
 
   api.submit({ symbol: 'A' })
-  await until(() => api.display.value?.args.symbol === 'B', '在数据出口里换身份之后同样收敛到新身份')
+  await until(() => api.display.value?.args.symbol === 'B', '在出口里换身份之后同样收敛到新身份')
   app.unmount()
   await tick()
 })
@@ -933,8 +931,8 @@ test('A12/A17 发布期间卸载：释放之后不再把过期的那一版上屏
   const app = renderer.createApp(defineComponent({
     setup() {
       api = useRefresh<{ id: number }, number>('/api/vue/284', { enabled: ref(true), every: ref(100_000) })
-      // 失败出口发布的那一刻同步卸载整棵应用：这一次的 args 已经过期，不能再写进画面。
-      watch(api.failure, () => { if (api.failure.value !== null) unmount?.() }, { flush: 'sync' })
+      // 失败那一笔发布的那一刻同步卸载整棵应用：这一次的 args 已经过期，不能再写进画面。
+      watch(api.display, () => { if (api.display.value?.failed === true) unmount?.() }, { flush: 'sync' })
       return () => h('div')
     },
   }))
@@ -1098,6 +1096,7 @@ test('A12/A21 身份落定不等窗口：换到的身份那一版比画面旧也
   const landed = view.display.value
   assert.ok(landed, 'Y 已上屏')
   assert.equal(landed.data, 'Y', '换身份后画面立刻是新身份那一份，不留在旧身份那一帧')
+  assert.equal(landed.args.symbol, 'Y', 'args 与 data 是同一版：display 整格一起给出，不出现半新半旧')
   assert.ok(
     landed.updatedAt !== null && xShown.updatedAt !== null && landed.updatedAt < xShown.updatedAt,
     '这一版比画面里那一版旧：窗口本来会把它挡住，身份落定必须放行',
@@ -1131,9 +1130,9 @@ test('A04 配置 getter 抛错：这一拍按配置非法处理，恢复靠抛�
   await tick()
 
   assert.equal(loads, 0, '配置读不出＝配置非法：不取数')
-  assert.equal(api.failure.value, null, '配置非法不写失败：它是页面自己的输入')
+  // 唯一出口：先绑一个局部变量再断言，免得把 `api.display.value` 收窄成恒 `null`（后面还要读它）。
   const nothing: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
-  assert.equal(nothing, null, '还没有任何结果')
+  assert.equal(nothing, null, '配置非法不写任何事实：出口仍是 null')
 
   // §3.6 明说的边界：抛错那一项**之后**的项当轮不再被读取，Vue 也会清掉当轮未重新收集的依赖，
   // 所以只改 `every` 不解开——恢复要靠抛错那一项自身的变化。
@@ -1151,7 +1150,7 @@ test('A04 配置 getter 抛错：这一拍按配置非法处理，恢复靠抛�
   app.unmount()
 })
 
-test('A13 失败出口：error 原样带出——页面 throw undefined 也算一笔失败', async () => {
+test('A13/A11 唯一出口：`error` 原样带出，判失败看 `failed`——页面 throw undefined 也算一笔失败', async () => {
   let loads = 0
   const manager = newManager(1, async () => {
     loads++
@@ -1170,18 +1169,267 @@ test('A13 失败出口：error 原样带出——页面 throw undefined 也算�
   app.mount({} as never)
   await tick()
   api.submit({ symbol: 'A' })
-  await until(() => api.failure.value !== null, '首查失败写进失败出口')
+  await until(() => api.display.value?.failed === true, '首查失败写进唯一出口')
 
   // §3.3 U13：`error` 原样带出原始异常（页面 `throw undefined` 也如实带出），
-  // 所以判断有没有失败看 `failure` 是不是 `null`，而不是看 `error` 是不是 `undefined`。
-  const failed: RefreshFailure | null = api.failure.value
-  assert.ok(failed, '失败出口给出的是一笔事实')
+  // 所以判断这一笔是不是失败看 `failed`，而不是看 `error` 是不是 `undefined`；`updatedAt` 是这一笔的时刻。
+  const failed: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
+  assert.ok(failed, '出口给出的是一笔事实')
+  assert.equal(failed.failed, true, '这一笔是失败：判据是 `failed`，不是 `error`')
   assert.equal(failed.error, undefined, '原始异常原样带出，不做兜底替换')
-  assert.ok(typeof failed.failedAt === 'number' && failed.failedAt > 0, '失败带自己的时刻')
-  assert.equal(api.display.value?.data, null, '首查失败：数据出口仍然给出「没有数据」这一版')
+  assert.ok(typeof failed.updatedAt === 'number' && failed.updatedAt > 0, '失败带自己的时刻')
+  assert.equal(failed.data, null, '首查失败：出口仍然给出「没有数据」这一版')
 
   api.refresh()
   await until(() => api.display.value?.data === 7, '成功之后拿到数据')
-  assert.equal(api.failure.value, null, '成功一到，失败清回 null')
+  assert.equal(api.display.value?.failed, false, '成功一到，`failed` 清回假')
   app.unmount()
+})
+
+/**
+ * 下面这一批补的是**适配层自己的分支**：`src/vue.ts` 的 `try/catch`、`structuredClone`、
+ * `install` 的幂等分支与「发布是同步的」这些事，此前只被核心级用例或测试夹具自带的同名实现
+ * 间接覆盖（夹具自己 `structuredClone` 了一份 `args`、自己 `try/catch` 了一遍参数准备），
+ * 等于自己证明自己。这里全部打在公开面上（`submit` / `display` / `install`）。
+ */
+
+test('A03/A18 适配层：参数准备抛错就地变同步 rejected，框架不把它抛给调用方', async () => {
+  let loads = 0
+  const manager = newManager(1, async () => { loads++; return 1 })
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/1270', { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value?.data === 1, '先把旧身份取好')
+  const before = api.display.value
+
+  // 函数复制不出来（`structuredClone` 抛错）：提交边界的异常就地变成同步返回值（§2.4、U15）。
+  let result: SubmitResult | undefined
+  assert.doesNotThrow(() => { result = api.submit({ symbol: () => 1 } as never) })
+  assert.equal(result?.status, 'rejected', '参数准备的抛错变成同步 rejected')
+  assert.equal(loads, 1, '被拒的提交不取数')
+  assert.equal(api.display.value, before, '被拒的提交不改动画面（读取基准也不动）')
+  assert.equal(api.display.value?.args.symbol, 'A', '旧身份原样保留')
+
+  // 对照：同一页换一个合法身份照常接纳——拒绝只针对那一份输入。
+  assert.equal(api.submit({ symbol: 'B' }).status, 'accepted')
+  await until(() => api.display.value?.args.symbol === 'B', '合法参数照常接纳并取数')
+  app.unmount()
+})
+
+test('A11/A19 适配层：display.args 每次抄写复制一份，页面改它改不到下一轮请求', async () => {
+  const bodies: string[] = []
+  let loads = 0
+  const manager = newManager(1, async (_url, body) => { loads++; bodies.push(JSON.stringify(body)); return loads })
+  let api!: RefreshHandle<{ symbol: string; tags: string[] }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string; tags: string[] }, number>('/api/vue/1280', { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A', tags: [] })
+  await until(() => api.display.value !== null, '首帧上屏')
+
+  // 就地改自己读到的那一份：这是页面的自由，不能污染身份键描述的那份值（ADR-52）。
+  const shown = api.display.value as RefreshDisplay<{ symbol: string; tags: string[] }, number>
+  const mine = shown.args as unknown as { tags: string[] }
+  mine.tags.push('页面改的')
+  assert.deepEqual(mine.tags, ['页面改的'], '改的是自己读到的那一份')
+
+  api.refresh()
+  await until(() => loads === 2, '第二轮取数')
+  assert.deepEqual(JSON.parse(bodies[1] ?? 'null'), { symbol: 'A', tags: [] }, '下一轮请求体仍是提交那一刻的值')
+  const again = api.display.value as RefreshDisplay<{ symbol: string; tags: string[] }, number>
+  assert.deepEqual((again.args as unknown as { tags: string[] }).tags, [], '再次发布的 args 仍是身份键描述的那份值')
+  app.unmount()
+})
+
+test('A13 暂停页显式刷新的失败也经唯一出口：没有回执，成功与失败走同一个通道', async () => {
+  let loads = 0
+  const manager = newManager(1, async () => { loads++; throw new Error('down') })
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/1290', { enabled: ref(false), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+  assert.equal(loads, 0, '暂停页不自动取数')
+
+  // 暂停页的入口闸不看开启意愿（U14）：这一页仍然能点名要一次；失败从同一个出口读。
+  api.refresh()
+  await until(() => api.display.value?.failed === true, '暂停页刷新的失败经唯一出口')
+  const failed: RefreshDisplay<{ symbol: string }, number> | null = api.display.value
+  assert.ok(failed, '失败是一笔事实')
+  assert.match(String((failed.error as Error).message), /down/, '原始异常原样带出')
+  assert.equal(loads, 1, '恰好取了一次：刷新被受理，但不会把它变回自动取数')
+  assert.equal(failed.data, null, '首查失败：出口给出「没有数据」那一版')
+  await sleep(40)
+  assert.equal(loads, 1, '暂停页刷新不恢复自动取数')
+  app.unmount()
+})
+
+test('A14 配置非法时 refresh 被丢弃：不取数、不清读取基准（页面读自己的 refs 就知道）', async () => {
+  let loads = 0
+  const { manager, store } = newManagerWithStore(1, async () => { loads++; return loads })
+  const every = ref(100_000)
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/1300', { enabled: ref(true), every })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value?.data === 1, '首帧上屏')
+  const shown = api.display.value
+
+  every.value = 0 // 配置非法：整槽按非法处理（U04、§3.6）
+  await tick()
+  api.refresh()
+  await tick()
+  await tick()
+  assert.equal(loads, 1, '配置非法时刷新被丢弃：不产生请求')
+  assert.equal(api.display.value, shown, '画面不变')
+
+  // 被丢弃的那一次刷新**没有**把读取基准置空：窗口没到时新版本照样不上屏（U12）。
+  store.write('/api/vue/1300', '{"symbol":"A"}', 99, Date.now())
+  await tick()
+  assert.notEqual(loads, 0)
+  assert.equal(api.display.value, shown, '读取基准还在：窗口内结果表的新版本不改变画面')
+  app.unmount()
+})
+
+test('A12/§3.3 写入触发判定：写入结果表的那一拍就把画面抄好（发布是同步的）', async () => {
+  const { manager, store } = newManagerWithStore(1, async () => 1)
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      // 暂停页：声明了身份、还没有读取基准、浏览器可见 → 按读闸门第二支它是读者。
+      api = useRefresh<{ symbol: string }, number>('/api/vue/1310', { enabled: ref(false), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await tick()
+  assert.equal(api.display.value, null, '还没有任何写入')
+
+  // 直接往这一格写一笔：**不 await 任何东西**，下一行就断言画面已经抄好。
+  // 若发布改成延后（例如 `flush: 'pre'` 或轮询），这里立刻红。
+  store.write('/api/vue/1310', '{"symbol":"A"}', 42, Date.now())
+  const shown = api.display.value as RefreshDisplay<{ symbol: string }, number> | null
+  assert.notEqual(shown, null, '写入的那一拍画面就有了这一版')
+  assert.equal(shown?.data, 42)
+  app.unmount()
+})
+
+test('§2.5 updatedAt 是最近一次请求结算的墙钟毫秒', async () => {
+  const manager = newManager(1, async () => 7)
+  let api!: RefreshHandle<{ symbol: string }, number>
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/1320', { enabled: ref(true), every: ref(100_000) })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await until(() => api.display.value !== null, '首帧上屏')
+
+  // 最近一次请求结算的墙钟毫秒：换成一个计数、代次或别的钟，这条就红。
+  const at = api.display.value?.updatedAt ?? 0
+  assert.ok(Math.abs(at - Date.now()) < 1_000, `updatedAt 是墙钟毫秒（实测与现在相差 ${Math.abs(at - Date.now())}ms）`)
+  assert.notEqual(at, 0, '不是从 0 开始的计数')
+  app.unmount()
+})
+
+test('A21/A12 写端稀于本页 every 时写入即抄：每一版都上屏，不跳版', async () => {
+  let loads = 0
+  const manager = newManager(1, async () => { loads++; await sleep(80); return loads })
+  let api!: RefreshHandle<{ symbol: string }, number>
+  const seen: number[] = []
+
+  const app = renderer.createApp(defineComponent({
+    setup() {
+      api = useRefresh<{ symbol: string }, number>('/api/vue/1330', { enabled: ref(true), every: ref(20) })
+      // 同步 watcher 记下每一次上屏：发布是同步的，因此这一串就是画面真实看到的版本序列。
+      watch(api.display, () => {
+        const value = api.display.value?.data
+        if (typeof value === 'number') seen.push(value)
+      }, { flush: 'sync' })
+      return () => h('div')
+    },
+  }))
+  app.use(manager)
+  app.mount({} as never)
+  await tick()
+  api.submit({ symbol: 'A' })
+  await until(() => seen.length >= 4, '至少上屏四版')
+
+  // 写入间隔（本页 every 20ms ＋ 传输 80ms）比本页 every 稀，因此每一版都该抄进画面。
+  // 只断言「跟到某一版」是测不出跳版的；这里要求序列连续。
+  for (let index = 1; index < seen.length; index++) {
+    assert.equal(seen[index]! - seen[index - 1]!, 1, `第 ${index} 与第 ${index + 1} 版之间跳版了：${seen.join(',')}`)
+  }
+  assert.ok(seen.length >= 4)
+  app.unmount()
+})
+
+test('A17 同实例重复 install 幂等：只注册一个可见性监听，已有绑定不被破坏', async () => {
+  const manager = newManager(1)
+  const app = renderer.createApp(defineComponent({ setup: () => () => h('div') }))
+  const doc = globalThis.document as unknown as { addEventListener: () => void; removeEventListener: () => void }
+  const originalAdd = doc.addEventListener
+  const originalRemove = doc.removeEventListener
+  let added = 0
+  let removed = 0
+  doc.addEventListener = () => { added++ }
+  doc.removeEventListener = () => { removed++ }
+  try {
+    app.use(manager)
+    // 绕开 Vue 自己的插件去重（`app.use` 第二次会被 Vue 拦掉，那证明不了我们的 `install` 幂等）：
+    // 直接再调一次安装，走的是 `install` 里「同一个实例重复安装无副作用」那条分支。
+    manager.install(app)
+    assert.equal(added, 1, '同一个实例重复安装：只注册一个 visibilitychange 监听')
+    assert.notEqual(currentCore(), null, '安装槽仍绑着这个协调者')
+    manager.install(app)
+    assert.equal(added, 1, '第三次安装照样只注册一个监听')
+
+    app.mount({} as never)
+    app.unmount()
+    assert.equal(removed, 1, '卸载时把监听摘掉')
+  } finally {
+    doc.addEventListener = originalAdd
+    doc.removeEventListener = originalRemove
+  }
 })

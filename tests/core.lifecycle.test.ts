@@ -61,7 +61,7 @@ test('A06 最后一个声明者退出（卸载）：在途请求被 abort，实�
   await settle()
   assert.equal(signal?.aborted, false)
 
-  core.undeclare(view.config)
+  core.undeclare(view.slot)
   assert.equal(signal?.aborted, true)
   assert.equal(snapshot(core).resources.length, 0)
   // 实例没了，但那次请求还在跑：它仍占着并发账本（`abandoned`），直到真实结束自己交还（ADR-65）。
@@ -87,7 +87,7 @@ test('A06 刷新不留账：刷新之后立刻卸载，实例当场回收，不�
   await settle()
   assert.equal(snapshot(core).running.length, 1, '刷新已经发起第二轮取数')
 
-  core.undeclare(view.config)
+  core.undeclare(view.slot)
   assert.equal(snapshot(core).resources.length, 0, '刷新不留账：卸载当场回收实例')
   assert.equal(snapshot(core).running.length, 1, '在途请求仍占着槽位，直到真实结束')
   resolvers[1]?.(2)
@@ -107,7 +107,7 @@ test('A06/A13 释放之后那次请求才失败：迟到的失败不写进已释
   assert.equal(snapshot(core).running.length, 1, '请求已经发出')
 
   // 释放：实例与结果一并回收；那次请求还在跑，稍后才失败。
-  core.undeclare(view.config)
+  core.undeclare(view.slot)
   assert.equal(snapshot(core).results.length, 0)
 
   fail?.(new Error('晚到的失败'))
@@ -122,7 +122,7 @@ test('A12/A06 复制结果期间换了执行：旧执行的结果不写进结果
   let view!: Page
   const core = newCore(2, () => new Promise<unknown>(resolve => {
     // 响应对象的取值器在复制结果那一步被读到，那一刻同步释放这个身份。
-    release = () => { resolve({ get id() { core.undeclare(view.config); return 1 } }) }
+    release = () => { resolve({ get id() { core.undeclare(view.slot); return 1 } }) }
   }))
   view = page(core, source)
 
@@ -159,8 +159,8 @@ test('A06/A11 恢复：实例还在就立即读到历史结果，不重复取数
   assert.equal(view.last?.data, 1)
   assert.equal(calls, 1, '恢复读到历史结果，不重复取数')
 
-  core.undeclare(view.config)
-  core.undeclare(other.config)
+  core.undeclare(view.slot)
+  core.undeclare(other.slot)
   assert.equal(snapshot(core).resources.length, 0, '最后一个需求退出后实例与结果一起消失')
 })
 
@@ -199,7 +199,7 @@ test('A06/A17 写表时的同步重入里刷新并卸载：释放之后不再补
   // 写表会同步触发页面代码：这一瞬页面点了一次刷新，然后当场卸载。
   tableOf(core).onWrite = () => {
     view.refresh()
-    core.undeclare(view.config)
+    core.undeclare(view.slot)
   }
   resolvers[0]?.(1)
   await settle()
@@ -292,9 +292,9 @@ test('A04/A05 配置由合法转非法时整组失效：资格立即为假，槽
   // 先合法、后非法：非法分支必须整组置无效——只清 `every` 也能让资格为假，
   // 但留着 `enabled`／`present` 的合法旧值会让下一拍读槽的人误判「这三项曾同时成立」。
   view.set(null)
-  assert.equal(view.config.enabled, false)
-  assert.equal(view.config.every, null)
-  assert.equal(view.config.present, false)
+  assert.equal(view.slot.enabled, false)
+  assert.equal(view.slot.every, null)
+  assert.equal(view.slot.present, false)
   assert.equal(eligible(core, view), false, '非法那一拍资格必须为假')
 })
 

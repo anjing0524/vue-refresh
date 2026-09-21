@@ -1,4 +1,4 @@
-import type { Parameters } from './source.ts'
+import type { Parameters } from './parameters.ts'
 
 /** 一个身份（`URL ＋ 参数值`）自己的全部状态与判定：声明者、这一轮的结果产出了没有、到期与当前执行。
  * 它不持有核心、也不持有页面。 */
@@ -7,7 +7,7 @@ import type { Parameters } from './source.ts'
  * `present` ＝ 环境允许（这一页激活且浏览器可见，由适配层合成后报进来）。
  * 注意：它**不是**调用方传入的 `RefreshOptions`——那是两个 `Ref` 的源头配置；本接口是核心持有的登记槽，
  * 适配层原地写、核心只读（ADR-66）。 */
-export interface Config {
+export interface PageSlot {
   enabled: boolean
   every: number | null
   present: boolean
@@ -20,42 +20,42 @@ export class Resource {
   readonly url: string
   readonly parameters: Parameters
   /** 声明了本身份的配置（页面挂载期间一直算，暂停、失活、隐藏都不撤销）。 */
-  readonly declarers = new Set<Config>()
-  /** 「一次执行」由 `controller`／`produced`／`needsNext` 三个位联合表达（ADR-65 不设独立执行对象、
+  readonly declarers = new Set<PageSlot>()
+  /** 「一次执行」由 `execution`／`produced`／`refreshRequested` 三个位联合表达（ADR-65 不设独立执行对象、
    *  ADR-70 不把两个布尔并成三态字段），合法组合与迁移点如下——读这三个位之前先对齐这张表：
-   *  ① `controller === null`（无执行）⟹ `produced`／`needsNext` 必为 `false`；
-   *  ② `controller !== null && !produced`：在队或在跑、结果还没产出（刷新命令落「用这一轮」分支）；
-   *  ③ `controller !== null && produced`：结算到收尾之间（刷新命令落「补一轮」分支，置 `needsNext`）。
-   *  迁移点各只有几处：`enqueue` 建把手；`settle` 置 `produced`；`core.refresh` 只在 ③ 上置 `needsNext`；
-   *  `run` 的 finally 清 `controller`／`produced` 并消费 `needsNext`；`releaseIfUnused` 清 `controller`／`needsNext`。 */
+   *  ① `execution === null`（无执行）⟹ `produced`／`refreshRequested` 必为 `false`；
+   *  ② `execution !== null && !produced`：在队或在跑、结果还没产出（刷新命令落「用这一轮」分支）；
+   *  ③ `execution !== null && produced`：结算到收尾之间（刷新命令落「补一轮」分支，置 `refreshRequested`）。
+   *  迁移点各只有几处：`enqueue` 建把手；`settle` 置 `produced`；`core.refresh` 只在 ③ 上置 `refreshRequested`；
+   *  `run` 的 finally 清 `execution`／`produced` 并消费 `refreshRequested`；`releaseIfUnused` 清 `execution`／`refreshRequested`。 */
   /** 这一轮的结果已经产出了没有（写表之前置起、一轮结束时清掉）。 */
   produced = false
   /** 产出之后又有人点过刷新：本轮结束后再排一次。 */
-  needsNext = false
+  refreshRequested = false
   /** 最近一次执行有结局的时刻（成功与失败都算）；`null` 表示从未结算过，因此立即到期。 */
   settledAt: number | null = null
   /** 这次执行的身份与取消把手；`null` ＝ 本实例此刻没有执行。 */
-  controller: AbortController | null = null
+  execution: AbortController | null = null
 
   constructor(url: string, parameters: Parameters) {
     this.url = url
     this.parameters = parameters
   }
 
-  /** 环境允许且配置有效（`refresh` 的入口闸口径）：`every !== null` 是周期有效，`config.present` 是环境允许。
+  /** 环境允许且配置有效（`refresh` 的入口闸口径）：`every !== null` 是周期有效，`slot.present` 是环境允许。
    *  名字带 `AndValid` 是明说：它比字段 `present` 多判一项「配置有效」，两者不是同一个概念（§0.4／§3 U14）。 */
-  isPresentAndValid(config: Config): boolean {
-    return config.every !== null && config.present
+  isPresentAndValid(slot: PageSlot): boolean {
+    return slot.every !== null && slot.present
   }
 
   /** 这个身份此刻有没有执行（在队或在跑）。 */
   hasExecution(): boolean {
-    return this.controller !== null
+    return this.execution !== null
   }
 
-  /** 这次执行还是不是当前执行。 */
-  isCurrent(controller: AbortController): boolean {
-    return this.controller === controller
+  /** 手里这只把手还是不是当前执行（迟到的结束算不算数）。 */
+  isCurrent(handle: AbortController): boolean {
+    return this.execution === handle
   }
 
   /** 还有人要它吗：还有声明者。 */
@@ -64,16 +64,16 @@ export class Resource {
   }
 
   /** 一个声明者此刻是否有资格取数：环境允许 ＋ 开启意愿为真。 */
-  isEligible(config: Config): boolean {
-    return this.isPresentAndValid(config) && config.enabled
+  isEligible(slot: PageSlot): boolean {
+    return this.isPresentAndValid(slot) && slot.enabled
   }
 
   /** 有效间隔现算：有资格的声明者里最小的 `every`；没有就是 `Infinity`。 */
   private eligibleEvery(): number {
     let every = Infinity
-    for (const config of this.declarers) {
-      if (!this.isEligible(config)) continue
-      const value = config.every
+    for (const slot of this.declarers) {
+      if (!this.isEligible(slot)) continue
+      const value = slot.every
       if (value !== null) every = Math.min(every, value)
     }
     return every

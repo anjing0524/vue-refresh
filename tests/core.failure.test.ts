@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { snapshot } from '../scripts/observe.ts'
-import type { Config } from '../src/resource.ts'
+import type { PageSlot } from '../src/resource.ts'
 import { declared, disposeAllCores, newCore, page, settle, sleep, type FakePost } from './core.helpers.ts'
 
 afterEach(disposeAllCores)
@@ -92,13 +92,13 @@ test('A16 零回调：传输失败只写结果表，核心不认识页面也不�
   assert.equal(declared(core, victim)?.declarers.size, 2)
 
   // 零回调（ADR-64）：配置槽只有数据，释放与销毁都不需要页面配合——下面这条在类型层面就钉住它。
-  core.undeclare(victim.config)
-  assert.equal(snapshot(core).resources.flatMap(resource => [...resource.declarers]).includes(victim.config), false,
+  core.undeclare(victim.slot)
+  assert.equal(snapshot(core).resources.flatMap(resource => [...resource.declarers]).includes(victim.slot), false,
     '释放只动声明，不调用任何页面代码')
   assert.equal(declared(core, witness)?.declarers.size, 1, '另一个需求的声明不受影响')
-  const pure: Config = { enabled: true, every: 1000, present: true }
-  // @ts-expect-error `Config` 没有回调字段：核心不持有任何可调用的东西（ADR-64、ADR-66）
-  const withCallback: Config = { ...pure, cleanup: () => {} }
+  const pure: PageSlot = { enabled: true, every: 1000, present: true }
+  // @ts-expect-error `PageSlot` 没有回调字段：核心不持有任何可调用的东西（ADR-64、ADR-66）
+  const withCallback: PageSlot = { ...pure, cleanup: () => {} }
   void withCallback
 })
 

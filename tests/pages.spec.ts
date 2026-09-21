@@ -110,7 +110,7 @@ test('查询列表：提交才发请求、分页排序复用已提交参数、�
   expect((await state(request)).length).toBe(afterQuery + 1)
 })
 
-test('行情面板：无查询按钮、一次提交、响应式频率、显示多旧、连续失败继续、失活冻结', async ({ page, request }) => {
+test('行情面板：无查询按钮、一次提交、响应式频率、显示最近一次请求的时刻、连续失败继续、失活冻结', async ({ page, request }) => {
   await request.post('/__fixture/fail-next', { data: { count: 3 } })
   await page.goto('/?page=quote-panel')
   await expect(page.getByTestId('page-quote-panel')).toBeVisible()
@@ -118,7 +118,8 @@ test('行情面板：无查询按钮、一次提交、响应式频率、显示�
   // 无查询按钮：面板只有配置输入与失活开关。
   expect(await page.locator('[data-testid="qp-query"]').count()).toBe(0)
 
-  // 连续失败继续：每一轮各通知一次、失败不关闭需求、页面不崩，下个周期继续取数。
+  // 连续失败继续：每一笔失败都经唯一出口、按同一个窗口到达画面（这里请求间隔等于本页 every，三笔都上屏）、
+  // 失败不关闭需求、页面不崩，下个周期继续取数。
   await expect(page.getByTestId('qp-failures')).toHaveText('后台失败次数：3', { timeout: 15_000 })
   await expect(page.getByTestId('qp-note')).toContainText('保留开启意愿')
   const failed = (await state(request)).filter(row => row.status === 'failed')
@@ -132,8 +133,8 @@ test('行情面板：无查询按钮、一次提交、响应式频率、显示�
   await expect(page.getByTestId('qp-submits')).toHaveText('提交次数：1')
   await expect(page.getByTestId('qp-submitted')).toContainText('demo / DEMO')
 
-  // 显示数据多旧：时间与相对年龄都来自交付面的 updatedAt，页面不自建 Timer。
-  await expect(page.getByTestId('qp-age')).toContainText('数据时间：')
+  // 显示最近一次请求的时刻（据它看数据/失败多旧）：时间与相对年龄都来自交付面的 updatedAt，页面不自建 Timer。
+  await expect(page.getByTestId('qp-age')).toContainText('最近请求：')
   await expect(page.getByTestId('qp-age')).toContainText('秒前')
 
   // 频率变化不再解释成数据失效：改成 5 秒后保留在途请求，也不立刻补一次。

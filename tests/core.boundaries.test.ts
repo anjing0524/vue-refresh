@@ -42,9 +42,9 @@ test('A04 变体：every 只有正安全整数算有效，其余取值一律按�
     ['undefined（读不出）', undefined],
   ]
   for (const [label, every] of illegalEvery) {
-    core.setConfig(view.config, true, every, true)
+    core.setConfig(view.slot, true, every, true)
     assert.equal(eligible(core, view), false, `every 是${label}：没有资格`)
-    assert.equal(view.config.every, null, `every 是${label}：槽里不留下这个值`)
+    assert.equal(view.slot.every, null, `every 是${label}：槽里不留下这个值`)
   }
   await settle()
   assert.equal(calls, 1, '这些取值都不产生取数')
@@ -52,14 +52,14 @@ test('A04 变体：every 只有正安全整数算有效，其余取值一律按�
 
   // `enabled` 的取值域同样只有布尔算有效。
   for (const enabled of ['true', 1, 0, null, undefined]) {
-    core.setConfig(view.config, enabled, 100_000, true)
+    core.setConfig(view.slot, enabled, 100_000, true)
     assert.equal(eligible(core, view), false, `enabled 是 ${String(enabled)}：没有资格`)
   }
   await settle()
   assert.equal(calls, 1, '非布尔的开启意愿同样不取数')
 
   // 取值域的边界之内：1 与最大安全整数都算有效周期（最大值只是把到期推得很远）。
-  core.setConfig(view.config, true, Number.MAX_SAFE_INTEGER, true)
+  core.setConfig(view.slot, true, Number.MAX_SAFE_INTEGER, true)
   assert.equal(eligible(core, view), true, '最大安全整数是有效周期')
   await settle()
   assert.equal(calls, 1, '改成长周期只重排调度，不立刻重取')
@@ -217,4 +217,64 @@ test('A09 手动刷新的命令插到队首：先于更早排队的到期取数'
   await settle()
   assert.deepEqual(started, [2, 1, 2, 3], '槽位一空出来，先跑刷新的那一个，随后才是排队更久的那一个')
   assertQueueConsistent(core)
+})
+
+test('A01 已准备参数是框架私有副本：页面改原对象不影响身份，也不影响下一轮请求体', async () => {
+  const bodies: unknown[] = []
+  const source = '/api/core/boundary/original'
+  const core = newCore(1, async (_url, body) => { bodies.push(structuredClone(body)); return bodies.length })
+  const view = page(core, source)
+
+  // 提交边界复制一份作为框架私有权威副本（U01、U18）：此后调用方怎么改原对象都与身份无关。
+  const original = { id: 1, tags: ['a'] }
+  assert.equal(view.submit(original).status, 'accepted')
+  await settle()
+  original.id = 2
+  original.tags.push('改了')
+
+  assert.equal(view.key(), '{"id":1,"tags":["a"]}', '身份键取的是提交那一刻的值')
+  assert.deepEqual(view.last?.args, { id: 1, tags: ['a'] }, '读出来的 args 也还是提交那一刻的值')
+
+  // 判别点在这一条：若私有副本只是原对象的引用，下一轮请求体就带着调用方的改写。
+  view.refresh()
+  await settle()
+  assert.deepEqual(bodies[1], { id: 1, tags: ['a'] }, '下一轮请求体仍是提交那一刻的值')
+})
+
+test('A17 销毁后未结束的执行仍占着槽位，直到真实结束', async () => {
+  const resolvers: Array<(value: number) => void> = []
+  const source = '/api/core/boundary/dispose-slot'
+  const core = newCore(1, () => new Promise<number>(resolve => resolvers.push(resolve)))
+  const view = page(core, source)
+
+  view.submit({ id: 1 })
+  await settle()
+  assert.equal(snapshot(core).running.length, 1, '请求已经发出、占着唯一槽位')
+
+  core.dispose()
+  assert.equal(snapshot(core).resources.length, 0, '销毁清掉注册表')
+  assert.equal(snapshot(core).queued.length, 0, '队列也清掉')
+  // 顺序约束第 6 条：槽位只在真实结束时释放——abort 与回收都不提前交还（§1.5 第 4 条）。
+  assert.equal(snapshot(core).running.length, 1, '被弃的在途请求仍占着槽位')
+
+  resolvers[0]?.(9)
+  await settle()
+  assert.equal(snapshot(core).running.length, 0, '真实结束后才交还槽位')
+})
+
+test('A18/U15 参数规模：不设内部深度上限，也不因参数大而拒绝', async () => {
+  let calls = 0
+  const source = '/api/core/boundary/size'
+  const core = newCore(1, async () => { calls++; return calls })
+  const view = page(core, source)
+
+  // U15 明说框架不设内部深度上限、也不因参数大而拒绝（M01 已关闭）：只有值域与编码不合格才拒。
+  let deep: Record<string, unknown> = { leaf: 1 }
+  for (let level = 0; level < 500; level++) deep = { next: deep }
+  assert.equal(view.submit({ deep }).status, 'accepted', '500 层嵌套照常接纳')
+  await settle()
+  assert.equal(view.submit({ big: Array.from({ length: 10_000 }, (_, index) => index) }).status, 'accepted', '一万个元素的数组照常接纳')
+  await settle()
+  assert.equal(calls, 2, '两次都真的取了数')
+  assert.equal(view.failedAt(), null, '也不是「先接纳、后失败」')
 })

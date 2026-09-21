@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import { snapshot } from '../scripts/observe.ts'
-import { identityOf, prepareParameters, splitIdentity } from '../src/source.ts'
+import { identityOf, prepareParameters, splitIdentity } from '../src/parameters.ts'
 import { declared, disposeAllCores, eligible, newCore, page, settle } from './core.helpers.ts'
 
 afterEach(disposeAllCores)

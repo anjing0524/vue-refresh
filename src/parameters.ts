@@ -1,6 +1,7 @@
 import stringify from 'fast-json-stable-stringify'
 
-/** 参数边界：提交边界的一次准备（复制 → 值域检查 → 编码身份键）。 */
+/** 参数边界：提交边界的一次准备（复制 → 值域检查 → 稳定键），以及身份键的拼拆
+ * （`identityOf` / `splitIdentity`——稳定键只是身份的一半，另一半是 URL）。 */
 
 /** 一次已准备的请求参数。 */
 export interface Parameters {

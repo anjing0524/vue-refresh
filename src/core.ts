@@ -1,28 +1,28 @@
 import type { SubmitResult } from './public-types.ts'
-import type { Parameters } from './source.ts'
-import { identityOf } from './source.ts'
-import { Resource, type Config } from './resource.ts'
+import type { Parameters } from './parameters.ts'
+import { identityOf } from './parameters.ts'
+import { Resource, type PageSlot } from './resource.ts'
 
 /** 共享取数与调度核心：三件跨实例的事——身份注册表、待取队列与在途集合、唯一唤醒 Timer
  * （一个身份自己的账在 `resource.ts`）。它不持有页面。 */
 
-/** 结果表的一格：最后一次成功 ＋ 最近一次失败，四个字段全平。
- * `updatedAt === null` ⟺ 从未成功过；`failedAt === null` ⟺ 自最后一次成功以来没失败过。
- * 只有整格是新对象这一件事代表「变过」。
- * 两个公共出口都是它的投影：`RefreshDisplay` ＝ 成功对（另加每页一份 `args` 副本），`RefreshFailure` ＝ 失败对。 */
+/** 结果表的一格：**最近一次请求更新这一格之后的样子**，四个平字段（ADR-122）。
+ * `updatedAt` 是最近一次请求（成功与失败都算）更新这一格的时刻，`failed` / `error` 与它同属那一次请求；
+ * `data` 是最后一次成功的数据（`undefined` ⟺ 从未成功过——结果边界已拒绝 `undefined`，所以它只可能是这个意思）。
+ * 只有整格是新对象这一件事代表「变过」。唯一的公共出口 `RefreshDisplay` 就是它的投影（另加每页一份 `args` 副本）。 */
 export interface ResultCell {
   readonly data: unknown
   readonly updatedAt: number | null
+  readonly failed: boolean
   readonly error: unknown
-  readonly failedAt: number | null
 }
 
 /** 结果表：结果的唯一真值。核心只经这四个动作碰它。 */
 export interface ResultSink {
-  /** 写成功：整格替换（失败随之清空）。 */
+  /** 写成功：整格替换（时间换成本次结算时刻，`failed` 清回假）。 */
   write(url: string, key: string, data: unknown, updatedAt: number): void
-  /** 写失败：保留这一格已有的数据，只换掉失败那一对字段。 */
-  fail(url: string, key: string, error: unknown, failedAt: number): void
+  /** 写失败：保留这一格已有的数据，时间换成本次结算时刻，记下这笔失败。 */
+  fail(url: string, key: string, error: unknown, updatedAt: number): void
   remove(url: string, key: string): void
   /** 读这一格；读取面（适配层）用它。 */
   read(url: string, key: string): ResultCell | undefined
@@ -74,16 +74,16 @@ export class RefreshCore {
 
   /** 把这一页的配置写进它自己那份槽并重排调度；任一值非法时**整组**置无效（`every ＝ null` 即本拍无资格，
    * `enabled`／`present` 一并清回初始值，让下一拍合法写入不必依赖「旧值恰好也无效」这一隐含前提）。 */
-  setConfig(config: Config, enabled: unknown, every: unknown, present: boolean): void {
+  setConfig(slot: PageSlot, enabled: unknown, every: unknown, present: boolean): void {
     if (this.disposed) return
     if (typeof enabled !== 'boolean' || typeof every !== 'number' || !Number.isSafeInteger(every) || every < 1) {
-      config.enabled = false
-      config.every = null
-      config.present = false
+      slot.enabled = false
+      slot.every = null
+      slot.present = false
     } else {
-      config.enabled = enabled
-      config.every = every
-      config.present = present
+      slot.enabled = enabled
+      slot.every = every
+      slot.present = present
     }
     this.flushSoon()
   }
@@ -103,39 +103,39 @@ export class RefreshCore {
   // ══════════════════════════ 页面操作 ══════════════════════════
 
   /** 声明或更新身份；相同身份幂等。换身份＝把这份配置从旧实例摘掉、挂到新实例上。 */
-  submit(config: Config, url: string, parameters: Parameters): SubmitResult {
+  submit(slot: PageSlot, url: string, parameters: Parameters): SubmitResult {
     if (this.disposed) return { status: 'cancelled' }
 
-    const current = this.resourceOf(config)
+    const current = this.resourceOf(slot)
     if (current && current.url === url && current.parameters.key === parameters.key) {
       return { status: 'accepted' }
     }
     if (current) {
-      current.declarers.delete(config)
+      current.declarers.delete(slot)
       this.releaseIfUnused(current)
     }
-    this.resourceFor(url, parameters).declarers.add(config)
+    this.resourceFor(url, parameters).declarers.add(slot)
     this.flushSoon()
     return { status: 'accepted' }
   }
 
   /** 显式刷新：让这个身份再取一次。返回值只说这句命令收下了没有，不是取数回执。 */
-  refresh(config: Config, url: string, key: string): boolean {
+  refresh(slot: PageSlot, url: string, key: string): boolean {
     if (this.disposed) return false
     const resource = this.identities.get(identityOf(url, key))
     if (resource === undefined) return false
-    if (!resource.isPresentAndValid(config)) return false
+    if (!resource.isPresentAndValid(slot)) return false
 
     if (!resource.hasExecution()) this.enqueue(resource, true)
     // 结果已经产出了才需要「再来一轮」；还没产出的话本轮结果就够。
-    else if (resource.produced) resource.needsNext = true
+    else if (resource.produced) resource.refreshRequested = true
     this.flushSoon()
     return true
   }
 
   /** 这一份配置此刻有没有取数资格。 */
-  isEligible(config: Config, url: string, key: string): boolean {
-    return this.identities.get(identityOf(url, key))?.isEligible(config) ?? false
+  isEligible(slot: PageSlot, url: string, key: string): boolean {
+    return this.identities.get(identityOf(url, key))?.isEligible(slot) ?? false
   }
 
   /** 读这一格的结果；读取面（适配层）用它。 */
@@ -144,10 +144,10 @@ export class RefreshCore {
   }
 
   /** 释放一页：撤销它的声明；没人要了就就地回收。 */
-  undeclare(config: Config): void {
-    const resource = this.resourceOf(config)
+  undeclare(slot: PageSlot): void {
+    const resource = this.resourceOf(slot)
     if (resource === undefined) return
-    resource.declarers.delete(config)
+    resource.declarers.delete(slot)
     this.releaseIfUnused(resource)
     this.flushSoon()
   }
@@ -166,9 +166,9 @@ export class RefreshCore {
   }
 
   /** 这份配置登记在哪个实例上；只查不建（扫描是不存反向字段的代价）。 */
-  private resourceOf(config: Config): Resource | undefined {
+  private resourceOf(slot: PageSlot): Resource | undefined {
     for (const resource of this.identities.values()) {
-      if (resource.declarers.has(config)) return resource
+      if (resource.declarers.has(slot)) return resource
     }
     return undefined
   }
@@ -180,11 +180,11 @@ export class RefreshCore {
 
     this.sink.remove(resource.url, resource.parameters.key)
     // 身份没了，欠的那一轮与这次执行的认人一起作废——否则收尾时会把已释放的实例重新排进队列。
-    resource.needsNext = false
-    const controller = resource.controller
+    resource.refreshRequested = false
+    const execution = resource.execution
     this.dequeue(resource)
-    resource.controller = null
-    if (controller) controller.abort()
+    resource.execution = null
+    if (execution) execution.abort()
   }
 
   // ══════════════════════════ 后台执行 ══════════════════════════
@@ -193,7 +193,7 @@ export class RefreshCore {
   private enqueue(resource: Resource, first = false): void {
     if (first) this.queue.unshift(resource)
     else this.queue.push(resource)
-    resource.controller = new AbortController()
+    resource.execution = new AbortController()
   }
 
   /** 从待取队列里摘掉；不在队里就什么也不做。 */
@@ -204,35 +204,35 @@ export class RefreshCore {
 
   /** 执行一次后台请求：结算 → 写表 → 交还槽位 → 补后继请求。框架不设自己的取数上限。 */
   private async run(resource: Resource): Promise<void> {
-    const controller = resource.controller
-    if (controller === null) return
+    const execution = resource.execution
+    if (execution === null) return
     try {
       // 每一轮都交出一份参数副本：请求体改不动身份键描述的那份值。
       const response = await this.http.post(
         resource.url,
         structuredClone(resource.parameters.args),
-        { signal: controller.signal },
+        { signal: execution.signal },
       )
       // 复制结果前后各复核一次「这次还是不是当前执行」：复制要读属性，取值器可能同步重入。
-      if (!resource.isCurrent(controller)) return
+      if (!resource.isCurrent(execution)) return
       const data = copyResult(response.data)
-      if (!resource.isCurrent(controller)) return
+      if (!resource.isCurrent(execution)) return
       const at = Date.now()
       // 先记结算时刻，再写这一格。
       resource.settle(at)
       this.sink.write(resource.url, resource.parameters.key, data, at)
     } catch (error) {
-      if (!resource.isCurrent(controller)) return
+      if (!resource.isCurrent(execution)) return
       const at = Date.now()
       resource.settle(at)
       this.sink.fail(resource.url, resource.parameters.key, error, at)
     } finally {
       this.running.delete(resource)
-      resource.controller = null
+      resource.execution = null
       resource.produced = false
       // 产出之后又有人点过刷新：本轮结束再补一次，插到队头。
-      if (resource.needsNext) {
-        resource.needsNext = false
+      if (resource.refreshRequested) {
+        resource.refreshRequested = false
         this.enqueue(resource, true)
       }
       this.flushSoon()

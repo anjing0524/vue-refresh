@@ -1,11 +1,12 @@
 import { defineStore } from 'pinia'
 import { shallowRef } from 'vue'
 import type { ShallowRef } from 'vue'
-import { identityOf, splitIdentity } from './source.ts'
+import { identityOf, splitIdentity } from './parameters.ts'
 import type { ResultCell } from './core.ts'
 
 /**
- * 结果表：每个 (url, key) 一份独立 `shallowRef`，格子里是四个平字段（最后一次成功 ＋ 最近一次失败）。
+ * 结果表：每个 (url, key) 一份独立 `shallowRef`，格子里是四个平字段（最近一次请求之后的 `data` ／
+ * `updatedAt` ／ `failed` ／ `error`，ADR-122）。
  * 一个 Pinia 实例一张表。写一格只唤醒订阅这一格的读取副作用；整格换新对象就是「变过」。
  * 实例释放时连 ref 一起删（留着空壳会随历史身份无限长，而 `list` 看不见空壳）；同一个身份重建时 `read`
  * 会建一个新的 ref 并在下一拍被重新订阅，重写照样唤得醒。
@@ -26,16 +27,16 @@ export const useRefreshStore = defineStore('vue-refresh', () => {
     return ref
   }
 
-  /** 写成功：整格换新对象，失败随之清空。 */
+  /** 写成功：整格换新对象，时间换成本次结算时刻，失败随之清空。 */
   const write = (url: string, key: string, data: unknown, updatedAt: number): void => {
-    refOf(url, key).value = { data, updatedAt, error: undefined, failedAt: null }
+    refOf(url, key).value = { data, updatedAt, failed: false, error: undefined }
   }
 
-  /** 写失败：保留这一格已有的数据与时间，只换掉失败那一对字段。 */
-  const fail = (url: string, key: string, error: unknown, failedAt: number): void => {
+  /** 写失败：保留这一格已有的数据，时间换成本次结算时刻，记下这笔失败。 */
+  const fail = (url: string, key: string, error: unknown, updatedAt: number): void => {
     const ref = refOf(url, key)
     const previous = ref.value
-    ref.value = { data: previous?.data, updatedAt: previous?.updatedAt ?? null, error, failedAt }
+    ref.value = { data: previous?.data, updatedAt, failed: true, error }
   }
 
   /** 实例释放：这一格连同它的 ref 一起删（键数因此随活跃身份收敛，而不是随历史身份增长）。 */

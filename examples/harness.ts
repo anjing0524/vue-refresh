@@ -15,25 +15,24 @@ const params = new URLSearchParams(location.search)
 
 interface QuoteParams { account: string; symbol: string }
 interface Quote { quote: { price: number; requestId: number } }
-/** 交付面里失败那一项的只读投影（`cause` 原样带出，观测面不解释它）。 */
 /** 集成验证台的只读观测面；只给测试用，不是 src/package API。 */
 export interface HarnessSnapshot {
   calls: Array<{ id: number; aborted: boolean; finished: boolean }>
   events: string[]
   /**
-   * 每页数据的投影：**没有画面**（还没声明身份／已释放）时是 `null`；
-   * 画面存在但从未成功过时是 `data: null, updatedAt: null`。失败不在这份投影里，它来自 `task.failure`（ADR-77）。
+   * 每页画面的投影：**没有画面**（还没声明身份／已释放）时是 `null`；画面存在但从未成功过时是 `data: null`。
+   * 失败与数据在同一份投影里：`updatedAt` ／ `failed` ／ `error` 同属最近一次请求（ADR-122）。
    */
   pages: Record<string, {
     readonly args: QuoteParams
     readonly data: Quote | null
     readonly updatedAt: number | null
+    readonly failed: boolean
     readonly error: unknown
-    readonly failedAt: number | null
     readonly manual: boolean
   } | null>
-  /** 结果表只读投影：`data` 为最后一次成功（从未成功过为 null），`failedAt` 为最近一次失败的时刻。 */
-  entries: Record<string, { data: Quote | null; error: unknown; failedAt: number | null }>
+  /** 结果表只读投影：`data` 为最后一次成功（从未成功过为 null），`failed` ／ `error` 属于最近一次请求。 */
+  entries: Record<string, { data: Quote | null; failed: boolean; error: unknown }>
   running: number
   queued: number
   resources: number
@@ -100,7 +99,8 @@ export function mountHarness(): void {
   const http: RefreshHttp = {
     post: async (_url, body, { signal }) => ({ data: await readQuote(body as QuoteParams, { signal }) }),
   }
-  // 页面侧事实：上一次手刷拿到的结果时间。框架不再交付「这次是谁触发的」。
+  // 页面侧事实：上一次手刷的时刻。框架不再交付「这次是谁触发的」；失败也会推进 `updatedAt`，
+  // 所以「手刷失败」在这里同样算本页刷新。
   const manualAt: Record<string, number> = {}
 
   let core: RefreshCore
@@ -112,9 +112,9 @@ export function mountHarness(): void {
       const enabled = ref(true)
       const draftSymbol = ref('DEMO')
       const task = useRefresh<QuoteParams, Quote>(source, { enabled, every })
-      // 失败不再经回调推送：失败出口出现新的失败对象时记一条事件（默认 pre flush，首次不触发）。
-      watch(() => task.failure.value, failure => {
-        if (failure !== null) events.push('后台请求失败，等待下一周期')
+      // 失败不再经回调推送：出口上出现新的一笔失败（`failed` 从假变真）就记一条事件（默认 pre flush，首次不触发）。
+      watch(() => task.display.value?.failed, failed => {
+        if (failed === true) events.push('后台请求失败，等待下一周期')
       })
       components.set(props.label, { task, enabled })
       const args: QuoteParams = props.label === '甲'
@@ -130,9 +130,9 @@ export function mountHarness(): void {
           h('p', display && display.updatedAt !== null
             ? `展示参数：${display.args.symbol} · ${display.updatedAt >= (manualAt[props.label] ?? Infinity) ? '本页刷新' : '共享刷新'}`
             : ''),
-          // updatedAt 是墙钟读数：相对时间按 U16/§2.5 的建议把差值钳制到 0，避免校时回拨显示负数。
+          // updatedAt 是墙钟读数（最近一次请求的时刻，失败也推进它）：相对时间按 U16/§2.5 的建议把差值钳制到 0，避免校时回拨显示负数。
           h('p', { 'data-testid': `age-${props.label}` }, display && display.updatedAt !== null
-            ? `数据时间：${new Date(display.updatedAt).toLocaleTimeString()} · ${Math.max(0, Math.round((Date.now() - display.updatedAt) / 1000))} 秒前`
+            ? `最近请求：${new Date(display.updatedAt).toLocaleTimeString()} · ${Math.max(0, Math.round((Date.now() - display.updatedAt) / 1000))} 秒前`
             : ''),
           h('label', ['品种 ', h('input', { value: draftSymbol.value, onInput: (event: Event) => { draftSymbol.value = (event.target as HTMLInputElement).value } })]),
           h('button', {
@@ -159,8 +159,8 @@ export function mountHarness(): void {
     setup() {
       const enabled = ref(true)
       const task = useRefresh<QuoteParams, Quote>(source, { enabled, every })
-      watch(() => task.failure.value, failure => {
-        if (failure !== null) events.push('嵌套页后台请求失败，等待下一周期')
+      watch(() => task.display.value?.failed, failed => {
+        if (failed === true) events.push('嵌套页后台请求失败，等待下一周期')
       })
       components.set('嵌套', { task, enabled })
       onMounted(() => task.submit({ account: 'demo', symbol: 'NESTED' }))
@@ -206,20 +206,20 @@ export function mountHarness(): void {
           const display = c.task.display.value
           return [name, display === null ? null : {
             args: structuredClone(display.args),
-            // `data` 可以为 null（首查就失败）；`updatedAt` 与它同生共死。
+            // `data` 可以为 null（首查就失败）；`updatedAt` 是最近一次请求的时刻，失败也推进它。
             data: display.data === null ? null : structuredClone(display.data),
             updatedAt: display.updatedAt,
-            // 失败与数据是两个出口：这里合成一份投影，只为测试读起来方便。
-            error: c.task.failure.value?.error,
-            failedAt: c.task.failure.value?.failedAt ?? null,
+            // 失败与数据在同一个出口上，这里照抄，只为测试读起来方便（ADR-122）。
+            failed: display.failed,
+            error: display.error,
             manual: display.updatedAt !== null && display.updatedAt >= (manualAt[name] ?? Infinity),
           }]
         })),
         entries: Object.fromEntries(view.results
           .map(row => [row.key, {
-            data: row.cell.updatedAt === null ? null : row.cell.data as Quote,
+            data: row.cell.data === undefined ? null : row.cell.data as Quote,
+            failed: row.cell.failed,
             error: row.cell.error,
-            failedAt: row.cell.failedAt,
           }])),
         running: view.running.length, queued: view.queued.length,
         resources: view.resources.length,

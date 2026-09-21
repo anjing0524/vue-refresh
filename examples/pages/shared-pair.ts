@@ -32,8 +32,8 @@ const PairCard = defineComponent({
       every: computed(() => props.every),
     }
     const task = useRefresh<QuoteParams, QuoteResult>(QUOTE_URL, options)
-    // 失败不再由框架推送：交付面出现新的失败对象时计一次（默认 pre flush，首次不触发）。
-    watch(() => task.failure.value, failure => { if (failure !== null) failures.value += 1 })
+    // 失败不再由框架推送：出口上出现新的一笔失败时计一次（默认 pre flush，首次不触发）。
+    watch(() => task.display.value?.failed, failed => { if (failed === true) failures.value += 1 })
     const params = (symbol: string): QuoteParams => ({ account: 'demo', symbol })
     onMounted(() => task.submit(params(props.symbol)))
     watch(() => props.symbol, symbol => task.submit(params(symbol)))
@@ -41,7 +41,7 @@ const PairCard = defineComponent({
     onUnmounted(() => emit('gone', props.label))
 
     return () => {
-      // 首查就失败时 display 不是 null，而是 `data: null`：空态按 data／updatedAt 判，失败在 `task.failure` 上。
+      // 首查就失败时 display 不是 null，而是 `data: null`：空态按 data／updatedAt 判，失败在同一个出口上。
       const data = task.display.value?.data ?? null
       const args = task.display.value?.args ?? null
       const updatedAt = task.display.value?.updatedAt ?? null
@@ -138,9 +138,9 @@ export const B09View = defineComponent({
     const enabled = ref(true)
     const failures = ref(0)
     const task = useRefresh<QuoteParams, QuoteResult>(QUOTE_URL, { enabled, every: ref(5_000) })
-    // 失败只从交付面读到：出现新的失败对象时，页面自己关闭开启意愿（框架从不写 enabled）。
-    watch(() => task.failure.value, failure => {
-      if (failure === null) return
+    // 失败只从出口读到：出现新的一笔失败时，页面自己关闭开启意愿（框架从不写 enabled）。
+    watch(() => task.display.value?.failed, failed => {
+      if (failed !== true) return
       failures.value += 1
       enabled.value = false // 页面自己的策略：前次失败后先关闭意愿。
     })
