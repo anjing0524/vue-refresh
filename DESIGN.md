@@ -62,7 +62,7 @@
 
 ```text
 public-types.ts            公共契约类型（判别联合，没有常量对象）；不依赖运行时模块
-source.ts                  参数边界：准备（复制、值域检查、稳定键）
+source.ts                  参数边界：准备（复制、值域检查、稳定键）与身份键编码（`identityOf` / `splitIdentity`）
 resource.ts                一个身份自己的状态与判定（每页一份的 `Config` 配置槽 ＋ `Resource` 类）
 core.ts                    跨实例的协调者（身份注册表、队列与并发、调度）
 store.ts                   结果表（Pinia 模块级定义）：一张复合键 Map（`identityOf(url, key)`），整条替换，随实例释放即删
@@ -87,7 +87,7 @@ index.ts                   包入口（两个函数与 6 个公共类型；没�
 
 ```text
 public-types.ts            公共契约类型（判别联合，没有常量对象）；不依赖运行时模块
-source.ts                  参数边界：准备（复制、值域检查、稳定键）
+source.ts                  参数边界：准备（复制、值域检查、稳定键）与身份键编码（`identityOf` / `splitIdentity`）
 resource.ts                一个身份自己的状态与判定（每页一份的 `Config` 配置槽 ＋ `Resource` 类）
 core.ts                    跨实例的协调者（身份注册表、队列与并发、调度）
 store.ts                   结果表（Pinia 模块级定义）：一张复合键 Map（`identityOf(url, key)`），整条替换，随实例释放即删
@@ -107,7 +107,7 @@ index.ts                   包入口（两个函数与 6 个公共类型；没�
 | 文件 | 职责 |
 |---|---|
 | `public-types.ts` | 公共契约类型（判别联合，没有常量对象）：数据出口、失败出口、句柄、协调者、选项与提交结果 |
-| `source.ts` | 参数边界：`Parameters`、`assertJsonValue`（值域检查：对象型限普通对象或数组）、`prepareParameters`（复制 → 值域检查 → 稳定编码，消费者各拿副本；**不跑任何回调**）、`parameterKey`；`P` 的值域约束 `JsonParameters` 也在这里，由 `useRefresh` 的类型参数使用；稳定编码用 `fast-json-stable-stringify` |
+| `source.ts` | 参数边界：`Parameters`、`assertJsonValue`（值域检查：对象型限普通对象或数组）、`prepareParameters`（复制 → 值域检查 → 稳定编码，消费者各拿副本；**不跑任何回调**）、`parameterKey`；**身份键的两个纯函数 `identityOf`（URL ＋ 键 → 复合键）与 `splitIdentity`（拆回两级，`store.list()` 用）也在这里**——它们只做字符串处理，与参数编码同一层；`P` 的值域约束 `JsonParameters` 也在这里，由 `useRefresh` 的类型参数使用；稳定编码用 `fast-json-stable-stringify` |
 | `resource.ts` | `Resource`：一个身份自己的状态与判定（声明者、这一轮是否已产出／是否还欠一轮、到期、当前执行、成功与失败结算），**不持有核心**——写表、回收、排队都是核心的动作（ADR-65）；`Config`：**一页在核心里的登记**——每页一个可变配置槽，适配层原地写、核心只读（ADR-66） |
 | `core.ts` | `RefreshCore`：跨实例的协调者——身份注册表、唯一 Timer 与有序队列（手动刷新插到队头）、并发槽、结果表写入端与读取口 |
 | `store.ts` | 结果表：模块级 `defineStore`，一张复合键 Map（`identityOf(url, key)` → `ResultCell` 四字段），`shallowRef` 整条替换；写入端给核心（`write` / `fail` / `remove`），读出口 `read` 由适配层的读取面经核心的 `readResult` 取用，`list` / `size` 给观测面 |
@@ -134,7 +134,7 @@ index.ts                   包入口（两个函数与 6 个公共类型；没�
 | 10 | 注销只发生在声明空时，且空实例再也拿不到新的边 | `releaseIfUnused` 是唯一注销点 |
 | 11 | 有资格 ⟹ 配置槽有效：`enabled` 为真、`present` 为真、`every` 是正安全整数 | `Resource.isEligible` |
 | 12 | 两个出口各有粒度：**数据出口**由「身份落定／重新成为读者／显式 `refresh()`／一次写入且距画面里那一版满一个 `every`」触发，同一身份同一版不抄第二遍；**失败出口**换一笔新的失败即发、不受窗口限制 | `vue.ts` 的 `publishData` / `publishFailure`（ADR-63、ADR-67、ADR-72、ADR-77） |
-| 13 | 「读者」只在适配层判定：`isEligible(...) || (lastReadAt === null && !document.hidden)`，两个出口共用这一个闸门 | 适配层读闸门（ADR-66、ADR-67、ADR-72） |
+| 13 | 「读者」只在适配层判定：`canRead(core, key)` ＝ `canPoll(core, key) || (readState.dataUpdatedAt === null && !document.hidden)`；`canPoll` 就是核心的 `isEligible`。两个出口共用这一个闸门 | 适配层读闸门（ADR-66、ADR-67、ADR-72） |
 
 ### 1.6 需求与设计的对应
 
@@ -201,7 +201,7 @@ flowchart LR
 
 > 需求：R1、R5、U01–U03、U15、G1、G2、G02
 
-- URL（一个字符串）＋ `Parameters.key` 定位实例（声明不再有对象或函数，ADR-75）；同一个 URL 与同一份参数值就是同一个实例，因此两处各写一份定义也照样合并。实例的生存期只由声明决定（最后一个声明者离开就回收）。
+- URL（一个字符串）＋ `Parameters.key` 定位实例（声明不再有对象或函数，ADR-75）；拼键与拆键是 `source.ts` 里的两个纯函数（`identityOf` / `splitIdentity`），核心与结果表都从那里取；同一个 URL 与同一份参数值就是同一个实例，因此两处各写一份定义也照样合并。实例的生存期只由声明决定（最后一个声明者离开就回收）。
 - **没有第二套计数**：执行与结果都不记版本或代次，读取面也不带「由谁触发」的标记
   （ADR-43 删掉等待者的版本下限、ADR-45 删掉任务版本、ADR-47 删掉声明代次）。
 
@@ -297,7 +297,7 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
 - 声明到哪个实例由该实例 `declarers` 的成员资格决定，配置槽上不存反向字段；`resourceOf` 换身份时扫描注册表（ADR-57、ADR-66）。核心不记「哪一页已释放」——那是适配层 `released` 的事实（§3.6）。
 - 不提供「正在刷新」这类实时状态：读出口只给结果与它的产生时间。
 - 「我该看到哪一条」不另存：适配层由自己持有的身份键现查结果表得到（ADR-59、ADR-66）。
-- 「本页还跟不跟随结果表」不另存、也不问核心：适配层现判 `core.isEligible(config, url, key) || (lastReadAt === null && !document.hidden)`（ADR-60、ADR-66、ADR-72）。
+- 「本页还跟不跟随结果表」不另存、也不问核心：适配层现判 `canRead(core, key)`（＝`canPoll(core, key)` 或「还没有读取基准且浏览器可见」，ADR-60、ADR-66、ADR-72）。
 
 ### 2.7 读取面、读闸门与零回调
 
@@ -307,8 +307,8 @@ structuredClone → assertJsonValue（值域：对象型限普通对象或数组
   但**写结果表会同步唤醒页面的响应式副作用**（Vue 的行为）：页面 watcher 就在写入那一刻跑起来。
 - **没有业务回调接口**：提交边界只做参数准备（复制／值域／编码），没有 `validate` 这类准入回调；业务准入由调用方在 `submit` 之前自己判，
   那里的抛错就地变成同步 `rejected`。框架自身不写诊断日志。
-- **适配层只有一个标志**：`released`（`onScopeDispose` 置位）。读取面只有一个数 `lastReadAt`（上次读取时间，`null` ＝ 还没有读取过），核心不认识它。
-- **读闸门在适配层**：`core.isEligible(config, url, key) || (lastReadAt === null && !document.hidden)`，两个出口共用这一个闸门。
+- **适配层的三样私有状态**：一个释放位 `released`（`onScopeDispose` 置位）；一处读取面账本 `readState`（数据出口那一版的身份与时刻、失败出口那一笔的身份——重置只有一个入口）；一条唤醒信号 `readTick`（`wakeReader()` 在下一拍递增它，不再借 `submitted` 当事件总线，于是「值不变也要重读」的场合与「声明变了」的场合互不干扰）。核心不认识它们。
+- **读闸门在适配层**：`canRead(core, key)`（＝ `canPoll(core, key)` — 即 `core.isEligible(config, url, key)` — 或「还没有读取基准且浏览器可见」），两个出口共用这一个闸门。
   第二项只问「还没有读取时间」且浏览器**可见**（读 DOM 而不是那个 ref，避免把可见性登记成依赖）；环境（激活、配置有效、可见）
   在 `refresh` 的入口闸那一刻已经判过，之后失活仍允许它更新那一帧（§3.6 的角落）。失败出口与数据出口共用闸门，但**没有窗口**——
   失败不进画面只有一个原因：这一页此刻不是读者。
@@ -472,7 +472,7 @@ flowchart TD
 
 - watch 源读模块级的安装槽、`options.enabled.value`、`options.every.value` 与这一页的激活位（适配层自己的 `active`，合成进配置槽的 `present`）；两个 `Ref` 都是必填，改值即改配置，**换协调者也重新报一遍**——watcher 是 `flush: 'sync'`，所以装上那一刻（同一拍）这一页就把**当前**配置重新报给新协调者，不是旧协调者留下的那份槽。
 - 每页一份可变配置槽（`Config`），**唯一写入口**是核心的 `setConfig`：两个 `Ref` 与这一页的激活状态在一个同步块里
-  写进同一份槽；非法时只把 `every` 置 `null`（＝这一拍配置非法）——不取数、不自动刷新、不写结果表，修正后按当前资格恢复（ADR-51、ADR-66）。
+  写进同一份槽；**任一值非法时整组置无效**（`enabled`／`present` 清回初始值、`every` 置 `null`，因此下一拍读槽的人不会看到「三项曾同时成立」的残留）——不取数、不自动刷新、不写结果表，修正后按当前资格恢复（ADR-51、ADR-66）。
   槽是可变对象，外部看不到半更新，全靠「中间不调用任何会回到框架的东西」。
 - 读不到的开关绝不推断成 `false`：页面可以用 `computed` 表达暂态条件（例如
   `enabled: computed(() => store.ready && store.on)`），框架下一轮再读。
@@ -555,7 +555,7 @@ flowchart TD
 | 一次取数怎么走完 | `src/index.ts`（两个导出）→ `vue.ts` 的 `useRefresh` | **先看 §1.2 的五个支点、§2.2 数据流图与 §3.1 流程图**，再按 §3.8 的锚点落点查具体符号 |
 | 一个页面的配置槽怎么变成共享实例 | `RefreshCore.submit` → `RefreshCore.resourceOf`（扫描）→ `RefreshCore.resourceFor` | §2.1 对象关系、§2.4 所有权表、§1.5 第 8／10 条 |
 | 数据从结果表到画面怎么走 | `vue.ts` 的读取副作用（`publishData` / `publishFailure`） | **§3.3 流程图**、§2.7 读闸门、§2.4 两个出口 |
-| 隐藏、卸载、销毁之后还剩什么 | `RefreshCore.undeclare` / `RefreshCore.dispose`；适配层的 `visible` / `released` / `lastReadAt` | §3.4 命令表、§3.1 第一／二条、§1.5 第 9 条、§2.7 |
+| 隐藏、卸载、销毁之后还剩什么 | `RefreshCore.undeclare` / `RefreshCore.dispose`；适配层的 `visible` / `released` / `readState` | §3.4 命令表、§3.1 第一／二条、§1.5 第 9 条、§2.7 |
 
 ### A.2 读代码前先记住的七个词
 
@@ -567,7 +567,7 @@ flowchart TD
 | 当前执行 | 一个实例至多一个执行，它至多在队列或在执行之一；`controller === null` 同时表示没有执行与这次不算数 | `enqueue` 建把手与 `dequeue` 摘出（`enqueueDue` / `refresh`）／`startQueued` 起跑／`run` 的收尾与 `releaseIfUnused` 清回 `null` |
 | 刷新命令 | 一次显式刷新＝**给身份下的一句命令**：没有执行就插到队头；有执行且结果还没产出就用这一轮；结果已经写进表就记「还欠一轮」。**核心不记是谁点的**，同一轮内点几次合并成一次，没有回执 | `RefreshCore.refresh`（三条分支）、`Resource.produced` / `needsNext`、核心私有的 `enqueue`（插到队头）与收尾时的补一轮 |
 | 结果表 | 结果的唯一真值：一张复合键 Map（`identityOf(url, key)` → `ResultCell` 四字段）；页面按**已声明身份**读它，读到的就是那一份对象 | `useRefreshStore`（`store.ts`）：核心直接调 `sink.write` / `sink.fail` 写、`releaseIfUnused` 删、`display`／`failure` 读 |
-| 读者 | 本页此刻跟着结果表走：**有资格**，或还没有读取过且此刻浏览器可见（`lastReadAt === null && !document.hidden`）；不是读者就冻结画面。读者画面＝**写入驱动 ＋ 一个数 `lastReadAt`**（同一版不抄第二遍；新格距画面里那一版满一个本页 `every` 才换，一个窗口最多换一次） | **适配层的读闸门**：`core.isEligible(...) || (lastReadAt === null && !document.hidden)`（§2.7；核心不认识这个判定） |
+| 读者 | 本页此刻跟着结果表走：**有资格**，或还没有读取过且此刻浏览器可见（`readState.dataUpdatedAt === null && !document.hidden`）；不是读者就冻结画面。读者画面＝**写入驱动 ＋ 一处账本 `readState`**（同一版不抄第二遍；新格距画面里那一版满一个本页 `every` 才换，一个窗口最多换一次） | **适配层的读闸门**：`canRead(core, key)`（§2.7；核心不认识这个判定） |
 
 ### A.3 遇到 `if` 时按什么读
 
@@ -595,7 +595,7 @@ flowchart TD
 | `RefreshFailure` | 失败出口的形状：`{ error, failedAt }`；`null` ＝ 自最后一次成功以来没失败过（含从未失败） | §2.4 |
 | `handle.failure` | 本页看到的最近一次失败：与 `display` 共用读闸门，但不参与数据窗口、换一笔就发布 | §3.3 |
 | 协调者（`RefreshCore`） | 身份注册表、唯一唤醒 Timer、有序队列、并发槽；公开面只有 §2.4 那一行列出的 8 个命名操作 | §2.4、§3.2 |
-| `RefreshCore.setConfig` | 写这一页配置槽的三个值（非法只把 `every` 置 `null`）并重算一次到期与唤醒 | §3.6 |
+| `RefreshCore.setConfig` | 写这一页配置槽的三个值（**非法时整组置无效**）并重算一次到期与唤醒 | §3.6 |
 | `RefreshCore.submit` | 声明或更新身份：`resourceOf` 扫描 → 摘旧 → 挂新；相同身份幂等 | §3.5、§3.2 |
 | `RefreshCore.refresh` | 给身份下一句「现在再取一次」，返回「这句命令收下了没有」；三条分支 | §3.4 |
 | `RefreshCore.isEligible` | 这一页此刻有没有取数资格（现算）；核心只回答这一问，不回答「谁该跟随」 | §1.5 |
@@ -606,4 +606,5 @@ flowchart TD
 | `Resource` | 一个身份自己的状态与判定：`dueAt` / `eligibleEvery` / `isPresent` / `isEligible` / `isCurrent` / `hasExecution` / `isWanted` / `settle(at)`；不持有核心 | §2.4、§3.2 |
 | `prepareParameters` | 提交边界只执行一次：复制 → 值域检查 → 编码身份键 | §2.3 |
 | `useRefreshStore` | 结果表：`write` / `fail` / `remove`（写入端）、`read`（核心读取面的底层）、`list` / `size`（观测面） | §2.4、§2.8 |
+| 适配层内部：`canPoll` / `canRead` / `readState` / `readTick` | 取数资格（＝`isEligible`）／读者资格（取数资格或「还没有读取基准且可见」）／读取面的三个事实（数据那一版的身份与时刻、失败那一笔的身份）／强制唤醒信号 | §2.7、§3.3 |
 | 观测投影 `snapshot` | 只读计数投影（`resources` / `results` / `queued` / `running`），住在开发侧 `scripts/observe.ts`，不是包契约 | §2.8 |
